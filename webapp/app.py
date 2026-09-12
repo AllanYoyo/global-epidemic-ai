@@ -452,14 +452,28 @@ function evtsFiltered(){return EVENTS;}
 
 $('#genBtn').onclick=async()=>{
   const b=$('#genBtn');b.disabled=true;b.textContent='⏳ 生成中…';
-  const log=$('#genLog');log.style.display='block';log.textContent='正在重渲染今日日报(MD/Excel/Word)…';
+  const log=$('#genLog');log.style.display='block';
+  log.innerHTML='<b>正在重渲染今日日报(Markdown / Excel / Word)…</b>';
   try{
     const r=await fetch('/api/generate',{method:'POST'});
     const j=await r.json();
-    log.textContent=(j.log||'')+'\n\n'+(j.ok?'✅ 完成':'❌ 失败(返回码 '+j.returncode+')');
-    toast(j.ok?'日报已更新':'生成失败, 详见日志',j.ok);
-    if(j.ok)await refresh();
-  }catch(e){log.textContent='请求失败: '+e;toast('请求失败',false);}
+    if(j.ok){
+      const m=(j.log.match(/本期: ([^\n]+)/)||[])[1]||'';
+      log.innerHTML='<b style="color:#52c41a">✅ 日报已更新</b>'+(m?' — '+esc(m):'')+
+        '<details style="margin-top:6px"><summary style="cursor:pointer;color:#8493ab;font-size:12px">运行日志</summary>'+
+        '<pre style="white-space:pre-wrap;margin:6px 0 0;font:11px/1.5 Consolas,monospace;color:#9fb4d8">'+esc(j.log||'')+'</pre></details>';
+      toast('日报已更新',true);
+      await refresh();
+    }else{
+      log.innerHTML='<b style="color:#ff4d4f">❌ 生成失败(返回码 '+esc(j.returncode)+')</b>'+
+        '<details style="margin-top:6px" open><summary style="cursor:pointer;color:#8493ab;font-size:12px">运行日志</summary>'+
+        '<pre style="white-space:pre-wrap;margin:6px 0 0;font:11px/1.5 Consolas,monospace;color:#9fb4d8">'+esc(j.log||'')+'</pre></details>';
+      toast('生成失败, 展开"运行日志"查看原因',false);
+    }
+  }catch(e){
+    log.innerHTML='<b style="color:#ff4d4f">❌ 请求失败: '+esc(String(e))+'</b>';
+    toast('请求失败',false);
+  }
   b.disabled=false;b.textContent='⚙ 生成今日日报';
 };
 

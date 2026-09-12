@@ -1,0 +1,15 @@
+[
+  {
+    "disease_name_cn": "演示疫病甲",
+    "disease_name_en": "Demo Disease Alpha",
+    "category": "animal",
+    "country_cn": "演示国甲",
+    "country_en": "Demo Land Alpha",
+    "region": "North Province",
+    "event_date": "2026-09-10",
+    "source": {"tier": 1, "name": "演示官方通报", "url": "https://example.com/official-1", "publish_date": "2026-09-12", "quote": "演示官方确认演示国甲北部疫情(演示数据)"},
+    "verification_status": "verified",
+    "verification_notes": "演示核验: 官方源确认, 多源一致",
+    "checked_urls": ["https://example.com/official-1", "https://example.com/promed-demo-1"]
+  }
+]

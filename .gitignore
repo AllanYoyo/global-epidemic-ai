@@ -1,0 +1,17 @@
+# 疫情数据不入库(生产环境在 repo 外)
+data/raw/*
+data/events/*
+data/reports/*
+!data/raw/.gitkeep
+!data/events/.gitkeep
+!data/reports/.gitkeep
+database/
+logs/
+.selftest/
+
+# Python
+__pycache__/
+*.pyc
+
+# 环境变量
+.env

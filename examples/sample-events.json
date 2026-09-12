@@ -1,0 +1,42 @@
+[
+  {
+    "disease_name_cn": "演示疫病甲",
+    "disease_name_en": "Demo Disease Alpha",
+    "category": "animal",
+    "pathogen": "DemoVirus-A",
+    "host_species": ["家猪"],
+    "country_cn": "演示国甲",
+    "country_en": "Demo Land Alpha",
+    "region": "North Province",
+    "event_date": "2026-09-10",
+    "quantity": {"susceptible": 200, "cases": 35, "deaths": 28, "killed_or_disposed": 172},
+    "spread_status": "新发",
+    "source": {"tier": 2, "name": "演示专业源", "url": "https://example.com/promed-demo-1", "publish_date": "2026-09-11", "quote": "35 cases in domestic pigs, 28 deaths in North Province (演示数据)"},
+    "summary_cn": "演示国甲北部发生家猪演示疫病甲(演示数据)",
+    "raw_excerpt": "演示用原始文本: North Province reports pig disease..."
+  },
+  {
+    "disease_name_cn": "演示疫病甲",
+    "disease_name_en": "Demo Disease Alpha",
+    "category": "animal",
+    "host_species": ["家猪"],
+    "country_cn": "演示国甲",
+    "country_en": "Demo Land Alpha",
+    "region": "North Prov.",
+    "event_date": "2026-09-09",
+    "source": {"tier": 3, "name": "演示媒体", "url": "https://example.com/media-demo-2", "publish_date": "2026-09-10", "quote": "演示国甲北部报告猪病(演示数据)"},
+    "summary_cn": "演示国甲猪病媒体线索(演示数据)"
+  },
+  {
+    "disease_name_cn": "演示病毒病乙",
+    "disease_name_en": "Demo Wilt Beta",
+    "category": "plant",
+    "host_species": ["番茄"],
+    "country_cn": "演示国乙",
+    "country_en": "Demo Land Beta",
+    "region": "South Valley",
+    "event_date": "2026-09",
+    "source": {"tier": 1, "name": "演示植物保护组织", "url": "https://example.com/eppo-demo-3", "publish_date": "2026-09-05", "quote": "New findings of Demo Wilt Beta in tomato fields (演示数据)"},
+    "summary_cn": "演示国乙南部番茄检出演示病毒病乙(演示数据)"
+  }
+]

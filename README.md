@@ -41,7 +41,7 @@
 | 2 | `epidemic-extraction` | 千问把原始情报抽成标准事件(缺失填 null, 不编造) | `data/events/` + SQLite |
 | 3 | `epidemic-verification` | 官方出处核验 + 多源交叉验证 | verified / single_source / unverified / false_positive |
 | 4 | `china-risk-analysis` | 四维评分(商品关联/传入路径/后果/现有措施) | 对华风险等级 + 关注等级 |
-| 5 | `daily-report` | "五问"结构日报, 每条带来源链接 | MD + Excel/CSV |
+| 5 | `daily-report` | "五问"结构日报, 每条带来源链接 | MD + Word + Excel; 可推送企微/钉钉/邮箱 |
 
 ## 快速开始
 
@@ -66,11 +66,26 @@ python scripts/normalize.py --input data/raw/<日期>/extracted-events.json --ou
 python scripts/deduplicate.py                                                        # 去重合并
 python scripts/risk.py --list-pending                                                # ④ 待研判清单
 python scripts/risk.py --event-id <id> --level high --score 3.8 --focus 立即关注 --rationale "..."
-python scripts/report.py --excel                                                     # ⑤ 日报
+python scripts/report.py --excel --docx                                              # ⑤ 日报 + Word 简报
+python scripts/push_report.py --date $(date +%F)                                     # ⑥ 推送(企微/钉钉/邮箱)
+python webapp/app.py                                                                 # ⑦ 疫情雷达面板 :8000
 ```
 
 > 空库试跑可用演示数据(全部为虚构标注"演示数据"的事件):
 > `python scripts/normalize.py --input examples/sample-events.json --db` → `deduplicate` → `report`。
+
+## 界面与交付
+
+作品呈现分三层, Hermes 仍是引擎("前端是脸, Hermes 是发动机"):
+
+| 层 | 内容 | 入口 |
+|---|---|---|
+| Word 情报简报 | 五问速览 / 事件表(风险着色) / 研判综述 / 来源超链接的正式排版 | `report.py --docx` |
+| 办公推送 | "五问速览 + 立即关注"卡片推到企业微信 / 钉钉 / 邮箱 | `scripts/push_report.py`(渠道见 .env.example) |
+| 疫情雷达面板 | 地图打点(风险着色) + 事件库筛选 + 日报渲染/下载 + 一键生成 | `python webapp/app.py`, 默认 :8000 |
+
+依赖: `pip3 install -r requirements.txt`。面板为只读展示, "生成今日日报"按钮只重渲染报告产物;
+Agent 全流程(搜索→抽取→核验→研判)仍由 Hermes 执行。生产环境请经 Tailscale / 反向代理访问面板, 不要裸暴露公网。
 
 ### 部署到 VPS(一次性清单)
 
@@ -105,7 +120,10 @@ global-epidemic-ai/              本仓库(即 VPS 上的 repo/)
 ├── README.md
 ├── skills/                      5 个 Skill(Hermes 读取)
 ├── prompts/                     千问推理提示词(extraction / verification / risk-analysis)
-├── scripts/                     确定性管线(collect / normalize / deduplicate / risk / report)
+├── scripts/                     确定性管线(collect / normalize / deduplicate / risk / report
+│                                / report_docx / push_report)
+├── webapp/app.py                疫情雷达面板(Flask: 地图 / 事件库 / 日报 / 一键生成)
+├── requirements.txt
 ├── config/sources.yaml          情报源分级 + watchlist + 检索模板
 ├── templates/daily_report.md    日报模板
 ├── docs/event-schema.md         疫情事件数据模型(系统的"合同")
@@ -136,7 +154,7 @@ Hermes 自身配置(`~/.hermes/`:config.yaml / .env / skills / sessions / state.
 ## 路线图
 
 - **第一阶段(本仓库)**:5 个 Skill + 一句话触发的日报 ✅
-- **第二阶段**:cron 定时全线自动跑;WAHIS / EMPRES-i API 直连;日报推送(邮件/IM)
+- **第二阶段**:cron 定时全线自动跑;WAHIS / EMPRES-i API 直连。Word 简报 / 办公推送 / 雷达面板 ✅ 已交付(见「界面与交付」)
 - **第三阶段**:Word/PPT 周报;疫情地图;事件库趋势分析(复发预警、季节性)
 
 ## 面向大赛评审

@@ -42,6 +42,29 @@ def sort_key(e):
     return (FOCUS_ORDER.get(risk.get("focus"), 3), -(risk.get("score") or 0), str(e.get("event_date")))
 
 
+def collect(date, days_back, db_path=None):
+    """选取某期日报的数据: 当日新增 + 持续关注 + 全库(report_docx/push_report 复用)。"""
+    con = open_db(db_path)
+    all_events = load_events(con)
+    con.close()
+    if not all_events:
+        return None
+    new = [e for e in all_events
+           if e.get("verification_status") != "merged"
+           and str(e.get("first_seen", ""))[:10] == date]
+    lo, hi = _date(date) - datetime.timedelta(days=days_back), _date(date)
+    new_ids = {e["event_id"] for e in new}
+    active = [e for e in all_events
+              if e.get("verification_status") != "merged"
+              and e["event_id"] not in new_ids
+              and (e.get("china_risk") or {}).get("focus") in ("立即关注", "持续观察")
+              and e.get("event_date") and lo <= _date(e["event_date"]) <= hi]
+    new.sort(key=sort_key)
+    active.sort(key=sort_key)
+    return {"all": all_events, "new": new, "active": active,
+            "covered": sorted(new + active, key=sort_key)}
+
+
 def event_row(i, e):
     risk = e.get("china_risk") or {}
     place = str(e.get("country_cn") or "-") + (("·" + str(e["region"])) if e.get("region") else "")
@@ -60,32 +83,36 @@ def make_table(events):
     return "\n".join(lines) + "\n"
 
 
-def make_headline(new, active, date):
+def headline_items(new, active):
+    """五问速览的纯文本条目(Markdown 与 Word 简报共用)。"""
     if not new and not active:
-        return "- 今日无新增疫情事件, 也无需要持续关注的事件。"
+        return ["今日无新增疫情事件, 也无需要持续关注的事件。"]
     animals = sum(1 for e in new if e.get("category") == "animal")
     countries = sorted({e.get("country_cn") for e in new if e.get("country_cn")})
     diseases = sorted({e.get("disease_name_cn") for e in new if e.get("disease_name_cn")})
     risk = [(e.get("china_risk") or {}) for e in new]
     highs = [e for e in new + active
              if (e.get("china_risk") or {}).get("focus") == "立即关注"]
-    lines = [
-        "- **哪些疫情正在发生**: 今日新增 %d 起(动物 %d 起 / 植物 %d 起), 另有 %d 起持续关注中。" %
+    return [
+        "哪些疫情正在发生: 今日新增 %d 起(动物 %d 起 / 植物 %d 起), 另有 %d 起持续关注中。" %
         (len(new), animals, len(new) - animals, len(active)),
-        "- **发生在哪里**: 涉及 %d 个国家/地区: %s。" %
+        "发生在哪里: 涉及 %d 个国家/地区: %s。" %
         (len(countries), "、".join(countries[:6]) + ("等" if len(countries) > 6 else "") if countries else "—"),
-        "- **涉及动植物**: %s。" % ("、".join(diseases[:6]) + ("等" if len(diseases) > 6 else "") if diseases else "—"),
-        "- **是否可能影响我国**: 今日新增中 high %d 起 / medium %d 起 / low %d 起 / 未研判 %d 起。" % (
+        "涉及动植物: %s。" % ("、".join(diseases[:6]) + ("等" if len(diseases) > 6 else "") if diseases else "—"),
+        "是否可能影响我国: 今日新增中 high %d 起 / medium %d 起 / low %d 起 / 未研判 %d 起。" % (
             sum(1 for r in risk if r.get("level") == "high"),
             sum(1 for r in risk if r.get("level") == "medium"),
             sum(1 for r in risk if r.get("level") == "low"),
             sum(1 for r in risk if not r.get("level"))),
-        "- **值得立即关注**: %s" % (
+        "值得立即关注: %s" % (
             "; ".join("%s(%s·%s)" % (e.get("disease_name_cn"), e.get("country_cn"),
                                      (e.get("china_risk") or {}).get("level"))
                       for e in highs[:5]) if highs else "今日无。"),
     ]
-    return "\n".join(lines)
+
+
+def make_headline(new, active, date):
+    return "\n".join("- " + s for s in headline_items(new, active))
 
 
 def make_focus_detail(events):
@@ -202,28 +229,15 @@ def main():
     ap.add_argument("--date", default=datetime.date.today().isoformat(), help="日报日期, 默认今天")
     ap.add_argument("--days-back", type=int, default=14, help="持续关注事件的回看窗口(天)")
     ap.add_argument("--excel", action="store_true", help="同时导出 Excel(无 openpyxl 时降级 CSV)")
+    ap.add_argument("--docx", action="store_true", help="同时生成 Word 情报简报(无 python-docx 时跳过)")
     ap.add_argument("--db-path", help="SQLite 路径覆盖")
     args = ap.parse_args()
 
-    con = open_db(args.db_path)
-    all_events = load_events(con)
-    if not all_events:
+    data = collect(args.date, args.days_back, args.db_path)
+    if data is None:
         print("[提示] 事件库为空: 先运行 normalize.py 入库事件。")
         return 1
-
-    new = [e for e in all_events
-           if e.get("verification_status") != "merged"
-           and str(e.get("first_seen", ""))[:10] == args.date]
-    lo, hi = _date(args.date) - datetime.timedelta(days=args.days_back), _date(args.date)
-    new_ids = {e["event_id"] for e in new}
-    active = [e for e in all_events
-              if e.get("verification_status") != "merged"
-              and e["event_id"] not in new_ids
-              and (e.get("china_risk") or {}).get("focus") in ("立即关注", "持续观察")
-              and e.get("event_date") and lo <= _date(e["event_date"]) <= hi]
-    new.sort(key=sort_key)
-    active.sort(key=sort_key)
-    covered = sorted(new + active, key=sort_key)
+    new, active, covered = data["new"], data["active"], data["covered"]
 
     replacements = {
         "{{date}}": args.date,
@@ -236,7 +250,7 @@ def main():
         "{{focus_detail}}": make_focus_detail(covered),
         "{{risk_summary}}": make_risk_summary(covered),
         "{{unverified}}": make_open_items(covered),
-        "{{stats}}": make_stats(all_events, new, active),
+        "{{stats}}": make_stats(data["all"], new, active),
         "{{sources}}": make_sources(covered),
     }
     with open(TEMPLATE, encoding="utf-8") as f:
@@ -257,8 +271,14 @@ def main():
     print("[OK] %s" % md_path)
     if args.excel:
         print("[OK] %s" % export_table(base, covered))
+    if args.docx:
+        try:
+            import report_docx
+            print("[OK] %s" % report_docx.build(args.date, data))
+        except ImportError:
+            print("[提示] 未安装 python-docx, 跳过 Word 简报(pip install python-docx)")
     print("\n本期: 新增 %d 起, 持续关注 %d 起(事件库共 %d 条)。" %
-          (len(new), len(active), len(all_events)))
+          (len(new), len(active), len(data["all"])))
     return 0
 
 

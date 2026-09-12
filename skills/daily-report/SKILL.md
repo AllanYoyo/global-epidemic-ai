@@ -1,6 +1,6 @@
 ---
 name: daily-report
-description: 生成每日疫情情报日报(Markdown + Excel/CSV)。当用户要"生成今日疫情日报""来一份疫情简报""汇报今天全球疫情"时使用。按"五问"结构汇总当日新增与持续关注事件,每条附来源链接,输出到 data/reports/。
+description: 生成每日疫情情报日报(Markdown + Word 简报 + Excel)。当用户要"生成今日疫情日报""来一份疫情简报""汇报今天全球疫情"时使用。按"五问"结构汇总当日新增与持续关注事件, 每条附来源链接, 输出到 data/reports/, 并可推送到企业微信/钉钉/邮箱。
 ---
 
 # daily-report · 日报
@@ -18,22 +18,28 @@ description: 生成每日疫情情报日报(Markdown + Excel/CSV)。当用户要
 1. 生成:
 
    ```bash
-   python scripts/report.py --date <YYYY-MM-DD> --excel
+   python scripts/report.py --date <YYYY-MM-DD> --excel --docx
    ```
 
-   产出 `data/reports/<日期>-daily-report.md` + `.xlsx`(未安装 openpyxl 时自动降级为 `.csv`)。
+   产出 `data/reports/<日期>-daily-report.md` + `.xlsx`(无 openpyxl 时降级 CSV) + `.docx` Word 情报简报(无 python-docx 时跳过)。
 
-2. **交付前复核**(逐项确认):
+2. (可选)推送办公渠道:
+
+   ```bash
+   python scripts/push_report.py --date <YYYY-MM-DD>   # 企业微信/钉钉/邮箱, 未配置自动跳过; --dry-run 预览
+   ```
+
+3. **交付前复核**(逐项确认):
    - "立即关注"事件是否都有官方来源链接与研判依据?
    - 五问速览是否都能从正文找到答案?
    - 待核实栏是否如实反映未完成核验的事件?
    - 数字(事件数/国家数)与表内一致?
 
-3. 向用户交付:报告路径 + 一句话导读(今天最值得注意的 1-3 件事)。
+4. 向用户交付:报告路径 + 一句话导读(今天最值得注意的 1-3 件事)。
 
 ## 扩展(可选)
 
-- 需要 Word/PPT 版本时,依据 MD 日报另出,内容与来源保持一致。
+- 需要 PPT 周报时,依据事件库另出(Word 简报已内置于 `report.py --docx`),内容与来源保持一致。
 - 用户要"周报"时,把 `--date` 换成周期起点并调整标题,模板结构不变。
 
 ## 红线

@@ -126,7 +126,7 @@ def slim_event(e):
     }
 
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder=os.path.join(HERE, "static"), static_url_path="/static")
 
 
 @app.get("/")
@@ -222,15 +222,15 @@ def api_generate():
         return jsonify({"ok": False, "log": str(exc)}), 500
 
 
-INDEX_HTML = """<!doctype html>
+INDEX_HTML = r"""<!doctype html>
 <html lang="zh">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>疫见全球 · 疫情雷达</title>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
-<script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<link rel="stylesheet" href="/static/leaflet.css">
+<script src="/static/leaflet.js"></script>
+<script src="/static/marked.min.js"></script>
 <style>
 :root{--bg:#0b1220;--panel:#121a2b;--line:#1f2a44;--txt:#dbe4f3;--dim:#8493ab;
 --accent:#3b82f6;--high:#ff4d4f;--med:#faad14;--low:#52c41a;}
@@ -347,9 +347,13 @@ function renderStats(s){
 }
 
 function initMap(){
+  if(typeof L==='undefined'){
+    $('#map').innerHTML='<div style="padding:40px;color:#8493ab">Leaflet 未加载: 请确认服务器 webapp/static/ 存在且未被拦截(刷新或查看浏览器控制台)</div>';
+    return;
+  }
   MAP=L.map('map',{center:[28,45],zoom:2,worldCopyJump:true,minZoom:2});
-  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{
-    maxZoom:18,attribution:'© OpenStreetMap · © CARTO'}).addTo(MAP);
+  L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',{
+    maxZoom:16,attribution:'Tiles © Esri — Esri, HERE, Garmin, USGS, NGA'}).addTo(MAP);
   MARKERS=L.layerGroup().addTo(MAP);
   MAP_READY=true;
 }
@@ -426,7 +430,9 @@ async function loadReports(){
   $('#reportList').querySelectorAll('div[data-name]').forEach(d=>d.onclick=()=>{
     $('#reportList').querySelectorAll('div').forEach(x=>x.classList.remove('on'));
     d.classList.add('on');
-    fetch('/api/report/'+d.dataset.name).then(r=>r.text()).then(t=>{$('#mdView').innerHTML=marked.parse(t);});
+    fetch('/api/report/'+d.dataset.name).then(r=>r.text()).then(t=>{
+      $('#mdView').innerHTML=window.marked?marked.parse(t):'<pre style="white-space:pre-wrap">'+esc(t)+'</pre>';
+    });
   });
   if(mds.length)$('#reportList').querySelector('div[data-name]').click();
 }
@@ -439,7 +445,8 @@ function toast(msg,ok){
 
 async function refresh(){
   const [s,ev]=await Promise.all([jget('/api/summary'),jget('/api/events')]);
-  renderStats(s);EVENTS=ev;renderMap(evtsFiltered());renderTable();
+  renderStats(s);EVENTS=ev;renderTable();
+  try{renderMap(evtsFiltered());}catch(err){console.warn('map error',err);}
 }
 function evtsFiltered(){return EVENTS;}
 

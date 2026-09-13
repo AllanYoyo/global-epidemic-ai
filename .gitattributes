@@ -1,0 +1,7 @@
+# 统一换行符: 脚本类文件强制 LF(VPS 上直接可执行)
+* text=auto
+*.sh text eol=lf
+*.py text eol=lf
+*.md text
+*.yaml text
+*.example text

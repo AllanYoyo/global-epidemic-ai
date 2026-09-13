@@ -133,15 +133,20 @@ def main():
     ap.add_argument("--date", default=datetime.date.today().isoformat())
     ap.add_argument("--days-back", type=int, default=14)
     ap.add_argument("--db-path", help="SQLite 路径覆盖")
+    ap.add_argument("--message", help="发送自定义提醒文本(跳过日报汇总, 供 run_scan.sh 等调用)")
     ap.add_argument("--dry-run", action="store_true", help="只打印消息内容与目标渠道, 不发送")
     args = ap.parse_args()
 
-    data = report.collect(args.date, args.days_back, args.db_path)
-    if data is None:
-        print("[提示] 事件库为空, 无可推送内容。")
-        return 1
-    text = brief_text(args.date, data)
-    docx = os.path.join(DATA_DIR, "reports", "%s-daily-report.docx" % args.date)
+    if args.message:
+        text = args.message
+        docx = None
+    else:
+        data = report.collect(args.date, args.days_back, args.db_path)
+        if data is None:
+            print("[提示] 事件库为空, 无可推送内容。")
+            return 1
+        text = brief_text(args.date, data)
+        docx = os.path.join(DATA_DIR, "reports", "%s-daily-report.docx" % args.date)
 
     channels = []
     if os.environ.get("WECHAT_WEBHOOK"):

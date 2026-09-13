@@ -11,7 +11,20 @@ description: 每日全球动植物疫情侦察。当用户要求"搜索/收集�
 
 ## 输入
 
-- `config/sources.yaml`:`watchlist`(病害清单)与 `search_queries`(检索模板)。
+- `config/sources.yaml`:`runs`(运行档位)、`sources`(各源 schedule 档位)、`watchlist`(core/general 分级)与 `search_queries`(检索模板)。
+
+## 运行档位(定时扫描时先按档位收敛范围)
+
+本技能可能由 `scripts/run_scan.sh am|pm` 定时触发。开工前先读 `runs` 定义, 按本次档位过滤检索范围:
+
+| 档位 | 检索源(schedule) | watchlist | 说明 |
+|---|---|---|---|
+| am 晨扫 | am 与 am_pm | core + general(全部) | 全量, 完整走五段流程 |
+| pm 晚扫 | 仅 am_pm | 仅 core | 增量, 完成后刷新当日日报 |
+| weekly | weekly | core + general | 每周一, 并入当次 am 一起跑 |
+| passive | 不主动检索 | – | 中文媒体等, 仅在核验时作交叉回溯 |
+
+用户口头触发且未提及档位时, 默认按 am 处理。
 
 ## 步骤
 

@@ -2,15 +2,23 @@
 # 疫见全球 · 情报源清单与病害关注表
 # 说明:
 #   - sources 供 global-epidemic-search Skill 使用, tier 越小越权威
-#   - watchlist 是每日例行搜索的病害清单(动物/植物), 持续扩充
+#   - 每个源带 schedule 运行档位(am/pm/weekly/passive), 由 crontab 双扫调度
+#   - watchlist 带 tier 分级(core=每轮必查, general=仅晨扫; 未标 tier 视为 general)
 #   - 所有 URL 是检索入口; 站点改版后由搜索重新定位, 不需要频繁维护本文件
 # ============================================================
 
+# ---- 运行档位: crontab 调用 scripts/run_scan.sh 触发 ----
+runs:
+  am:     {time: "06:30", desc: 全量晨扫, 产出: 日报+推送, sources: [am, am_pm], watchlist: [core, general]}
+  pm:     {time: "18:00", desc: 增量晚扫, 产出: 刷新当日日报, sources: [am_pm], watchlist: [core]}
+  weekly: {on: 每周一并入晨扫, sources: [weekly], watchlist: [core, general]}
+  passive: {desc: 不主动扫描, 仅作核验时的交叉回溯, sources: [passive]}
+
 watchlist:
   animal:
-    - {cn: 非洲猪瘟, en: African Swine Fever, abbrev: ASF}
-    - {cn: 高致病性禽流感, en: Highly pathogenic avian influenza, abbrev: HPAI}
-    - {cn: 口蹄疫, en: Foot-and-mouth disease, abbrev: FMD}
+    - {cn: 非洲猪瘟, en: African Swine Fever, abbrev: ASF, tier: core}
+    - {cn: 高致病性禽流感, en: Highly pathogenic avian influenza, abbrev: HPAI, tier: core}
+    - {cn: 口蹄疫, en: Foot-and-mouth disease, abbrev: FMD, tier: core}
     - {cn: 小反刍兽疫, en: Peste des petits ruminants, abbrev: PPR}
     - {cn: 结节性皮肤病, en: Lumpy skin disease, abbrev: LSD}
     - {cn: 经典猪瘟, en: Classical swine fever, abbrev: CSF}
@@ -27,6 +35,7 @@ watchlist:
     - {cn: 松材线虫病, en: Pine wilt disease, abbrev: PWD}
 
 # ---- 情报源分级: 1 官方(可直接支撑 verified) / 2 专业(需交叉) / 3 媒体(仅线索) ----
+# schedule 档位: am_pm=晨扫+晚扫 / am=仅晨扫 / weekly=每周一晨扫附加 / passive=不主动扫
 sources:
   # ========== Tier 1: 官方权威 ==========
   - id: woah-wahis
@@ -34,6 +43,7 @@ sources:
     url: https://wahis.woah.org/
     coverage: [animal]
     tier: 1
+    schedule: am_pm
     lang: [en, fr]
     method: browse
     notes: 重点看 Immediate notifications 与 Follow-up reports; 全量历史数据需注册 WAHIS API
@@ -42,6 +52,7 @@ sources:
     url: https://www.fao.org/global-animal-disease-information-system/en/
     coverage: [animal]
     tier: 1
+    schedule: am_pm
     lang: [en]
     method: browse
     notes: 有事件地图与导出; 与 WAHIS 通报高度重叠, 适合做交叉验证
@@ -50,6 +61,7 @@ sources:
     url: https://www.who.int/emergencies/disease-outbreak-news
     coverage: [human, zoonosis]
     tier: 1
+    schedule: am_pm
     lang: [en]
     method: browse
     notes: 关注人畜共患病(禽流感、裂谷热、猴痘等)对公共卫生与贸易的外溢影响
@@ -58,6 +70,7 @@ sources:
     url: https://www.fao.org/locusts/
     coverage: [plant]
     tier: 1
+    schedule: weekly
     lang: [en]
     method: browse
     notes: 沙漠蝗旬报/快报, 含迁移路线预测
@@ -66,6 +79,7 @@ sources:
     url: https://www.eppo.int/
     coverage: [plant]
     tier: 1
+    schedule: weekly
     lang: [en]
     method: browse
     notes: Reporting Service 植物有害生物新增/扩散通报, 更新及时, 植物疫情首选交叉源
@@ -74,6 +88,7 @@ sources:
     url: https://www.ippc.int/en/
     coverage: [plant]
     tier: 1
+    schedule: weekly
     lang: [en]
     method: browse
     notes: 关注紧急措施通知与 Phytosanitary Resources 更新
@@ -82,6 +97,7 @@ sources:
     url: https://www.pestalerts.org/
     coverage: [plant]
     tier: 1
+    schedule: weekly
     lang: [en, es]
     method: browse
     notes: 北美植物有害生物警报
@@ -90,6 +106,7 @@ sources:
     url: http://www.moa.gov.cn/
     coverage: [animal, plant, china]
     tier: 1
+    schedule: am_pm
     lang: [zh]
     method: browse
     notes: 国内动物疫情发布、植物检疫性有害生物名单动态
@@ -98,6 +115,7 @@ sources:
     url: http://www.customs.gov.cn/
     coverage: [china, measures]
     tier: 1
+    schedule: am_pm
     lang: [zh]
     method: browse
     notes: 检索"警示通报""禁止进口""检疫要求"; 是 china-risk-analysis 的关键输入(现有对华措施)
@@ -108,6 +126,7 @@ sources:
     url: https://promedmail.org/
     coverage: [animal, plant, human]
     tier: 2
+    schedule: am
     lang: [en]
     method: browse
     notes: 全球最早的疫病早期信号源之一, 植物疫情也有覆盖; 必须经 Tier 1 核验
@@ -116,6 +135,7 @@ sources:
     url: https://www.cidrap.umn.edu/
     coverage: [animal, human]
     tier: 2
+    schedule: am
     lang: [en]
     method: browse
     notes: 禽流感等人畜共患病跟踪报道质量高
@@ -124,6 +144,7 @@ sources:
     url: https://www.reuters.com/business/healthcare-pharmaceuticals/
     coverage: [animal, plant]
     tier: 2
+    schedule: am
     lang: [en]
     method: search
     notes: 通过新闻检索发现线索; 只作线索与交叉源, 不单独支撑 verified
@@ -134,6 +155,7 @@ sources:
     url: https://news.baidu.com/
     coverage: [animal, plant]
     tier: 3
+    schedule: passive
     lang: [zh]
     method: search
     notes: 仅作线索; 必须回溯到 Tier 1 / Tier 2 原始出处, 不得直接采信

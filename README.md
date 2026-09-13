@@ -111,6 +111,25 @@ python3 scripts/deduplicate.py && python3 scripts/report.py --date $(date +%F) -
 rm ../database/epidemic.db && rm -rf ../data/events/test ../data/reports/*
 ```
 
+### 定时双扫(晨 06:30 全量 / 晚 18:00 增量)
+
+频率与档位定义在 `config/sources.yaml` 的 `runs` 与各源 `schedule` 字段, 定时入口是 `scripts/run_scan.sh`:
+
+```bash
+# 1) 配置 Hermes 无头调用方式(~/.hermes/.env), 未配置时定时任务退化为"待执行提醒"推送
+echo 'HERMES_RUN_CMD=hermes run --prompt "{PROMPT}"' >> ~/.hermes/.env
+# 2) 安装定时任务(内容见 config/crontab.example)
+crontab -e   # 粘贴示例中两行; 确认服务器时区为 Asia/Shanghai
+# 3) 手动试跑一轮
+scripts/run_scan.sh am
+```
+
+| 档位 | 时间 | 检索源 | watchlist | 产出 |
+|---|---|---|---|---|
+| am 晨扫 | 每日 06:30 | am + am_pm | 全部(含 general) | 日报 + 推送 |
+| pm 晚扫 | 每日 18:00 | 仅 am_pm | 仅 core 核心病害 | 刷新当日日报 |
+| weekly | 每周一并入晨扫 | weekly(EPPO/IPPC/沙漠蝗等) | 全部 | — |
+
 > **注意**:与 Hermes 的会话工作目录请设在仓库根 `/opt/global-epidemic-ai/repo`,Skill 内引用的 `scripts/` `prompts/` `config/` 均为相对仓库根路径。
 
 ## 目录结构

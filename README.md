@@ -31,6 +31,7 @@
                                                 └── logs/
  VPS: Hermes(~/.hermes/) + 本仓库脚本 ←─ HTTPS/API ─→ 千问 DashScope
  情报源: WOAH(WAHIS) · FAO(EMPRES-i) · WHO(DON) · IPPC/EPPO/NAPPO · ProMED · 海关总署 · 农业农村部
+         + 40 余国官方检疫机构/行业媒体(来自《动物疫情信息参考网站.xlsx》, 详见 config/sources.yaml)
 ```
 
 ## 五个 Skill

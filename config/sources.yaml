@@ -160,6 +160,370 @@ sources:
     method: search
     notes: 仅作线索; 必须回溯到 Tier 1 / Tier 2 原始出处, 不得直接采信
 
+  # ========== 以下源自《动物疫情信息参考网站.xlsx》(2026-09 纳入) ==========
+  # ---- 中国: 措施与线索 ----
+  - id: cn-tbtsps
+    name: 中国技术贸易措施网(SPS/TBT通报)
+    url: http://www.tbtsps.cn/
+    coverage: [measures]
+    tier: 1
+    schedule: am
+    lang: [zh]
+    method: browse
+    notes: 进境动植物检疫措施与SPS通报查询; 与海关总署措施互为印证
+  - id: cn-foodmate
+    name: 食品伙伴网·国际新闻
+    url: http://news.foodmate.net/guoji/
+    coverage: [animal, plant, measures]
+    tier: 2
+    schedule: am
+    lang: [zh]
+    method: browse
+    notes: 聚合各国进出口食品/农产品检疫动态; 仅作线索, 回溯官方出处
+  - id: cn-cahec-std
+    name: 中国动物疫病标准委员会(标准名录)
+    url: https://std.cahec.cn/
+    coverage: [animal, china]
+    tier: 1
+    schedule: passive
+    lang: [zh]
+    method: browse
+    notes: 疫病名录/标准查询用, 非新闻源; watchlist 扩容时的权威依据
+  - id: cn-seafare
+    name: 中国渔业博览会(水产资讯)
+    url: http://www.seafare.com.cn/
+    coverage: [animal]
+    tier: 3
+    schedule: passive
+    lang: [zh]
+    method: browse
+    notes: 水产行业展会资讯, 信噪比低; 仅水生动物疫情线索时检索
+
+  # ---- 俄罗斯(陆地边境邻国, ASF/HPAI 前线) ----
+  - id: ru-fsvps
+    name: 俄罗斯联邦兽医和植物检疫监督局(Rosselkhoznadzor)
+    url: https://fsvps.gov.ru/ru/vse-soobshcheniya
+    coverage: [animal, plant]
+    tier: 1
+    schedule: am
+    lang: [ru]
+    method: browse
+    notes: 中俄边境动植物检疫官方源, 全部消息含动物/植物通报列表
+  - id: ru-rshn-khv
+    name: 俄罗斯远东兽医监督局(哈巴罗夫斯克/犹太州/马加丹)
+    url: https://rshn-khv-eao.ru/
+    coverage: [animal]
+    tier: 1
+    schedule: am
+    lang: [ru]
+    method: browse
+    notes: 与中国接壤的远东地区兽医通报, 对传入路径评估价值高
+  - id: ru-vetandlife
+    name: 俄罗斯畜牧业·兽医与生命(vetandlife)
+    url: https://vetandlife.ru/category/livestock/
+    coverage: [animal]
+    tier: 2
+    schedule: am
+    lang: [ru]
+    method: browse
+    notes: 俄畜牧兽医行业媒体; 仅作线索
+  - id: ru-piginfo
+    name: 俄罗斯猪信息网(piginfo.ru)
+    url: https://piginfo.ru/
+    coverage: [animal]
+    tier: 2
+    schedule: weekly
+    lang: [ru]
+    method: browse
+    notes: 俄猪业ASF跟踪; 仅作线索
+  - id: ru-tass
+    name: 塔斯社(TASS English)
+    url: https://tass.com/
+    coverage: [animal]
+    tier: 3
+    schedule: passive
+    lang: [en]
+    method: search
+    notes: 国家通讯社; 仅疫情大事件线索, 必须回溯官方出处
+
+  # ---- 欧洲(ASF/HPAI/LSD 活跃疫区与贸易伙伴) ----
+  - id: de-fli
+    name: 德国弗里德里希洛弗勒研究所(FLI TSIS 动物疾病信息系统)
+    url: https://www.tsis.fli.de/Reports/Info.aspx
+    coverage: [animal]
+    tier: 1
+    schedule: am
+    lang: [en, de]
+    method: browse
+    notes: 德国联邦动物卫生研究所疫情报告系统
+  - id: pl-wetgiw
+    name: 波兰兽医检验局(WetGIW)
+    url: https://www.wetgiw.gov.pl/
+    coverage: [animal]
+    tier: 1
+    schedule: am
+    lang: [pl]
+    method: browse
+    notes: 波兰是欧洲ASF主力疫区; Excel该行缺URL, 此处按机构域名补全(首次运行时人工点验)
+  - id: uk-daera
+    name: 英国北爱尔兰农业环境与农村事务部(DAERA)
+    url: https://www.daera-ni.gov.uk/
+    coverage: [animal]
+    tier: 1
+    schedule: am
+    lang: [en]
+    method: browse
+    notes: "Excel注疫区: BSE/SCRAPIE/SB/HPAI"
+  - id: no-mattilsynet
+    name: 挪威食品安全局
+    url: https://www.mattilsynet.no/language/english/
+    coverage: [animal]
+    tier: 1
+    schedule: weekly
+    lang: [en, no]
+    method: browse
+    notes: "Excel注疫区: BSE/SCRAPIE"
+  - id: ua-dpss
+    name: 乌克兰食品安全与消费者保护国家服务局
+    url: https://dpss.gov.ua/en
+    coverage: [animal]
+    tier: 1
+    schedule: weekly
+    lang: [en, uk]
+    method: browse
+    notes: "Excel注疫区: HPAI/ASF"
+  - id: rs-minpolj
+    name: 塞尔维亚农业与环境保护部(含兽医局)
+    url: http://www.minpolj.gov.rs/
+    coverage: [animal]
+    tier: 1
+    schedule: weekly
+    lang: [sr]
+    method: browse
+    notes: "Excel注疫区: ASF/HPAI/LSD; Excel中 vet.minpolj.gov.rs 实为塞兽医局域名(黑山行错位, 已并入此条)"
+  - id: me-gov
+    name: 黑山政府门户
+    url: http://www.gov.me/naslovna
+    coverage: [animal]
+    tier: 1
+    schedule: weekly
+    lang: [sr]
+    method: browse
+    notes: "Excel注疫区: HPAI/LSD"
+  - id: mk-mzsv
+    name: 北马其顿农业林业水利部
+    url: http://www.mzsv.gov.mk/
+    coverage: [animal]
+    tier: 1
+    schedule: weekly
+    lang: [mk]
+    method: browse
+    notes: "Excel注疫区: ND; Excel『圣马力诺|政府网|vlada.mk』行URL实为北马其顿政府, 已并入此条备注"
+  - id: ba-fbihvlada
+    name: 波黑联邦政府(动物疫情通报)
+    url: http://www.fbihvlada.gov.ba/bosanski/
+    coverage: [animal]
+    tier: 1
+    schedule: weekly
+    lang: [bs]
+    method: browse
+    notes: "Excel注疫区: AI; 政府门户需站内检索"
+  - id: az-afsa
+    name: 阿塞拜疆食品安全局(AFSA)
+    url: http://afsa.gov.az/
+    coverage: [animal]
+    tier: 1
+    schedule: weekly
+    lang: [az]
+    method: browse
+    notes: 里海周边ASF/HPAI观察; Excel给的是具体新闻页, 此处归一到媒体栏目首页
+  - id: by-belta
+    name: 白俄罗斯国家通讯社(英文版)
+    url: https://eng.belta.by/
+    coverage: [animal]
+    tier: 3
+    schedule: weekly
+    lang: [en]
+    method: search
+    notes: Excel标注ASF; belta为通讯社而非农业部, 仅作线索回溯白俄官方
+  - id: ua-112int
+    name: 112.international(乌克兰新闻)
+    url: https://112.international/
+    coverage: [animal]
+    tier: 3
+    schedule: passive
+    lang: [en]
+    method: search
+    notes: Excel中该行注HPAI/ASF; 新闻站, 仅线索
+  - id: sm-consiglio
+    name: 圣马力诺大议会(政府门户)
+    url: http://www.consigliograndeegenerale.sm/
+    coverage: [animal]
+    tier: 3
+    schedule: passive
+    lang: [it]
+    method: browse
+    notes: 微型国家, 低频观察; 检疫价值有限
+  - id: gi-gibraltar
+    name: 直布罗陀政府门户
+    url: https://www.gibraltar.gov.gi/
+    coverage: [animal]
+    tier: 3
+    schedule: passive
+    lang: [en]
+    method: browse
+    notes: 微型地区, 低频观察; 检疫价值有限
+
+  # ---- 亚太(邻国与主要贸易伙伴) ----
+  - id: jp-maff
+    name: 日本农林水产省
+    url: https://www.maff.go.jp/
+    coverage: [animal, plant]
+    tier: 1
+    schedule: am
+    lang: [ja]
+    method: browse
+    notes: HPAI/CSF 通报活跃; 邻国, 传入路径权重高
+  - id: kr-mafra
+    name: 韩国农林畜产食品部(新闻发布)
+    url: https://www.mafra.go.kr/mafra/293/subview.do
+    coverage: [animal]
+    tier: 1
+    schedule: am
+    lang: [ko]
+    method: browse
+    notes: HPAI/EHD(鹿流行性出血热)近年活跃; 邻国
+  - id: vn-mard
+    name: 越南农业与农村发展部
+    url: https://www.mard.gov.vn/Pages/default.aspx
+    coverage: [animal, plant]
+    tier: 1
+    schedule: am
+    lang: [vi]
+    method: browse
+    notes: 陆地边境邻国; ASF/HPAI 常年活跃
+  - id: tr-tarimorman
+    name: 土耳其农林部
+    url: https://www.tarimorman.gov.tr/
+    coverage: [animal]
+    tier: 1
+    schedule: weekly
+    lang: [tr]
+    method: browse
+    notes: FMD/LSD 地理通道国家
+  - id: au-agriculture
+    name: 澳大利亚农林渔业部
+    url: https://www.agriculture.gov.au/
+    coverage: [animal, plant]
+    tier: 1
+    schedule: am
+    lang: [en]
+    method: browse
+    notes: 主要贸易伙伴; 无疫国动向外溢参考价值高
+  - id: nz-beehive
+    name: 新西兰政府新闻发布(Beehive)
+    url: https://www.beehive.govt.nz/
+    coverage: [animal]
+    tier: 1
+    schedule: weekly
+    lang: [en]
+    method: browse
+    notes: 政府新闻总入口(非检疫专页), 站内检索疫情相关公告
+
+  # ---- 美洲 ----
+  - id: us-mauinews
+    name: 毛伊岛新闻(美国夏威夷地方媒体)
+    url: https://www.mauinews.com/news/community-news/
+    coverage: [animal]
+    tier: 3
+    schedule: passive
+    lang: [en]
+    method: search
+    notes: 地方社区新闻, 检疫价值低; 建议后续以 USDA APHIS 官方通报替换
+  - id: co-minagricultura
+    name: 哥伦比亚农业部
+    url: https://www.minagricultura.gov.co/paginas/default.aspx
+    coverage: [animal]
+    tier: 1
+    schedule: weekly
+    lang: [es]
+    method: browse
+    notes: FMD 历史疫区动态观察
+  - id: br-saude-mg
+    name: 巴西米纳斯吉拉斯州卫生部
+    url: https://www.saude.mg.gov.br/
+    coverage: [human, zoonosis]
+    tier: 2
+    schedule: weekly
+    lang: [pt]
+    method: browse
+    notes: 州级卫生部门, 人畜共患病线索; Excel给的是深层页, 归一到门户
+
+  # ---- 全球组织与行业媒体 ----
+  - id: wto-eping
+    name: WTO ePing(SPS/TBT 通报预警)
+    url: https://eping.wto.org/
+    coverage: [measures]
+    tier: 1
+    schedule: weekly
+    lang: [en]
+    method: browse
+    notes: 各成员动植物检疫措施通报官方平台; china-risk-analysis 的措施背景源
+  - id: ecdc
+    name: 欧洲疾病预防控制中心(ECDC)
+    url: https://www.ecdc.europa.eu/en
+    coverage: [human, zoonosis]
+    tier: 1
+    schedule: weekly
+    lang: [en]
+    method: browse
+    notes: 人畜共患病欧洲侧监测, 与 WHO DON 互为印证
+  - id: global-cattlesite
+    name: TheCattleSite(全球牛业)
+    url: https://www.thecattlesite.com/news/newshome.php
+    coverage: [animal]
+    tier: 2
+    schedule: am
+    lang: [en]
+    method: browse
+    notes: 牛病疫情行业跟踪; 仅作线索
+  - id: global-pigsite
+    name: ThePigSite(全球猪业)
+    url: https://www.thepigsite.com/
+    coverage: [animal]
+    tier: 2
+    schedule: am
+    lang: [en]
+    method: browse
+    notes: 猪病疫情行业跟踪; 仅作线索
+  - id: cn-feedtrade
+    name: 饲料行业信息网
+    url: https://www.feedtrade.com.cn/news/
+    coverage: [animal]
+    tier: 2
+    schedule: weekly
+    lang: [zh]
+    method: browse
+    notes: 偏市场行情; 仅疫病相关线索时采用
+  - id: cn-zhuwang
+    name: 中国养猪网
+    url: https://www.zhuwang.cc/
+    coverage: [animal]
+    tier: 2
+    schedule: weekly
+    lang: [zh]
+    method: browse
+    notes: 国内猪业疫病动态; 仅作线索, 回溯官方出处
+  - id: vet-frontiers
+    name: Frontiers in Veterinary Science(学术期刊)
+    url: https://www.frontiersin.org/journals/veterinary-science
+    coverage: [animal]
+    tier: 2
+    schedule: passive
+    lang: [en]
+    method: search
+    notes: 学术期刊, 不作事件来源; 研判时的病原背景资料用
+
 # ---- 每日例行检索模板; 占位符: {disease_en} {disease_cn} {country} {country_cn} {month_en_year} {year} ----
 search_queries:
   official:

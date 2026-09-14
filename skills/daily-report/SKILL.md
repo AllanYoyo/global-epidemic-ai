@@ -26,8 +26,11 @@ description: 生成每日疫情情报日报(Markdown + Word 简报 + Excel)。�
 2. (可选)推送办公渠道:
 
    ```bash
-   python scripts/push_report.py --date <YYYY-MM-DD>   # 企业微信/钉钉/邮箱, 未配置自动跳过; --dry-run 预览
+   python scripts/push_report.py --date <YYYY-MM-DD>   # 企业微信/钉钉/邮箱(SMTP), 未配置自动跳过; --dry-run 预览
    ```
+
+   用户要求"发邮件给…"/"邮件通知"时, 不走本脚本: 直接调用 Hermes 的 `tuta-webmail` 技能发送
+   (主题纯中文无 emoji, 正文用日报"五问"要点转纯文本; Tuta 免费版无附件, 需附件改用 SMTP 渠道)。
 
 3. **交付前复核**(逐项确认):
    - "立即关注"事件是否都有官方来源链接与研判依据?

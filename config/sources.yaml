@@ -13,6 +13,7 @@ runs:
   pm:     {time: "18:00", desc: 增量晚扫, 产出: 刷新当日日报, sources: [am_pm], watchlist: [core]}
   weekly: {on: 每周一并入晨扫, sources: [weekly], watchlist: [core, general]}
   passive: {desc: 不主动扫描, 仅作核验时的交叉回溯, sources: [passive]}
+  policy: {time: "07:30", desc: 政策变化扫(检疫/进出口管控动作), 产出: 政策日报, sources: [measures], watchlist: [core]}
 
 watchlist:
   animal:
@@ -469,6 +470,24 @@ sources:
     lang: [en]
     method: browse
     notes: 各成员动植物检疫措施通报官方平台; china-risk-analysis 的措施背景源
+  - id: usda-aphis
+    name: 美国农业部动植物卫生检验局(APHIS)
+    url: https://www.aphis.usda.gov/
+    coverage: [measures, animal, plant]
+    tier: 1
+    schedule: am
+    lang: [en]
+    method: browse
+    notes: 主要贸易伙伴的进出口管制公告与 Federal Orders; 政策变化监测重点源
+  - id: eu-sante-sers
+    name: 欧盟委员会卫生与食品安全总司(SANTE, SERS 紧急措施)
+    url: https://food.ec.europa.eu/animals/animal-diseases_en
+    coverage: [measures, animal]
+    tier: 1
+    schedule: am
+    lang: [en]
+    method: browse
+    notes: 欧盟动物疫病紧急措施与贸易限制公告(SERS); 政策变化监测重点源
   - id: ecdc
     name: 欧洲疾病预防控制中心(ECDC)
     url: https://www.ecdc.europa.eu/en
@@ -537,3 +556,22 @@ search_queries:
   china:
     - '"{disease_cn}" OR "{disease_en}" 海关总署 警示通报 禁止进口'
     - '"{disease_cn}" {country_cn} 出口 暂停'
+
+# ---- 政策变化监测检索模板(global-policy-search Skill / policy 分支) ----
+# 范围: 仅外国政府的动植物检疫管控政策变化。
+# 中国海关总署公告不作为政策记录采集 —— 对华口岸措施由 china-risk-analysis 按事件
+# 按需检索(search_queries.china), 这里重复收集没有增量价值。
+policy_queries:
+  sps:         # WTO SPS 通报(各成员措施变化官方渠道)
+    - 'site:eping.wto.org SPS emergency measure animal {month_en_year}'
+    - 'site:eping.wto.org SPS plant phytosanitary {month_en_year}'
+    - 'G/SPS/N "{disease_en}" OR "import suspension" {year}'
+  official:    # 重点伙伴官方检疫机构公告
+    - '"{country}" suspends imports livestock "animal health" {month_en_year}'
+    - '"{country}" lifts ban imports poultry OR beef OR pork {month_en_year}'
+    - 'site:aphis.usda.gov import ban OR suspension {month_en_year}'
+    - '"European Commission" SERS "emergency measures" animal health {month_en_year}'
+    - '"{country}" import suspension OR ban "{disease_en}" {month_en_year}'
+  reactive:    # 高关注疫情引发的他国连带反应(需疫情事件驱动)
+    - '"{disease_en}" "{country}" "suspends imports" OR "bans imports" {month_en_year}'
+    - '"{disease_en}" outbreak "{country}" trade ban beef OR pork OR poultry {month_en_year}'

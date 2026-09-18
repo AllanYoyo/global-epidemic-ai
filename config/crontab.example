@@ -11,3 +11,6 @@
 
 # 18:00 晚扫(增量: 官方源 + core 病害), 刷新当日日报
 0 18 * * * /opt/global-epidemic-ai/repo/scripts/run_scan.sh pm >> /opt/global-epidemic-ai/logs/cron.log 2>&1
+
+# 07:30 政策扫(各国动植物检疫/进出口管控政策变化), 产出政策日报
+30 7 * * * /opt/global-epidemic-ai/repo/scripts/run_scan.sh policy >> /opt/global-epidemic-ai/logs/cron.log 2>&1

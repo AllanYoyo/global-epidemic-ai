@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # 疫见全球 · 定时扫描入口(crontab 调用)
 #
-# 用法: run_scan.sh [am|pm]
-#   am  晨扫(全量, 建议 06:30): 完整五段流程, 产出日报并推送; 周一自动附加 weekly 档源
-#   pm  晚扫(增量, 建议 18:00): 仅官方源+核心病害, 完成后刷新当日日报
+# 用法: run_scan.sh [am|pm|policy]
+#   am     晨扫(全量, 建议 06:30): 完整五段流程, 产出日报并推送; 周一自动附加 weekly 档源
+#   pm     晚扫(增量, 建议 18:00): 仅官方源+核心病害, 完成后刷新当日日报
+#   policy 政策扫(建议 07:30): 各国动植物检疫/进出口管控政策变化, 产出政策日报
 #
 # Hermes 调用方式由环境变量 HERMES_RUN_CMD 指定(模板, {PROMPT} 为占位符), 例:
 #   HERMES_RUN_CMD='hermes run --prompt "{PROMPT}"'
@@ -20,7 +21,8 @@ PY="${PYTHON_BIN:-python3}"
 case "$MODE" in
   am) PROMPT="生成今日疫情日报" ;;
   pm) PROMPT="执行今日疫情晚扫增量: 仅检索 config/sources.yaml 中 schedule 含 pm 的官方源与 core 核心病害的新通报, 对今日新增事件完成抽取、核验、研判, 并刷新今日日报" ;;
-  *) echo "用法: $0 [am|pm]"; exit 2 ;;
+  policy) PROMPT="执行今日政策变化扫描: 用 global-policy-search 技能, 按 config/sources.yaml 的 policy_queries 检索海关总署、WTO ePing 与各国官方检疫机构的动植物检疫管控政策变化, 抽取为政策记录并完成核验与对华影响研判, 最后用 scripts/report.py --policy 生成今日政策日报" ;;
+  *) echo "用法: $0 [am|pm|policy]"; exit 2 ;;
 esac
 
 # 周一晨扫: 附加 weekly 档源(EPPO / IPPC / 沙漠蝗旬报等)

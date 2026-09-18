@@ -3,14 +3,18 @@
 > 让全球疫情信息,从"新闻"变成"风险情报"。
 > 多 Agent 疫情情报系统 —— 回答五个问题:
 > **哪些疫情正在发生?发生在哪里?涉及什么动植物?是否可能影响我国?哪些值得立即关注?**
+>
+> **policy 分支新增**:各国政府动植物检疫管控**政策变化**监测 —— 回答"各国政府因此做了什么"。
+> 只采集外国政府动作(暂停/恢复/放宽进口、SPS 通报、防疫管制);中国海关总署公告不作为政策记录
+> 采集,仍由 `china-risk-analysis` 按事件按需检索。
 
 ## 系统架构
 
 ```text
  你
- │  "生成今日疫情日报"
+ │  "生成今日疫情日报" / "生成今日政策日报"
  ↓
- Hermes Agent(总指挥, 依次调度 5 个 Skill)
+ Hermes Agent(总指挥, 依次调度各 Skill)
  │
  ├─① global-epidemic-search   检索官方/专业源, 原始情报带URL存档
  ├─② epidemic-extraction      千问抽取 → 标准疫情事件
@@ -18,8 +22,14 @@
  ├─④ china-risk-analysis      千问四维风险研判
  └─⑤ daily-report            日报 Markdown + Excel
  │
+ ┆ policy 分支(政策变化监测):
+ ├─①' global-policy-search    各国检疫/进出口管控政策变化侦察(外国政府动作)
+ ┆    · 按 prompts/policy-extraction.md 抽取为 record_type=policy 记录
+ ┆    · 按 prompts/policy-impact.md 研判对华影响(复用 china_risk 字段与 risk.py)
+ ┆    · scripts/report.py --policy 生成政策变化日报
+ │
  ↓
- 疫情事件库(JSON + SQLite) ← 每条事件可溯源到官方 URL
+ 事件库(JSON + SQLite, 一库两类: outbreak / policy) ← 每条可溯源到官方 URL
 ```
 
 ```text
@@ -32,6 +42,7 @@
  VPS: Hermes(~/.hermes/) + 本仓库脚本 ←─ HTTPS/API ─→ 千问 DashScope
  情报源: WOAH(WAHIS) · FAO(EMPRES-i) · WHO(DON) · IPPC/EPPO/NAPPO · ProMED · 海关总署 · 农业农村部
          + 40 余国官方检疫机构/行业媒体(来自《动物疫情信息参考网站.xlsx》, 详见 config/sources.yaml)
+ 政策分支源: 各国官方检疫机构公告 · WTO ePing SPS 通报 · USDA APHIS · 欧盟 SANTE(不含海关总署采集)
 ```
 
 ## 五个 Skill
@@ -43,6 +54,22 @@
 | 3 | `epidemic-verification` | 官方出处核验 + 多源交叉验证 | verified / single_source / unverified / false_positive |
 | 4 | `china-risk-analysis` | 四维评分(商品关联/传入路径/后果/现有措施) | 对华风险等级 + 关注等级 |
 | 5 | `daily-report` | "五问"结构日报, 每条带来源链接 | MD + Word + Excel; 可推送企微/钉钉/邮箱 |
+
+### policy 分支: 政策变化监测(`global-policy-search`)
+
+监测**外国政府**动植物检疫管控政策变化:进出口暂停/禁止/恢复/放宽、WTO ePing SPS 通报、
+封锁区划定与防疫管制等,判定动作方向(收紧/放松/调整/恢复)并研判对华影响。
+
+| 环节 | 说明 | 入口 |
+|---|---|---|
+| 侦察 | 按 `config/sources.yaml` 的 `policy_queries` 检索(不含海关总署采集) | `skills/global-policy-search` |
+| 抽取 | `record_type=policy` 记录, title/action_type/policy_domain/products/legal_basis | `prompts/policy-extraction.md` + `normalize.py` |
+| 研判 | 对华影响(复用 china_risk 字段与 `risk.py`) | `prompts/policy-impact.md` |
+| 日报 | 政策变化日报(速览/新增表/收紧详情/影响综述/watchlist 关联) | `python scripts/report.py --policy --excel` |
+| 定时 | `scripts/run_scan.sh policy`(建议每日 07:30, 见 `config/crontab.example`) | crontab |
+
+与疫情事件共用同一事件库与管线:同一 schema(`docs/event-schema.md`)、同一核验分级、
+同一雷达面板(事件库按类型筛选);去重不适用(政策靠稳定 event_id 幂等更新)。
 
 ## 快速开始
 
@@ -68,12 +95,14 @@ python scripts/deduplicate.py                                                   
 python scripts/risk.py --list-pending                                                # ④ 待研判清单
 python scripts/risk.py --event-id <id> --level high --score 3.8 --focus 立即关注 --rationale "..."
 python scripts/report.py --excel --docx                                              # ⑤ 日报 + Word 简报
+python scripts/report.py --policy --excel                                            # ⑤' 政策变化日报(policy 分支)
 python scripts/push_report.py --date $(date +%F)                                     # ⑥ 推送(企微/钉钉/邮箱)
 python webapp/app.py                                                                 # ⑦ 疫情雷达面板 :8000
 ```
 
 > 空库试跑可用演示数据(全部为虚构标注"演示数据"的事件):
-> `python scripts/normalize.py --input examples/sample-events.json --db` → `deduplicate` → `report`。
+> 疫情:`python scripts/normalize.py --input examples/sample-events.json --db` → `deduplicate` → `report`。
+> 政策:`python scripts/normalize.py --input examples/sample-policy-events.json --db` → `report --policy`。
 
 ## 界面与交付
 
@@ -130,6 +159,7 @@ scripts/run_scan.sh am
 | am 晨扫 | 每日 06:30 | am + am_pm | 全部(含 general) | 日报 + 推送 |
 | pm 晚扫 | 每日 18:00 | 仅 am_pm | 仅 core 核心病害 | 刷新当日日报 |
 | weekly | 每周一并入晨扫 | weekly(EPPO/IPPC/沙漠蝗等) | 全部 | — |
+| policy 政策扫 | 每日 07:30 | measures 源 + policy_queries | core | 政策变化日报 |
 
 > **注意**:与 Hermes 的会话工作目录请设在仓库根 `/opt/global-epidemic-ai/repo`,Skill 内引用的 `scripts/` `prompts/` `config/` 均为相对仓库根路径。
 
@@ -138,15 +168,17 @@ scripts/run_scan.sh am
 ```text
 global-epidemic-ai/              本仓库(即 VPS 上的 repo/)
 ├── README.md
-├── skills/                      5 个 Skill(Hermes 读取)
-├── prompts/                     千问推理提示词(extraction / verification / risk-analysis)
+├── skills/                      Skill(Hermes 读取): 5 个疫情 Skill + global-policy-search(policy 分支)
+├── prompts/                     千问推理提示词(extraction / verification / risk-analysis
+│                                / policy-extraction / policy-impact)
 ├── scripts/                     确定性管线(collect / normalize / deduplicate / risk / report
 │                                / report_docx / push_report)
 ├── webapp/app.py                疫情雷达面板(Flask: 地图 / 事件库 / 日报 / 一键生成)
 ├── requirements.txt
-├── config/sources.yaml          情报源分级 + watchlist + 检索模板
+├── config/sources.yaml          情报源分级 + watchlist + 检索模板(含 policy_queries)
 ├── templates/daily_report.md    日报模板
-├── docs/event-schema.md         疫情事件数据模型(系统的"合同")
+├── templates/policy_report.md   政策变化日报模板(policy 分支)
+├── docs/event-schema.md         事件数据模型(系统的"合同", 一库两类: outbreak/policy)
 ├── data/                        raw / events / reports(git 忽略, 仅保留目录骨架)
 └── .env.example
 ```
@@ -175,6 +207,7 @@ Hermes 自身配置(`~/.hermes/`:config.yaml / .env / skills / sessions / state.
 
 - **第一阶段(本仓库)**:5 个 Skill + 一句话触发的日报 ✅
 - **第二阶段**:cron 定时全线自动跑;WAHIS / EMPRES-i API 直连。Word 简报 / 办公推送 / 雷达面板 ✅ 已交付(见「界面与交付」)
+- **policy 分支**:各国政府动植物检疫政策变化监测(global-policy-search + 政策日报)✅
 - **第三阶段**:Word/PPT 周报;疫情地图;事件库趋势分析(复发预警、季节性)
 
 ## 检索范围扩容(今后迭代方向, 以跑通为前提)

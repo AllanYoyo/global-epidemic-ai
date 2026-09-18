@@ -108,7 +108,12 @@ def slim_event(e):
             lat, lon, coord_src = pos[0] + dlat, pos[1] + dlon, "country"
     src = e.get("source") or {}
     return {
-        "event_id": e.get("event_id"), "disease_name_cn": e.get("disease_name_cn"),
+        "event_id": e.get("event_id"),
+        "record_type": e.get("record_type") or "outbreak",
+        "title_cn": e.get("title_cn"), "title_en": e.get("title_en"),
+        "action_type": e.get("action_type"), "policy_domain": e.get("policy_domain"),
+        "products": e.get("products"),
+        "disease_name_cn": e.get("disease_name_cn"),
         "disease_name_en": e.get("disease_name_en"), "category": e.get("category"),
         "country_cn": e.get("country_cn"), "country_en": e.get("country_en"),
         "region": e.get("region"), "event_date": e.get("event_date"),
@@ -306,7 +311,8 @@ a{color:#7ab3ff;text-decoration:none} a:hover{text-decoration:underline}
 </section>
 <section id="tab-list" hidden>
   <div class="filters">
-    <select id="fCat"><option value="">全部类别</option><option value="animal">动物</option><option value="plant">植物</option></select>
+    <select id="fType"><option value="">全部类型</option><option value="outbreak">疫情事件</option><option value="policy">政策变化</option></select>
+    <select id="fCat"><option value="">全部类别</option><option value="animal">动物</option><option value="plant">植物</option><option value="policy">政策</option></select>
     <select id="fRisk"><option value="">全部风险</option><option value="high">高风险</option><option value="medium">中风险</option><option value="low">低风险</option><option value="none">未研判</option></select>
     <select id="fStatus"><option value="">全部核验状态</option><option value="verified">verified</option><option value="single_source">single_source</option><option value="unverified">unverified</option><option value="false_positive">false_positive</option></select>
     <select id="fDays"><option value="0">全部时间</option><option value="7">近7天</option><option value="30">近30天</option><option value="90">近90天</option></select>
@@ -360,10 +366,14 @@ function initMap(){
 
 function popupHtml(e){
   const rc=RISK_COLOR[e.risk_level===null||e.risk_level===undefined?'null':e.risk_level];
+  const isP=(e.record_type==='policy');
+  const title=isP?(e.title_cn||e.title_en||'（无标题）'):(e.disease_name_cn||'-');
+  const sub=isP?('🛃政策'+(e.action_type?' · '+e.action_type:'')):(e.disease_name_en||'');
   return '<div style="min-width:260px">'+
-   '<b style="font-size:14px">'+esc(e.disease_name_cn)+'</b> <span style="color:#8493ab">'+esc(e.disease_name_en)+'</span><br>'+
+   '<b style="font-size:14px">'+esc(title)+'</b> <span style="color:#8493ab">'+esc(sub)+'</span><br>'+
    esc(e.country_cn)+(e.region?(' · '+esc(e.region)):'')+' | '+esc(e.event_date)+
-   ' <span style="color:'+(e.category==='animal'?'#f59e0b':'#10b981')+'">'+(e.category==='animal'?'🐾动物':'🌱植物')+'</span><br>'+
+   ' <span style="color:'+(isP?'#60a5fa':(e.category==='animal'?'#f59e0b':'#10b981'))+'">'+
+   (isP?'🛃政策':(e.category==='animal'?'🐾动物':'🌱植物'))+'</span><br>'+
    chip(e.risk_level||'none','风险 '+(e.risk_level||'未研判'))+' '+
    (e.focus?chip(e.focus==='立即关注'?'focus':'watch',e.focus):'')+' '+
    chip('none',e.verification_status)+'<br>'+
@@ -390,10 +400,17 @@ function renderMap(evts){
 
 function renderTable(){
   const cat=$('#fCat').value,risk=$('#fRisk').value,st=$('#fStatus').value,
-        days=+$('#fDays').value,q=$('#fQ').value.trim().toLowerCase();
+        days=+$('#fDays').value,q=$('#fQ').value.trim().toLowerCase(),
+        typ=$('#fType').value;
   const limit=days?Date.now()-days*864e5:0;
   const rows=EVENTS.filter(e=>{
-    if(cat&&e.category!==cat)return false;
+    const rt=e.record_type||'outbreak';
+    if(typ&&rt!==typ)return false;
+    if(cat&&rt==='policy'){ // 政策记录: 按政策领域筛
+      if(cat!==e.category&&(cat!=='policy'||(e.category!=='policy')))return false;
+    }else if(cat&&rt==='outbreak'){
+      if(e.category!==cat)return false;
+    }
     const lv=e.risk_level||'none';
     if(risk&&lv!==risk)return false;
     if(st&&e.verification_status!==st)return false;
@@ -402,20 +419,29 @@ function renderTable(){
     return true;
   });
   const order={'立即关注':0,'持续观察':1,'常规记录':2};
-  rows.sort((a,b)=>(order[a.focus]??3)-(order[b.focus]??3)||((b.risk_score||0)-(a.risk_score||0)));
+  const act={'收紧':0,'调整':1,'放松':2,'恢复':3};
+  rows.sort((a,b)=>((act[a.action_type]??9)-(act[b.action_type]??9))||
+                   ((order[a.focus]??3)-(order[b.focus]??3))||((b.risk_score||0)-(a.risk_score||0)));
   $('#rowCount').textContent=rows.length+' 条';
-  $('#tbody').innerHTML=rows.map(e=>'<tr>'+
-    '<td><b>'+esc(e.disease_name_cn)+'</b> <span style="color:#8493ab">'+esc(e.disease_name_en)+'</span></td>'+
-    '<td>'+(e.category==='animal'?'🐾':'🌱')+'</td>'+
+  $('#tbody').innerHTML=rows.map(e=>{
+    const isP=(e.record_type==='policy');
+    const name=isP?(e.title_cn||e.title_en||'（无标题）'):(e.disease_name_cn||'-');
+    const nameEn=isP?(e.action_type||''):(e.disease_name_en||'');
+    const catCell=isP?'🛃政策':(e.category==='animal'?'🐾':'🌱');
+    const qtyCell=isP?esc((e.products||[]).join('、')):esc(JSON.stringify(e.quantity||{}));
+    return '<tr>'+
+    '<td><b>'+esc(name)+'</b> <span style="color:#8493ab">'+esc(nameEn)+'</span></td>'+
+    '<td>'+catCell+'</td>'+
     '<td>'+esc(e.country_cn)+(e.region?' · '+esc(e.region):'')+'</td>'+
     '<td>'+esc(e.event_date)+'</td>'+
-    '<td style="max-width:180px;overflow:hidden;text-overflow:ellipsis">'+esc(JSON.stringify(e.quantity||{}))+'</td>'+
+    '<td style="max-width:180px;overflow:hidden;text-overflow:ellipsis">'+qtyCell+'</td>'+
     '<td>'+chip('none',e.verification_status)+'</td>'+
     '<td>'+chip(e.risk_level||'none',(e.risk_score!=null?e.risk_score+' ':'')+(e.risk_level||'未研判'))+'</td>'+
     '<td>'+(e.focus?chip(e.focus==='立即关注'?'focus':'watch',e.focus):'-')+'</td>'+
     '<td>'+(e.source_url?'<a href="'+esc(e.source_url)+'" target="_blank">'+esc(e.source_name||'链接')+'</a>':'-')+
     (e.cross_count?' <span style="color:#8493ab">+'+e.cross_count+'</span>':'')+'</td>'+
-    '<td style="color:#8493ab">'+esc(e.first_seen)+'</td></tr>').join('');
+    '<td style="color:#8493ab">'+esc(e.first_seen)+'</td></tr>';
+  }).join('');
 }
 
 async function loadReports(){
@@ -484,7 +510,7 @@ document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{
   if(t.dataset.tab==='map'&&MAP_READY)MAP.invalidateSize();
   if(t.dataset.tab==='reports')loadReports();
 });
-['fCat','fRisk','fStatus','fDays'].forEach(id=>$('#'+id).onchange=renderTable);
+['fType','fCat','fRisk','fStatus','fDays'].forEach(id=>$('#'+id).onchange=renderTable);
 $('#fQ').oninput=renderTable;
 
 refresh();

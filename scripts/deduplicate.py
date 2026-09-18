@@ -6,6 +6,9 @@
 地区相近(完全相同/编辑相似度>=0.7/双方均为空)的事件合为一簇;
 保留"信息最全 + 来源最权威 + 核验等级最高"的一条, 其余标记 merged 并把来源并入主事件。
 
+政策变化记录(record_type=policy)不参与本合并: 其 event_id 已按
+"国家+领域+动作+标题"派生, 同一政策的修订入库即更新而非新建(见 normalize.py)。
+
 用法:
   python deduplicate.py --dry-run   # 只看合并计划, 不写库
   python deduplicate.py             # 执行合并(写 SQLite + 回写 data/events/)
@@ -103,7 +106,8 @@ def main():
     args = ap.parse_args()
 
     con = open_db(args.db_path)
-    events = [e for e in load_events(con) if e.get("verification_status") != "merged"]
+    events = [e for e in load_events(con)
+              if e.get("verification_status") != "merged" and e.get("record_type") != "policy"]
     clusters = cluster(events, args.days)
 
     plan, merged_count = [], 0

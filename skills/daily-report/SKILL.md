@@ -1,9 +1,9 @@
 ---
 name: daily-report
-description: 生成每日疫情情报日报(Markdown + Word 简报 + Excel)。当用户要"生成今日疫情日报""来一份疫情简报""汇报今天全球疫情"时使用。按"五问"结构汇总当日新增与持续关注事件, 每条附来源链接, 输出到 data/reports/, 并可推送到企业微信/钉钉/邮箱。
+description: 生成每日动植物检疫政策监测日报(Markdown + Word 简报 + Excel)。默认服务于 policy 分支: 当用户要"生成今日政策日报""汇总各国检疫政策变化"时使用;旧疫情日报用 --outbreak 显式触发。按政策变化、动作方向、对华影响与来源索引输出到 data/reports/, 并可推送到企业微信/钉钉/邮箱。
 ---
 
-# daily-report · 日报
+# daily-report · 政策监测日报
 
 ## 目标
 
@@ -18,10 +18,10 @@ description: 生成每日疫情情报日报(Markdown + Word 简报 + Excel)。�
 1. 生成:
 
    ```bash
-   python scripts/report.py --date <YYYY-MM-DD> --excel --docx
+   python scripts/report.py --policy --date <YYYY-MM-DD> --excel --docx
    ```
 
-   产出 `data/reports/<日期>-daily-report.md` + `.xlsx`(无 openpyxl 时降级 CSV) + `.docx` Word 情报简报(无 python-docx 时跳过)。
+   产出 `data/reports/<日期>-policy-report.md` + `.xlsx`(无 openpyxl 时降级 CSV) + `.docx` 政策监测 Word 简报(无 python-docx 时跳过)。
 
 2. (可选)推送办公渠道:
 

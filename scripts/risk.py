@@ -21,9 +21,11 @@ RISK_FIELDS = ["level", "score", "focus", "rationale",
 LEVELS = {"high", "medium", "low"}
 FOCUS = {"立即关注", "持续观察", "常规记录"}
 DIMS = {"commodity", "pathway", "impact", "measures"}
+POLICY_DIMS = {"trade", "biosecurity", "response", "alignment"}
 
 
-def validate_risk(r):
+def validate_risk(r, record_type="outbreak"):
+    allowed_dims = POLICY_DIMS if record_type == "policy" else DIMS
     errs = []
     if r.get("level") not in LEVELS:
         errs.append("level 必须是 high|medium|low")
@@ -34,8 +36,8 @@ def validate_risk(r):
         errs.append("score 必须在 0-5 之间")
     if not (r.get("rationale") or "").strip():
         errs.append("rationale 必填(必须能看出事实依据)")
-    if r.get("dimension_scores") and set(r["dimension_scores"]) - DIMS:
-        errs.append("dimension_scores 只允许 %s" % sorted(DIMS))
+    if r.get("dimension_scores") and set(r["dimension_scores"]) - allowed_dims:
+        errs.append("dimension_scores 只允许 %s" % sorted(allowed_dims))
     return errs
 
 
@@ -44,17 +46,19 @@ def write_back(con, event_id, risk):
     if not rows:
         print("[错误] 事件不存在: %s" % event_id)
         return False
-    errs = validate_risk(risk)
+    e = rows[0]
+    errs = validate_risk(risk, e.get("record_type") or "outbreak")
     if errs:
         print("[校验失败] %s: %s" % (event_id, "; ".join(errs)))
         return False
-    e = rows[0]
     risk = dict(risk)
     risk["scored_at"] = now()
     e["china_risk"] = risk
     e["updated_at"] = now()
     upsert(con, e)
-    print("[OK] %s  风险:%s(%s) %s" % (event_id, risk["level"], risk["score"], risk["focus"]))
+    label = e.get("title_cn") or e.get("title_en") or e.get("disease_name_en") or ""
+    print("[OK] %s  %s风险:%s(%s) %s" % (
+        event_id, (label + " ") if label else "", risk["level"], risk["score"], risk["focus"]))
     return True
 
 
@@ -78,9 +82,10 @@ def main():
         rows = [e for e in load_events(con, "verification_status = 'verified'")
                 if not e.get("china_risk")]
         for e in rows:
+            label = e.get("title_en") or e.get("disease_name_en") or e.get("summary_cn") or "（无标题）"
             print("%s  %s @ %s %s  %s" % (
-                e["event_id"], e.get("disease_name_en"), e.get("country_en"),
-                e.get("event_date"), (e.get("summary_cn") or "")[:40]))
+                e["event_id"], label, e.get("country_en"),
+                e.get("effective_date") or e.get("event_date"), (e.get("summary_cn") or "")[:40]))
         print("\n待研判 %d 条(verified 且无 china_risk)" % len(rows))
         return 0
 

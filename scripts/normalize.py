@@ -29,33 +29,50 @@ REQUIRED = ["disease_name_cn", "disease_name_en", "category", "country_cn",
 CATEGORIES = {"animal", "plant", "policy"}
 VERIF_STATUS = {"verified", "single_source", "unverified", "false_positive", "merged"}
 RECORD_TYPES = {"outbreak", "policy"}
+POLICY_ACTIONS = {"收紧", "放松", "调整", "恢复"}
 
 
 def now():
     return datetime.datetime.now().isoformat(timespec="seconds")
 
 
+def infer_record_type(e):
+    """默认生产口径为政策;含病名的旧 JSON 自动识别为疫情事件。"""
+    if e.get("record_type") in RECORD_TYPES:
+        return e["record_type"]
+    if e.get("category") == "policy" or any(e.get(k) for k in
+            ("title_cn", "title_en", "action_type", "policy_domain", "products")):
+        return "policy"
+    if e.get("disease_name_cn") or e.get("disease_name_en"):
+        return "outbreak"
+    return "policy"
+
+
 def is_policy(e):
-    """政策变化记录: record_type=policy 或 category=policy(两种写法均接受)。"""
-    return e.get("record_type") == "policy" or e.get("category") == "policy"
+    return infer_record_type(e) == "policy"
 
 
 def event_id_of(e):
     if is_policy(e):
-        # 政策记录: 同国同动作同政策领域视为一条(日期变更为新动作); id 保持稳定便于修订
+        products = e.get("products") or e.get("affected_products") or []
+        targets = e.get("target_countries") or e.get("affected_countries") or []
+        subject = e.get("policy_key") or "|".join([
+            str(e.get("disease_name_en") or "").strip().lower(),
+            ",".join(sorted(str(x).strip().lower() for x in products)),
+            ",".join(sorted(str(x).strip().lower() for x in targets)),
+            str(e.get("scope") or "").strip().lower(),
+        ])
         key = "|".join([
-            "policy",
-            str(e.get("country_en", "")).strip().lower(),
-            str(e.get("policy_domain") or e.get("category") or ""),
-            str(e.get("action_type") or "").strip().lower(),
-            str(e.get("title_en") or e.get("title_cn") or e.get("disease_name_en") or ""),
+            "policy", str(e.get("country_en", "")).strip().lower(),
+            str(e.get("policy_domain") or "").strip().lower(),
+            str(e.get("action_type") or "").strip().lower(), subject,
+            str(e.get("effective_date") or e.get("event_date") or "").strip(),
         ])
         return hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
     key = "|".join([
         str(e.get("disease_name_en", "")).strip().lower(),
         str(e.get("country_en", "")).strip().lower(),
-        str(e.get("event_date", "")),
-        str(e.get("region") or ""),
+        str(e.get("event_date", "")), str(e.get("region") or ""),
     ])
     return hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
 
@@ -63,22 +80,31 @@ def event_id_of(e):
 def validate(e):
     policy = is_policy(e)
     errs = []
+    if e.get("record_type") is not None and e["record_type"] not in RECORD_TYPES:
+        errs.append("record_type 必须为 outbreak|policy")
     if policy:
-        # 政策记录: 病名可缺(不针对单一病害的政策), 国家 + 日期 + 来源仍必填
-        errs += ["缺少必填字段 %s" % k for k in ("country_cn", "country_en", "event_date", "source")
-                 if not e.get(k)]
+        errs += ["缺少必填字段 %s" % k for k in
+                 ("country_cn", "country_en", "source") if not e.get(k)]
+        if not (e.get("event_date") or e.get("effective_date")):
+            errs.append("政策记录需要 event_date 或 effective_date")
+        if e.get("category") not in (None, "policy"):
+            errs.append("policy 记录的 category 必须为 policy, 政策领域请写入 policy_domain")
+        if e.get("action_type") and e["action_type"] not in POLICY_ACTIONS:
+            errs.append("action_type 必须为 收紧|放松|调整|恢复")
         if not (e.get("title_cn") or e.get("title_en") or e.get("summary_cn")):
             errs.append("政策记录需要 title_cn / title_en / summary_cn 至少其一")
     else:
         errs += ["缺少必填字段 %s" % k for k in REQUIRED if not e.get(k)]
-    if e.get("category") not in CATEGORIES:
-        errs.append("category 必须为 animal|plant|policy")
-    rt = e.get("record_type")
-    if rt is not None and rt not in RECORD_TYPES:
-        errs.append("record_type 必须为 outbreak|policy")
+        if e.get("category") not in ("animal", "plant"):
+            errs.append("outbreak 记录的 category 必须为 animal|plant")
     src = e.get("source")
     if not isinstance(src, dict) or not src.get("url"):
         errs.append("source.url 必填(可溯源是硬要求)")
+    if policy and isinstance(src, dict):
+        if not src.get("quote"):
+            errs.append("policy 记录的 source.quote 必填")
+        elif len(str(src["quote"])) > 120:
+            errs.append("source.quote 不得超过 120 字")
     if e.get("verification_status") and e["verification_status"] not in VERIF_STATUS:
         errs.append("verification_status 非法: %s" % e["verification_status"])
     return errs
@@ -86,7 +112,8 @@ def validate(e):
 
 def fill_defaults(e):
     policy = is_policy(e)
-    # 日期粒度: YYYY / YYYY-MM 补齐为当年1月1日 / 当月1日, 并记录精度
+    if policy:
+        e["event_date"] = e.get("effective_date") or e.get("event_date")
     d = str(e["event_date"]).strip()
     precision = e.get("date_precision")
     if len(d) == 4:
@@ -99,7 +126,11 @@ def fill_defaults(e):
 
     e["record_type"] = "policy" if policy else "outbreak"
     if policy:
-        e.setdefault("category", "policy")
+        e["category"] = "policy"
+        e.setdefault("policy_domain", "measures")
+        e.setdefault("action_type", "调整")
+        e.setdefault("policy_status", "生效中")
+        e.setdefault("effective_date", e["event_date"])
         e.setdefault("disease_name_cn", None)
         e.setdefault("disease_name_en", None)
     e.setdefault("region", None)
@@ -145,8 +176,11 @@ def upsert(con, e, merge=False):
     row = con.execute("SELECT payload FROM events WHERE event_id = ?", (e["event_id"],)).fetchone()
     if row and merge:
         old = json.loads(row[0])
-        patch = {k: v for k, v in e.items() if v not in (None, [], {})}
+        patch = {k: v for k, v in e.items()
+                 if v not in (None, [], {}) and k not in ("event_id", "first_seen")}
         e = dict(old, **patch)
+        e["event_id"] = old.get("event_id") or e.get("event_id")
+        e["first_seen"] = old.get("first_seen") or e.get("first_seen")
         e["updated_at"] = now()
     con.execute(
         "INSERT OR REPLACE INTO events VALUES (?,?,?,?,?,?,?,?,?,?,?)",

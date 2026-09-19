@@ -65,7 +65,7 @@
 | 侦察 | 按 `config/sources.yaml` 的 `policy_queries` 检索(不含海关总署采集) | `skills/global-policy-search` |
 | 抽取 | `record_type=policy` 记录, title/action_type/policy_domain/products/legal_basis | `prompts/policy-extraction.md` + `normalize.py` |
 | 研判 | 对华影响(复用 china_risk 字段与 `risk.py`) | `prompts/policy-impact.md` |
-| 日报 | 政策变化日报(速览/新增表/收紧详情/影响综述/watchlist 关联) | `python scripts/report.py --policy --excel` |
+| 日报 | 政策变化日报(速览/新增表/收紧详情/影响综述/病害与商品关联) | `python scripts/report.py --excel --docx`(默认) |
 | 定时 | `scripts/run_scan.sh policy`(建议每日 07:30, 见 `config/crontab.example`) | crontab |
 
 与疫情事件共用同一事件库与管线:同一 schema(`docs/event-schema.md`)、同一核验分级、
@@ -80,8 +80,8 @@
 cp -r skills/* ~/.hermes/skills/
 ```
 
-然后对话:**"生成今日疫情日报"** —— Hermes 按 ①→⑤ 依次调度。
-也可以分步执行,如"先核验今天的事件""评估一下德国猪病的对华风险"。
+然后对话:**"生成今日政策日报"** —— Hermes 按政策监测链路调度。
+旧疫情链路可显式说"生成今日疫情日报";也可以分步执行,如"先核验一条政策公告""评估这项政策对华贸易的影响"。
 
 ### 手动管线(调试 / 演示兜底)
 
@@ -94,15 +94,15 @@ python scripts/normalize.py --input data/raw/<日期>/extracted-events.json --ou
 python scripts/deduplicate.py                                                        # 去重合并
 python scripts/risk.py --list-pending                                                # ④ 待研判清单
 python scripts/risk.py --event-id <id> --level high --score 3.8 --focus 立即关注 --rationale "..."
-python scripts/report.py --excel --docx                                              # ⑤ 日报 + Word 简报
-python scripts/report.py --policy --excel                                            # ⑤' 政策变化日报(policy 分支)
-python scripts/push_report.py --date $(date +%F)                                     # ⑥ 推送(企微/钉钉/邮箱)
-python webapp/app.py                                                                 # ⑦ 疫情雷达面板 :8000
+python scripts/report.py --excel --docx                                              # ⑤ 政策日报 + Word/Excel(默认)
+python scripts/report.py --outbreak --excel --docx                                    # ⑤' 疫情日报兼容模式
+python scripts/push_report.py --date $(date +%F)                                     # ⑥ 推送政策日报(企微/钉钉/邮箱)
+python webapp/app.py                                                                 # ⑦ 政策监测面板 :8000
 ```
 
 > 空库试跑可用演示数据(全部为虚构标注"演示数据"的事件):
 > 疫情:`python scripts/normalize.py --input examples/sample-events.json --db` → `deduplicate` → `report`。
-> 政策:`python scripts/normalize.py --input examples/sample-policy-events.json --db` → `report --policy`。
+> 政策:`python scripts/normalize.py --input examples/sample-policy-events.json --db` → `report`(默认政策日报)。
 
 ## 界面与交付
 
@@ -110,9 +110,9 @@ python webapp/app.py                                                            
 
 | 层 | 内容 | 入口 |
 |---|---|---|
-| Word 情报简报 | 五问速览 / 事件表(风险着色) / 研判综述 / 来源超链接的正式排版 | `report.py --docx` |
-| 办公推送 | "五问速览 + 立即关注"卡片推到企业微信 / 钉钉 / 邮箱 | `scripts/push_report.py`(渠道见 .env.example) |
-| 疫情雷达面板 | 地图打点(风险着色) + 事件库筛选 + 日报渲染/下载 + 一键生成 | `python webapp/app.py`, 默认 :8000 |
+| Word 政策简报 | 政策变化速览 / 政策台账 / 收紧详情 / 对华影响 / 来源超链接 | `report.py --docx`(默认) |
+| 办公推送 | 政策变化卡片推到企业微信 / 钉钉 / 邮箱,可附 Word/Excel | `scripts/push_report.py`(渠道见 .env.example) |
+| 政策监测面板 | 国家级政策影响地图 + 政策台账筛选 + 日报渲染/下载 + 一键生成 | `python webapp/app.py`, 默认 :8000 |
 
 依赖: `pip3 install -r requirements.txt`。面板为只读展示, "生成今日日报"按钮只重渲染报告产物;
 Agent 全流程(搜索→抽取→核验→研判)仍由 Hermes 执行。生产环境请经 Tailscale / 反向代理访问面板, 不要裸暴露公网。

@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""生成 Word 情报简报(.docx): 与 Markdown 日报同源同数据, 面向转发/汇报的正式排版。
+"""生成政策监测/疫情兼容 Word 简报(.docx)。
 
 用法:
-  python report.py --date 2026-09-12 --docx     # 推荐: 与 MD/Excel 一键同出
-  python report_docx.py --date 2026-09-12       # 单独生成
-输出: data/reports/<date>-daily-report.docx
+  python report.py --date 2026-09-12 --docx       # 默认政策监测版
+  python report.py --outbreak --date 2026-09-12 --docx  # 疫情兼容版
+  python report_docx.py --date 2026-09-12
+输出: data/reports/<date>-policy-report.docx(默认)
 """
 import argparse
 import datetime
@@ -129,10 +130,10 @@ def _event_table(doc, events):
     return t
 
 
-def build(date, data=None, out_dir=None, db_path=None):
-    """生成 Word 简报; data 传 report.collect() 的结果, 为 None 时自行查询。"""
+def _build_outbreak(date, data=None, out_dir=None, db_path=None):
+    """生成疫情 Word 简报(兼容模式)。"""
     if data is None:
-        data = report.collect(date, 14, db_path)
+        data = report.collect(date, 14, db_path, record_type="outbreak")
     if data is None:
         raise SystemExit("[提示] 事件库为空: 先运行 normalize.py 入库事件。")
     new, active, covered = data["new"], data["active"], data["covered"]
@@ -230,6 +231,138 @@ def build(date, data=None, out_dir=None, db_path=None):
     path = os.path.join(out_dir, "%s-daily-report.docx" % date)
     doc.save(path)
     return path
+
+
+def _policy_table(doc, events):
+    cols = ["政策标题", "动作", "领域", "国家/地区", "商品/病害", "生效日期", "状态", "核验", "影响"]
+    t = doc.add_table(rows=1, cols=len(cols))
+    t.style = "Table Grid"
+    for i, c in enumerate(cols):
+        _cell_text(t.rows[0].cells[i], c, bold=True)
+    for e in events:
+        p = e.get("policy") or {}
+        risk = e.get("china_risk") or {}
+        title = e.get("title_cn") or e.get("title_en") or e.get("summary_cn") or "（无标题）"
+        domain = e.get("policy_domain") or "-"
+        subject = "、".join(e.get("products") or []) or e.get("disease_name_cn") or e.get("disease_name_en") or "-"
+        vals = [title, e.get("action_type") or "-", domain,
+                "%s%s" % (e.get("country_cn") or "-", ("·" + str(e["region"])) if e.get("region") else ""),
+                subject, e.get("effective_date") or e.get("event_date") or "-",
+                e.get("policy_status") or "生效中", e.get("verification_status") or "-",
+                RISK_TEXT.get(risk.get("level"), risk.get("level") or "未研判")]
+        row = t.add_row().cells
+        for i, v in enumerate(vals):
+            _cell_text(row[i], v)
+        fill = RISK_FILL.get(risk.get("level"))
+        if fill:
+            _shade(row[8], fill)
+    return t
+
+
+def _build_policy(date, data=None, out_dir=None, db_path=None):
+    """生成政策监测 Word 简报。"""
+    if data is None:
+        data = report.collect(date, 14, db_path, record_type="policy")
+    if data is None:
+        raise SystemExit("[提示] 政策库为空: 先运行 normalize.py 入库政策记录。")
+    new, active, covered = data["new"], data["active"], data["covered"]
+    doc = Document()
+    _para(doc, "全球动植物检疫政策监测日报", size=18, bold=True,
+          align=WD_ALIGN_PARAGRAPH.CENTER, space_after=2)
+    _para(doc, "疫见全球 · Government Phytosanitary & Animal Health Policy Monitor   |   %s   |   生成于 %s" % (
+        date, datetime.datetime.now().strftime("%Y-%m-%d %H:%M")),
+        size=9, color=GRAY, align=WD_ALIGN_PARAGRAPH.CENTER, space_after=10)
+
+    sec = 0
+    def _h(title):
+        nonlocal sec
+        sec += 1
+        _heading(doc, "%s、%s" % ("一二三四五六七八九十"[sec - 1], title))
+
+    _h("本期政策变化速览")
+    for item in report.policy_headline_items(new, active):
+        _bullet(doc, item)
+    _h("本期新增政策变化(%d 条)" % len(new))
+    _policy_table(doc, new)
+    if active:
+        _h("近期变动跟踪(%d 条)" % len(active))
+        _policy_table(doc, active)
+
+    _h("收紧与调整动作详情")
+    focus = [e for e in covered if e.get("action_type") in ("收紧", "调整")]
+    if not focus:
+        _para(doc, "本期无收紧或调整类政策变化。", color=GRAY)
+    for i, e in enumerate(focus, 1):
+        p = e.get("policy") or {}
+        risk = e.get("china_risk") or {}
+        title = e.get("title_cn") or e.get("title_en") or "（无标题）"
+        _para(doc, "%d. %s · %s(%s)" % (i, e.get("country_cn") or "-", title, e["event_id"]),
+              bold=True, size=11, space_after=2)
+        _bullet(doc, "动作: ", "%s → %s" % (e.get("prev_action") or "此前未注明", e.get("action_type") or "-"))
+        _bullet(doc, "摘要: ", e.get("summary_cn") or "见来源")
+        _bullet(doc, "领域/对象: ", "%s / %s" % (
+            e.get("policy_domain") or "-", "、".join(e.get("products") or []) or
+            e.get("disease_name_cn") or e.get("disease_name_en") or "未注明"))
+        _bullet(doc, "发布机构/法律依据: ", "%s / %s" % (
+            e.get("issuer_cn") or e.get("issuer_en") or "未注明", e.get("legal_basis") or "未注明"))
+        _bullet(doc, "生效/状态: ", "%s / %s" % (
+            e.get("effective_date") or e.get("event_date") or "未注明", e.get("policy_status") or "生效中"))
+        _bullet(doc, "对华影响: ", "%s(%s) — %s" % (
+            RISK_TEXT.get(risk.get("level"), risk.get("level") or "未研判"),
+            risk.get("score") if risk.get("score") is not None else "-", risk.get("rationale") or "待研判"))
+        pnode = doc.add_paragraph(style="List Bullet")
+        pnode.paragraph_format.space_after = Pt(3)
+        _run(pnode, "来源: ")
+        for s in [e.get("source")] + list(e.get("cross_sources") or []):
+            if isinstance(s, dict) and s.get("url"):
+                add_hyperlink(pnode, s["url"], s.get("name") or s["url"])
+                _run(pnode, "   ")
+
+    _h("对华影响研判综述")
+    judged = sorted([e for e in covered if e.get("china_risk")],
+                    key=lambda x: -((x.get("china_risk") or {}).get("score") or 0))
+    if not judged:
+        _para(doc, "本期暂无已完成对华影响研判的政策变化。", color=GRAY)
+    for e in judged:
+        r = e["china_risk"]
+        _bullet(doc, "%s(%s): " % (e.get("title_cn") or e.get("title_en") or "（无标题）", e.get("country_cn") or "-"),
+                "%s(%s) %s" % (RISK_TEXT.get(r.get("level"), r.get("level")),
+                               r.get("score"), r.get("rationale") or ""))
+
+    _h("待核实信息")
+    open_rows = [e for e in covered if e.get("verification_status") in ("unverified", "false_positive")
+                 or (e.get("verification_status") == "verified" and not e.get("china_risk"))]
+    if not open_rows:
+        _para(doc, "无待核实/待研判政策记录。", color=GRAY)
+    for e in open_rows:
+        st = e.get("verification_status")
+        tag = {"unverified": "未核验", "false_positive": "存疑"}.get(st, "待研判")
+        _bullet(doc, "[%s] " % tag,
+                "%s @ %s(%s): %s" % (e.get("title_cn") or e.get("title_en") or "（无标题）",
+                                     e.get("country_cn") or "-", e["event_id"], e.get("summary_cn") or "见来源"),
+                color=RED if st == "false_positive" else None)
+
+    _h("来源索引")
+    seen, idx = set(), 0
+    for e in covered:
+        for s in [e.get("source")] + list(e.get("cross_sources") or []):
+            if isinstance(s, dict) and s.get("url") and s["url"] not in seen:
+                seen.add(s["url"]); idx += 1
+                p = doc.add_paragraph(); p.paragraph_format.space_after = Pt(2)
+                _run(p, "%d. " % idx, size=9.5)
+                add_hyperlink(p, s["url"], "%s — 政策 %s" % (s.get("name") or s["url"], e["event_id"]))
+    _para(doc, "", space_after=8)
+    _para(doc, "声明: 本简报由 AI 辅助生成,所有政策变化附原始来源;核验状态与对华影响仅供情报参考,不构成决策或执法依据。中国海关总署等官方公告以正式发布为准。", size=8.5, color=GRAY)
+    out_dir = out_dir or os.path.join(DATA_DIR, "reports")
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, "%s-policy-report.docx" % date)
+    doc.save(path)
+    return path
+
+
+def build(date, data=None, out_dir=None, db_path=None, record_type="policy"):
+    return (_build_policy if record_type == "policy" else _build_outbreak)(
+        date, data=data, out_dir=out_dir, db_path=db_path)
 
 
 def main():

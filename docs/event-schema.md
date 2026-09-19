@@ -8,10 +8,10 @@
 
 | record_type | 含义 | 事件来源 | 专用 Prompt |
 |---|---|---|---|
-| `outbreak`(默认) | 疫情事件:发生了什么病、在哪里、多大范围 | `global-epidemic-search` | `prompts/extraction.md` |
+| `outbreak`(兼容) | 疫情事件:发生了什么病、在哪里、多大范围 | `global-epidemic-search` | `prompts/extraction.md` |
 | `policy` | 政策变化:外国政府对动植物检疫/进出口管控做了什么动作(仅外国政府;中国海关总署公告不采集,由 china-risk-analysis 按需检索) | `global-policy-search`(policy 分支) | `prompts/policy-extraction.md` |
 
-两类记录共用同一事件库、核验分级与 `china_risk` 研判(对政策记录含义为"对华影响"),按 `record_type` 区分;`record_type` 缺省视为 `outbreak`。
+两类记录共用同一事件库、核验分级与 `china_risk` 研判(对政策记录含义为"对华影响"),按 `record_type` 区分。生产入口默认写入 `policy`;旧 JSON 缺少 `record_type` 时由 normalize.py 按病名/政策字段兼容推断。
 
 ## 字段表(公共)
 
@@ -19,12 +19,12 @@
 |---|---|---|---|---|
 | event_id | string | 自动 | outbreak: sha1(病名EN\|国名EN\|event_date\|region) 前 12 位;policy: sha1("policy"\|国名EN\|policy_domain\|action_type\|标题) —— 同一政策修订入库即更新,不新建 | `a1b2c3d4e5f6` |
 | record_type | string | 自动 | `outbreak` / `policy` | policy |
-| category | string | ✅ | `animal` / `plant`;政策记录填 `policy` | animal |
+| category | string | ✅ | outbreak: `animal` / `plant`; policy: 标记 `policy`, 具体领域写 `policy_domain` | policy |
 | country_cn / country_en | string | ✅ | 国家(中/英) | 德国 / Germany |
 | region | string | – | 一级行政区(州/省) | Brandenburg |
 | event_date | string | ✅ | 发生/生效/公告日期;粒度不足自动补齐并写 date_precision | 2026-09-10 |
 | date_precision | string | 自动 | day / month / year | day |
-| source | object | ✅ | `tier`(1-3) / `name` / `url` / `publish_date` / `quote`(≤80 字原文) | 见下 |
+| source | object | ✅ | `tier`(1-3) / `name` / `url` / `publish_date` / `quote`(政策记录≤120字, outbreak按原文关键句) | 见下 |
 | cross_sources | object[] | – | 其他独立来源,结构同 source | – |
 | verification_status | string | 自动 | verified / single_source / unverified / false_positive / merged | unverified |
 | verification_notes | string | – | 核验结论一句话 | – |

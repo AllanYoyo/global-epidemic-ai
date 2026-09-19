@@ -3,13 +3,13 @@
 """生成每日情报日报(Markdown + Excel/CSV)。
 
 数据来自 SQLite 事件库, 模板为 templates/daily_report.md(占位符渲染)。
-默认渲染疫情事件(outbreak); --policy 切换为政策变化日报
+默认渲染政策变化; --outbreak 切换为疫情兼容日报
 (templates/policy_report.md, 只取 record_type=policy 的记录)。
 
 用法:
-  python report.py                      # 今天的疫情日报
-  python report.py --date 2026-09-12 --excel
-  python report.py --policy             # 今天各国动植物检疫政策变化日报
+  python report.py                      # 今天的政策监测日报(默认)
+  python report.py --date 2026-09-12 --excel --docx
+  python report.py --outbreak             # 疫情日报兼容模式
 
 输出: data/reports/<date>-daily-report.md (+ .xlsx 或 .csv)
       data/reports/<date>-policy-report.md
@@ -19,7 +19,10 @@ import csv
 import datetime
 import json
 import os
+import sys
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "templates"))
+from base import auto_fit_columns, auto_fit_row_heights, style_data_row, style_header_row
 from normalize import DATA_DIR, REPO, load_events, now, open_db
 TEMPLATE = os.path.join(REPO, "templates", "daily_report.md")
 POLICY_TEMPLATE = os.path.join(REPO, "templates", "policy_report.md")
@@ -51,7 +54,7 @@ def sort_key(e):
     return (FOCUS_ORDER.get(risk.get("focus"), 3), -(risk.get("score") or 0), str(e.get("event_date")))
 
 
-def collect(date, days_back, db_path=None, record_type="outbreak"):
+def collect(date, days_back, db_path=None, record_type="policy"):
     """选取某期日报的数据: 当日新增 + 持续关注 + 全库(report_docx/push_report 复用)。
 
     record_type: outbreak(默认, 疫情事件) / policy(政策变化记录)。
@@ -329,7 +332,7 @@ def make_policy_impact_summary(events):
 
 
 def make_policy_watchlist_diff(events):
-    """提示哪些政策可能影响 watchlist 病害的对华准入与措施(人工跟进出口供参考)。"""
+    """提示政策涉及的病害、商品和后续跟踪对象。"""
     lines = []
     for p in events:
         dis = p.get("disease_name_cn") or p.get("disease_name_en")
@@ -339,30 +342,33 @@ def make_policy_watchlist_diff(events):
         lines.append("- %s(%s) %s — %s: %s" % (
             dis, p.get("country_cn"), p.get("action_type") or "-",
             risk.get("level") or "未研判", p.get("summary_cn") or policy_title(p)[:40]))
-    return "\n".join(lines) + "\n" if lines else "_本期无与 watchlist 病害直接相关的政策变化。_\n"
+    return "\n".join(lines) + "\n" if lines else "_本期无记录明确关联病害或商品的政策变化。_\n"
 
 
-def export_table(base_path, events, record_type="outbreak"):
+def export_table(base_path, events, record_type="policy"):
+    def val(value):
+        return "未注明" if value in (None, "", [], {}) else value
+
     if record_type == "policy":
-        headers = ["event_id", "标题中文", "标题英文", "国家", "地区", "动作类型", "此前动作",
-                   "政策领域", "相关病害", "相关商品", "生效日期", "有效期末", "法律依据",
-                   "核验状态", "对华影响等级", "影响分", "关注等级", "影响依据", "一句话摘要",
-                   "来源名称", "来源URL"]
-        rows = [[e.get("event_id"), e.get("title_cn"), e.get("title_en"),
-                 e.get("country_cn"), e.get("region"), e.get("action_type"), e.get("prev_action"),
-                 e.get("policy_domain"),
-                 e.get("disease_name_cn") or e.get("disease_name_en"),
-                 ", ".join(e.get("products") or []),
-                 e.get("event_date"), e.get("effective_until"), e.get("legal_basis"),
-                 e.get("verification_status"),
-                 (e.get("china_risk") or {}).get("level"),
-                 (e.get("china_risk") or {}).get("score"),
-                 (e.get("china_risk") or {}).get("focus"),
-                 (e.get("china_risk") or {}).get("rationale"),
-                 e.get("summary_cn"),
-                 (e.get("source") or {}).get("name"), (e.get("source") or {}).get("url")]
-                for e in events]
-        sheet = "政策变化"
+        headers = ["记录ID", "政策标题", "英文标题", "动作类型", "政策领域", "发布国家/地区", "发布机构",
+                   "涉及国家/地区", "受影响商品", "关联病害", "适用范围", "发布日期", "生效日期", "有效期",
+                   "政策状态", "公告/法规编号", "核验状态", "对华影响等级", "影响分", "关注等级", "影响依据",
+                   "原文摘要", "来源名称", "来源URL", "来源层级", "抓取时间"]
+        rows = [[val(e.get("event_id")), val(e.get("title_cn")), val(e.get("title_en")),
+                 val(e.get("action_type")), val(e.get("policy_domain")), val(e.get("country_cn")),
+                 val(e.get("issuer_cn") or e.get("issuer_en")),
+                 "、".join(e.get("target_countries") or []) or val(None),
+                 "、".join(e.get("products") or []) or val(None),
+                 val(e.get("disease_name_cn") or e.get("disease_name_en")), val(e.get("scope")),
+                 val(e.get("published_date") or e.get("report_date") or (e.get("source") or {}).get("publish_date")),
+                 val(e.get("effective_date") or e.get("event_date")), val(e.get("effective_until")),
+                 val(e.get("policy_status") or "生效中"), val(e.get("legal_basis")), val(e.get("verification_status")),
+                 val((e.get("china_risk") or {}).get("level")), val((e.get("china_risk") or {}).get("score")),
+                 val((e.get("china_risk") or {}).get("focus")), val((e.get("china_risk") or {}).get("rationale")),
+                 val(e.get("summary_cn")), val((e.get("source") or {}).get("name")),
+                 val((e.get("source") or {}).get("url")), val((e.get("source") or {}).get("tier")),
+                 val(e.get("first_seen"))] for e in events]
+        sheet = "政策变化台账"
     else:
         headers = ["event_id", "病害中文", "病害英文", "类别", "病原", "宿主/作物", "国家", "地区",
                    "发生日期", "数量", "核验状态", "对华风险等级", "风险分", "关注等级",
@@ -382,12 +388,42 @@ def export_table(base_path, events, record_type="outbreak"):
         sheet = "疫情事件"
     try:
         from openpyxl import Workbook
+        from openpyxl.formatting.rule import FormulaRule
+        from openpyxl.styles import Alignment, Font, PatternFill
+        from openpyxl.utils import get_column_letter
         wb = Workbook()
+        wb.properties.title = "全球动植物检疫政策监测台账" if record_type == "policy" else "全球动植物疫情事件台账"
+        wb.properties.creator = "疫见全球"
         ws = wb.active
         ws.title = sheet
+        ws.freeze_panes = "A2"
+        ws.sheet_properties.pageSetUpPr.fitToPage = True
+        ws.page_setup.orientation = "landscape"
+        ws.page_setup.fitToWidth = 1
+        ws.page_setup.fitToHeight = 0
+        ws.print_title_rows = "1:1"
+        ws.page_margins.left = 0.25
+        ws.page_margins.right = 0.25
+        ws.page_margins.top = 0.5
+        ws.page_margins.bottom = 0.5
         ws.append(headers)
         for r in rows:
             ws.append(r)
+        style_header_row(ws, 1, 1, len(headers))
+        for idx in range(len(rows)):
+            style_data_row(ws, idx + 2, 1, len(headers), idx)
+        auto_fit_columns(ws, min_width=10, max_width=34)
+        auto_fit_row_heights(ws, header_row=1, data_start_row=2)
+        ws.auto_filter.ref = "A1:%s%d" % (get_column_letter(len(headers)), len(rows) + 1)
+        if rows:
+            ws.conditional_formatting.add("A2:%s%d" % (get_column_letter(len(headers)), len(rows) + 1),
+                FormulaRule(formula=['MOD(ROW(),2)=0'], fill=PatternFill("solid", fgColor="F7F7F5")))
+        if record_type == "policy":
+            status_col = headers.index("核验状态") + 1
+            action_col = headers.index("动作类型") + 1
+            for r in range(2, len(rows) + 2):
+                ws.cell(r, status_col).alignment = Alignment(horizontal="center", vertical="top", wrap_text=True)
+                ws.cell(r, action_col).alignment = Alignment(horizontal="center", vertical="top", wrap_text=True)
         path = base_path + ".xlsx"
         wb.save(path)
         return path
@@ -399,24 +435,26 @@ def export_table(base_path, events, record_type="outbreak"):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="生成每日情报日报(疫情事件或政策变化)")
+    ap = argparse.ArgumentParser(description="生成政策监测日报(默认)或疫情日报(兼容模式)")
     ap.add_argument("--date", default=datetime.date.today().isoformat(), help="日报日期, 默认今天")
-    ap.add_argument("--days-back", type=int, default=14, help="持续关注/近期变动的回看窗口(天)")
-    ap.add_argument("--policy", action="store_true",
-                    help="生成政策变化日报(record_type=policy), 模板 templates/policy_report.md")
+    ap.add_argument("--days-back", type=int, default=14, help="近期政策/事件的回看窗口(天)")
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--policy", action="store_true", help="政策监测日报(默认)")
+    mode.add_argument("--outbreak", action="store_true", help="疫情日报兼容模式")
     ap.add_argument("--excel", action="store_true", help="同时导出 Excel(无 openpyxl 时降级 CSV)")
-    ap.add_argument("--docx", action="store_true", help="同时生成 Word 情报简报(无 python-docx 时跳过; 仅疫情日报)")
+    ap.add_argument("--docx", action="store_true", help="同时生成 Word 简报(无 python-docx 时跳过)")
     ap.add_argument("--db-path", help="SQLite 路径覆盖")
     args = ap.parse_args()
 
-    rtype = "policy" if args.policy else "outbreak"
+    rtype = "outbreak" if args.outbreak else "policy"
+    policy_mode = rtype == "policy"
     data = collect(args.date, args.days_back, args.db_path, record_type=rtype)
     if data is None:
-        print("[提示] 事件库为空或无 %s 记录。" % ("政策变化" if args.policy else "疫情"))
+        print("[提示] 事件库为空或无 %s 记录。" % ("政策变化" if policy_mode else "疫情"))
         return 1
     new, active, covered = data["new"], data["active"], data["covered"]
 
-    if args.policy:
+    if policy_mode:
         replacements = {
             "{{date}}": args.date,
             "{{generated_at}}": now(),
@@ -468,16 +506,14 @@ def main():
     print("[OK] %s" % md_path)
     if args.excel:
         print("[OK] %s" % export_table(base, covered, record_type=rtype))
-    if args.docx and not args.policy:
+    if args.docx:
         try:
             import report_docx
-            print("[OK] %s" % report_docx.build(args.date, data))
+            print("[OK] %s" % report_docx.build(args.date, data, record_type=rtype))
         except ImportError:
             print("[提示] 未安装 python-docx, 跳过 Word 简报(pip install python-docx)")
-    elif args.docx and args.policy:
-        print("[提示] 政策日报暂无 Word 排版, 使用 --excel 导出表格。")
     print("\n本期: 新增 %d 条, 近期变动 %d 条(%s库共 %d 条)。" % (
-        len(new), len(active), "政策变化" if args.policy else "疫情事件", len(data["all"])))
+        len(new), len(active), "政策变化" if policy_mode else "疫情事件", len(data["all"])))
     return 0
 
 

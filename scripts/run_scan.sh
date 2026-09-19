@@ -19,9 +19,9 @@ PY="${PYTHON_BIN:-python3}"
 [ -f "$HOME/.hermes/.env" ] && . "$HOME/.hermes/.env"
 
 case "$MODE" in
-  am) PROMPT="生成今日疫情日报" ;;
-  pm) PROMPT="执行今日疫情晚扫增量: 仅检索 config/sources.yaml 中 schedule 含 pm 的官方源与 core 核心病害的新通报, 对今日新增事件完成抽取、核验、研判, 并刷新今日日报" ;;
-  policy) PROMPT="执行今日政策变化扫描: 用 global-policy-search 技能, 按 config/sources.yaml 的 policy_queries 检索海关总署、WTO ePing 与各国官方检疫机构的动植物检疫管控政策变化, 抽取为政策记录并完成核验与对华影响研判, 最后用 scripts/report.py --policy 生成今日政策日报" ;;
+  am) PROMPT="生成今日政策监测日报: 仅检索外国政府动植物疫情管控政策变化, 完成政策抽取、核验、对华影响研判, 生成 Markdown+Excel+Word 政策日报并推送" ;;
+  pm) PROMPT="执行今日政策晚扫增量: 仅检索外国政府官方检疫/进出口政策变化, 对新增政策完成抽取、核验、影响研判, 并刷新政策日报" ;;
+  policy) PROMPT="执行今日政策变化扫描: 用 global-policy-search 技能, 按 config/sources.yaml 的 policy_queries 检索 WTO ePing 与外国官方检疫机构的动植物检疫管控政策变化(不采集中国海关总署政策), 抽取为政策记录并完成核验与对华影响研判, 最后用 scripts/report.py --policy --excel --docx 生成政策日报" ;;
   *) echo "用法: $0 [am|pm|policy]"; exit 2 ;;
 esac
 

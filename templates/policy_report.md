@@ -30,7 +30,7 @@
 
 {{impact_summary}}
 
-## 六、与 watchlist 病害相关的政策动向
+## 六、相关病害与商品的政策动向
 
 {{watchlist_diff}}
 

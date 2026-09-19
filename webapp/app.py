@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""疫见全球 · 疫情雷达面板(Flask, 只读展示 + 一键重渲染日报)。
+"""疫见全球 · 动植物检疫政策监测面板(Flask, 只读展示 + 一键生成政策日报)。
 
 用法:
   python webapp/app.py                                   # 默认 0.0.0.0:8000
   DASHBOARD_HOST=127.0.0.1 DASHBOARD_PORT=8080 python webapp/app.py
 
 页面三块:
-  疫情地图   事件按国家/坐标打点, 风险着色(红黄绿灰), 点气泡看详情与来源
-  事件库     按类别/风险/核验/时间筛选, 关键字搜索
-  日报       渲染当日 Markdown 日报, 下载 Word/Excel
+  政策影响地图   按发布/涉及国家标注政策影响范围,按对华影响着色
+  政策台账       按动作/领域/核验/影响/时间筛选,关键字搜索
+  政策日报       生成并查看 Markdown / Word / Excel 政策监测报告
 
-"生成今日日报"按钮: 重跑 scripts/report.py(--excel --docx) 重新渲染产物;
-Agent 全流程(搜索→抽取→核验→研判)仍由 Hermes 执行, 可用 RADAR_GENERATE_CMD 接管。
+默认接口与按钮只处理 record_type=policy;旧疫情数据通过 type=outbreak 或 --outbreak 显式访问。
+Agent 全流程(搜索→抽取→核验→研判)仍由 Hermes 执行,可用 RADAR_GENERATE_CMD 接管。
 
 安全: 面板只读; 生产环境建议经 Tailscale 或反向代理访问, 不要裸暴露公网。
 事件坐标: 优先用事件自带经纬度, 缺失时按国名查询 OpenStreetMap Nominatim 并缓存
@@ -112,13 +112,19 @@ def slim_event(e):
         "record_type": e.get("record_type") or "outbreak",
         "title_cn": e.get("title_cn"), "title_en": e.get("title_en"),
         "action_type": e.get("action_type"), "policy_domain": e.get("policy_domain"),
-        "products": e.get("products"),
+        "policy_status": e.get("policy_status"), "issuer_cn": e.get("issuer_cn"),
+        "issuer_en": e.get("issuer_en"), "target_countries": e.get("target_countries"),
+        "products": e.get("products"), "effective_date": e.get("effective_date"),
+        "effective_until": e.get("effective_until"), "legal_basis": e.get("legal_basis"),
+        "scope": e.get("scope"),
         "disease_name_cn": e.get("disease_name_cn"),
         "disease_name_en": e.get("disease_name_en"), "category": e.get("category"),
         "country_cn": e.get("country_cn"), "country_en": e.get("country_en"),
         "region": e.get("region"), "event_date": e.get("event_date"),
         "first_seen": str(e.get("first_seen", ""))[:10],
+        "published_date": e.get("published_date") or e.get("report_date") or (e.get("source") or {}).get("publish_date"),
         "quantity": e.get("quantity"), "host_species": e.get("host_species"),
+        "pathogen": e.get("pathogen"), "scope": e.get("scope"), "legal_basis": e.get("legal_basis"),
         "verification_status": e.get("verification_status"),
         "summary_cn": e.get("summary_cn"),
         "risk_level": risk.get("level"), "risk_score": risk.get("score"),
@@ -141,31 +147,42 @@ def index():
 
 @app.get("/api/summary")
 def api_summary():
-    events = report.collect(datetime.date.today().isoformat(), 3650)
+    # 政策监测为默认口径; ?type=outbreak 可查看旧疫情数据。
+    rtype = request.args.get("type", "policy")
+    if rtype not in ("policy", "outbreak"):
+        return jsonify({"error": "type must be policy or outbreak"}), 400
+    events = report.collect(datetime.date.today().isoformat(), 3650, record_type=rtype)
     if events is None:
-        return jsonify({"total": 0})
+        return jsonify({"record_type": rtype, "total": 0, "today_new": 0,
+                        "focus_now": 0, "high": 0, "unverified": 0,
+                        "tighten": 0, "relax": 0, "countries": 0})
     today = datetime.date.today().isoformat()
     all_e = [e for e in events["all"] if e.get("verification_status") != "merged"]
     covered = [e for e in all_e if str(e.get("first_seen", ""))[:10] == today]
+    countries = {e.get("country_cn") for e in all_e if e.get("country_cn")}
     return jsonify({
-        "total": len(all_e),
-        "today_new": len(covered),
-        "focus_now": sum(1 for e in all_e
-                         if (e.get("china_risk") or {}).get("focus") == "立即关注"),
-        "high": sum(1 for e in all_e
-                    if (e.get("china_risk") or {}).get("level") == "high"),
-        "unverified": sum(1 for e in all_e
-                          if e.get("verification_status") == "unverified"),
+        "record_type": rtype, "total": len(all_e), "today_new": len(covered),
+        "focus_now": sum(1 for e in all_e if (e.get("china_risk") or {}).get("focus") == "立即关注"),
+        "high": sum(1 for e in all_e if (e.get("china_risk") or {}).get("level") == "high"),
+        "unverified": sum(1 for e in all_e if e.get("verification_status") == "unverified"),
+        "tighten": sum(1 for e in all_e if e.get("action_type") == "收紧"),
+        "relax": sum(1 for e in all_e if e.get("action_type") in ("放松", "恢复")),
+        "countries": len(countries),
     })
 
 
 @app.get("/api/events")
 def api_events():
     from normalize import load_events, open_db
+    rtype = request.args.get("type", "policy")
+    if rtype not in ("policy", "outbreak", "all"):
+        return jsonify({"error": "type must be policy, outbreak, or all"}), 400
     con = open_db()
     all_events = load_events(con)
     con.close()
-    out = [slim_event(e) for e in all_events if e.get("verification_status") != "merged"]
+    out = [slim_event(e) for e in all_events
+           if e.get("verification_status") != "merged"
+           and (rtype == "all" or (e.get("record_type") or "outbreak") == rtype)]
     return jsonify(out)
 
 
@@ -217,7 +234,7 @@ def api_generate():
         else:
             p = subprocess.run(
                 [sys.executable, os.path.join(REPO, "scripts", "report.py"),
-                 "--date", date, "--excel", "--docx"],
+                 "--policy", "--date", date, "--excel", "--docx"],
                 capture_output=True, text=True, encoding="utf-8", errors="replace",
                 timeout=600, cwd=REPO)
         log = (p.stdout or "") + ("\n" + p.stderr if p.stderr and p.stderr.strip() else "")
@@ -232,7 +249,7 @@ INDEX_HTML = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>疫见全球 · 疫情雷达</title>
+<title>疫见全球 · 动植物检疫政策监测</title>
 <link rel="stylesheet" href="/static/leaflet.css">
 <script src="/static/leaflet.js"></script>
 <script src="/static/marked.min.js"></script>
@@ -286,15 +303,15 @@ a{color:#7ab3ff;text-decoration:none} a:hover{text-decoration:underline}
 </head>
 <body>
 <header>
-  <div class="brand"><span class="dot"></span>疫见全球 · 全球动植物疫情智能情报雷达
-    <div class="sub">让全球疫情信息，从"新闻"变成"风险情报"</div></div>
+  <div class="brand"><span class="dot"></span>疫见全球 · 全球动植物检疫政策监测
+    <div class="sub">只跟踪外国政府动植物疫情管控政策变化</div></div>
   <div class="stats" id="stats"></div>
-  <button class="primary" id="genBtn">⚙ 生成今日日报</button>
+  <button class="primary" id="genBtn">⚙ 生成今日政策日报(Word / Excel / Markdown)</button>
 </header>
 <nav>
-  <button class="tab active" data-tab="map">🗺 疫情地图</button>
-  <button class="tab" data-tab="list">📋 事件库</button>
-  <button class="tab" data-tab="reports">📄 日报</button>
+  <button class="tab active" data-tab="map">🗺 政策影响地图</button>
+  <button class="tab" data-tab="list">📋 政策台账</button>
+  <button class="tab" data-tab="reports">📄 政策日报</button>
 </nav>
 <main>
 <section id="tab-map">
@@ -313,16 +330,17 @@ a{color:#7ab3ff;text-decoration:none} a:hover{text-decoration:underline}
   <div class="filters">
     <select id="fType"><option value="">全部类型</option><option value="outbreak">疫情事件</option><option value="policy">政策变化</option></select>
     <select id="fCat"><option value="">全部类别</option><option value="animal">动物</option><option value="plant">植物</option><option value="policy">政策</option></select>
-    <select id="fRisk"><option value="">全部风险</option><option value="high">高风险</option><option value="medium">中风险</option><option value="low">低风险</option><option value="none">未研判</option></select>
+    <select id="fRisk"><option value="">全部影响</option><option value="high">高影响</option><option value="medium">中影响</option><option value="low">低影响</option><option value="none">未研判</option></select>
+    <select id="fAction"><option value="">全部动作</option><option value="收紧">收紧</option><option value="放松">放松</option><option value="调整">调整</option><option value="恢复">恢复</option></select>
     <select id="fStatus"><option value="">全部核验状态</option><option value="verified">verified</option><option value="single_source">single_source</option><option value="unverified">unverified</option><option value="false_positive">false_positive</option></select>
     <select id="fDays"><option value="0">全部时间</option><option value="7">近7天</option><option value="30">近30天</option><option value="90">近90天</option></select>
-    <input type="text" id="fQ" placeholder="搜索 病害/国家/关键词…">
+    <input type="text" id="fQ" placeholder="搜索政策/国家/机构/商品…">
     <span id="rowCount" style="color:var(--dim);font-size:12px"></span>
   </div>
   <div style="overflow:auto;max-height:calc(100vh - 230px);border:1px solid var(--line);border-radius:10px">
     <table><thead><tr>
-      <th>病害</th><th>类别</th><th>国家/地区</th><th>发生日期</th><th>数量</th>
-      <th>核验</th><th>对华风险</th><th>关注</th><th>来源</th><th>入库</th>
+      <th>政策标题</th><th>动作</th><th>领域</th><th>国家/地区</th><th>商品/病害</th>
+      <th>生效日期</th><th>政策状态</th><th>核验</th><th>对华影响</th><th>来源</th>
     </tr></thead><tbody id="tbody"></tbody></table>
   </div>
 </section>
@@ -344,11 +362,13 @@ let EVENTS=[],MAP=null,MARKERS=null,MAP_READY=false;
 async function jget(u){const r=await fetch(u);return r.json();}
 
 function renderStats(s){
+  const policy=(s.record_type==='policy');
   $('#stats').innerHTML=
-   '<span class="chip">事件库<b>'+s.total+'</b></span>'+
+   '<span class="chip">政策记录<b>'+s.total+'</b></span>'+
    '<span class="chip">今日新增<b>'+s.today_new+'</b></span>'+
-   '<span class="chip">立即关注<b style="color:#ff7875">'+s.focus_now+'</b></span>'+
-   '<span class="chip">高风险<b style="color:#ff4d4f">'+s.high+'</b></span>'+
+   '<span class="chip">收紧<b style="color:#ff7875">'+(s.tighten||0)+'</b></span>'+
+   '<span class="chip">放松/恢复<b style="color:#52c41a">'+(s.relax||0)+'</b></span>'+
+   '<span class="chip">涉及国家<b>'+ (s.countries||0)+'</b></span>'+
    '<span class="chip">待核实<b>'+s.unverified+'</b></span>';
 }
 
@@ -400,19 +420,21 @@ function renderMap(evts){
 
 function renderTable(){
   const cat=$('#fCat').value,risk=$('#fRisk').value,st=$('#fStatus').value,
-        days=+$('#fDays').value,q=$('#fQ').value.trim().toLowerCase(),
+        action=$('#fAction').value, days=+$('#fDays').value,q=$('#fQ').value.trim().toLowerCase(),
         typ=$('#fType').value;
   const limit=days?Date.now()-days*864e5:0;
   const rows=EVENTS.filter(e=>{
     const rt=e.record_type||'outbreak';
     if(typ&&rt!==typ)return false;
-    if(cat&&rt==='policy'){ // 政策记录: 按政策领域筛
-      if(cat!==e.category&&(cat!=='policy'||(e.category!=='policy')))return false;
+    if(cat&&rt==='policy'){
+      if(cat==='policy' && rt!=='policy')return false;
+      if(cat!=='policy' && e.policy_domain!==cat)return false;
     }else if(cat&&rt==='outbreak'){
       if(e.category!==cat)return false;
     }
     const lv=e.risk_level||'none';
     if(risk&&lv!==risk)return false;
+    if(action&&e.action_type!==action)return false;
     if(st&&e.verification_status!==st)return false;
     if(limit&&new Date(e.event_date).getTime()<limit)return false;
     if(q&&!(JSON.stringify(e).toLowerCase().includes(q)))return false;
@@ -426,21 +448,22 @@ function renderTable(){
   $('#tbody').innerHTML=rows.map(e=>{
     const isP=(e.record_type==='policy');
     const name=isP?(e.title_cn||e.title_en||'（无标题）'):(e.disease_name_cn||'-');
-    const nameEn=isP?(e.action_type||''):(e.disease_name_en||'');
+    const nameEn=isP?'':(e.disease_name_en||'');
     const catCell=isP?'🛃政策':(e.category==='animal'?'🐾':'🌱');
-    const qtyCell=isP?esc((e.products||[]).join('、')):esc(JSON.stringify(e.quantity||{}));
+    const products=isP?((e.products||[]).join('、')||e.disease_name_cn||'-'):JSON.stringify(e.quantity||{});
+    const effective=isP?(e.effective_date||e.event_date||'-'):(e.event_date||'-');
     return '<tr>'+
     '<td><b>'+esc(name)+'</b> <span style="color:#8493ab">'+esc(nameEn)+'</span></td>'+
-    '<td>'+catCell+'</td>'+
+    '<td>'+esc(isP?(e.action_type||'-'):catCell)+'</td>'+
+    '<td>'+esc(isP?(e.policy_domain||'-'):catCell)+'</td>'+
     '<td>'+esc(e.country_cn)+(e.region?' · '+esc(e.region):'')+'</td>'+
-    '<td>'+esc(e.event_date)+'</td>'+
-    '<td style="max-width:180px;overflow:hidden;text-overflow:ellipsis">'+qtyCell+'</td>'+
+    '<td>'+esc(products)+'</td>'+
+    '<td>'+esc(effective)+'</td>'+
+    '<td>'+esc(isP?(e.policy_status||'生效中'):(e.spread_status||'-'))+'</td>'+
     '<td>'+chip('none',e.verification_status)+'</td>'+
     '<td>'+chip(e.risk_level||'none',(e.risk_score!=null?e.risk_score+' ':'')+(e.risk_level||'未研判'))+'</td>'+
-    '<td>'+(e.focus?chip(e.focus==='立即关注'?'focus':'watch',e.focus):'-')+'</td>'+
     '<td>'+(e.source_url?'<a href="'+esc(e.source_url)+'" target="_blank">'+esc(e.source_name||'链接')+'</a>':'-')+
-    (e.cross_count?' <span style="color:#8493ab">+'+e.cross_count+'</span>':'')+'</td>'+
-    '<td style="color:#8493ab">'+esc(e.first_seen)+'</td></tr>';
+    (e.cross_count?' <span style="color:#8493ab">+'+e.cross_count+'</span>':'')+'</td>';
   }).join('');
 }
 
@@ -479,7 +502,7 @@ function evtsFiltered(){return EVENTS;}
 $('#genBtn').onclick=async()=>{
   const b=$('#genBtn');b.disabled=true;b.textContent='⏳ 生成中…';
   const log=$('#genLog');log.style.display='block';
-  log.innerHTML='<b>正在重渲染今日日报(Markdown / Excel / Word)…</b>';
+    log.innerHTML='<b>正在生成今日政策日报(Markdown / Excel / Word)…</b>';
   try{
     const r=await fetch('/api/generate',{method:'POST'});
     const j=await r.json();
@@ -500,7 +523,7 @@ $('#genBtn').onclick=async()=>{
     log.innerHTML='<b style="color:#ff4d4f">❌ 请求失败: '+esc(String(e))+'</b>';
     toast('请求失败',false);
   }
-  b.disabled=false;b.textContent='⚙ 生成今日日报';
+  b.disabled=false;b.textContent='⚙ 生成今日政策日报(Word / Excel / Markdown)';
 };
 
 document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{
@@ -510,7 +533,7 @@ document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{
   if(t.dataset.tab==='map'&&MAP_READY)MAP.invalidateSize();
   if(t.dataset.tab==='reports')loadReports();
 });
-['fType','fCat','fRisk','fStatus','fDays'].forEach(id=>$('#'+id).onchange=renderTable);
+['fType','fCat','fRisk','fAction','fStatus','fDays'].forEach(id=>$('#'+id).onchange=renderTable);
 $('#fQ').oninput=renderTable;
 
 refresh();

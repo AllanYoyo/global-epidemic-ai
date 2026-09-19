@@ -1,13 +1,13 @@
 ---
 name: epidemic-extraction
-description: 把 data/raw/ 中的原始疫情情报抽取为标准疫情事件(JSON)并入库。当需要把网页正文、搜索结果、官方通报"整理成结构化疫情事件""建疫情事件库"时使用。使用 prompts/extraction.md 提示词抽取,经 scripts/normalize.py 校验后写入 data/events/ 与 SQLite。
+description: 把 data/raw/ 中的原始情报抽取为标准政策记录(JSON)并入库。当需要把外国政府政策公告、SPS 通报、官方新闻"整理成结构化政策变化""建政策台账"时使用。默认使用 prompts/policy-extraction.md;旧疫情事件用 prompts/extraction.md 显式处理,经 scripts/normalize.py 校验后写入 data/events/ 与 SQLite。
 ---
 
-# epidemic-extraction · 事件抽取
+# epidemic-extraction · 政策记录抽取
 
 ## 目标
 
-把 `global-epidemic-search` 产出的原始情报,变成字段完整、可去重、可核验的标准"疫情事件"。
+默认把 `global-policy-search` 产出的外国政府政策原始情报,变成字段完整、可核验的标准 `record_type=policy` 政策变化记录;旧疫情事件仍可显式走原抽取 prompt。
 
 ## 输入
 
@@ -15,9 +15,9 @@ description: 把 data/raw/ 中的原始疫情情报抽取为标准疫情事件(J
 
 ## 步骤
 
-1. 读取 `prompts/extraction.md` 作为抽取提示词;字段权威定义见 `docs/event-schema.md`。
-2. **逐源抽取**:对每份存档/每条情报,按提示词产出事件 JSON。一条通报含多起疫情时拆成多条;同一事件多来源时合并为一条,其余来源放入 `cross_sources`。
-3. 汇总为 JSON 数组,存到 `data/raw/<日期>/extracted-events.json`。
+1. 政策情报读取 `prompts/policy-extraction.md`;旧疫情情报才读取 `prompts/extraction.md`;字段权威定义见 `docs/event-schema.md`。
+2. **逐源抽取**:对每份存档/每条公告,按提示词产出政策 JSON。一份公告含多项独立措施时拆成多条;同一政策多来源时合并为一条,其余来源放入 `cross_sources`。
+3. 汇总为 JSON 数组,政策记录存到 `data/raw/<日期>/extracted-policy.json`。
 4. **校验入库**:
 
    ```bash
@@ -35,7 +35,8 @@ description: 把 data/raw/ 中的原始疫情情报抽取为标准疫情事件(J
 
 - 原文没有的字段填 `null`,禁止编造或"合理推测"(尤其数量、日期、地点)。
 - 每条事件必须有 `source.url` + `quote`(原文关键句);摘不出关键句的情报退回侦察环节。
-- 与疫情无关的政策/市场新闻不入事件库。
+- 纯疫情通报、市场行情、研究进展不入政策台账;政策动作必须有外国政府/国际组织官方出处。
+- 中国海关总署公告不作为政策记录采集;对华措施只在影响研判阶段按需补充。
 
 ## 输出
 

@@ -450,8 +450,12 @@ def main():
     policy_mode = rtype == "policy"
     data = collect(args.date, args.days_back, args.db_path, record_type=rtype)
     if data is None:
-        print("[提示] 事件库为空或无 %s 记录。" % ("政策变化" if policy_mode else "疫情"))
-        return 1
+        if not policy_mode:
+            print("[提示] 事件库为空或无疫情记录。")
+            return 1
+        # 政策模式即使当天/当前库暂无政策，也要生成可交付的空台账，避免网页按钮误报失败。
+        data = {"all": [], "new": [], "active": [], "covered": []}
+        print("[提示] 当前没有政策记录, 仍生成空的政策监测日报。")
     new, active, covered = data["new"], data["active"], data["covered"]
 
     if policy_mode:

@@ -226,7 +226,9 @@ def api_report_file(name):
 @app.post("/api/generate")
 def api_generate():
     date = datetime.date.today().isoformat()
-    cmd = os.environ.get("RADAR_GENERATE_CMD")
+    # 政策监测是默认产品:旧 RADAR_GENERATE_CMD 不再覆盖政策命令,避免服务器旧配置导致返回码 1。
+    # 如确需自定义政策生成流程,请显式设置 RADAR_POLICY_GENERATE_CMD。
+    cmd = os.environ.get("RADAR_POLICY_GENERATE_CMD")
     try:
         if cmd:
             p = subprocess.run(cmd, shell=True, capture_output=True, text=True,

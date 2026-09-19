@@ -33,8 +33,8 @@ TABLE_HEADER = ("| # | 病害 | 类别 | 国家/地区 | 发生日期 | 核验 |
 ACTION_ICON = {"收紧": "🔴", "放松": "🟢", "调整": "🟡", "恢复": "🔵"}
 DOMAIN_LABEL = {"animal": "动物卫生", "plant": "植物保护", "both": "动植物",
                 "trade": "进出口贸易", "measures": "口岸措施"}
-POLICY_TABLE_HEADER = ("| # | 国家/地区 | 动作 | 政策领域 | 相关病害/商品 | 生效日期 | 摘要 | 核验 | 对华影响 | 来源 |\n"
-                       "|---|---|---|---|---|---|---|---|---|---|")
+POLICY_TABLE_HEADER = ("| # | 国家/地区 | 动作 | 政策领域 | 相关病害/商品 | 生效日期 | 政策状态 | 摘要 | 影响类型 | 对华影响 | 后续动作 | 来源 |\n"
+                       "|---|---|---|---|---|---|---|---|---|---|---|---|")
 
 
 def _date(s):
@@ -190,7 +190,7 @@ def make_open_items(events):
             lines.append("- %s %s @ %s(%s) 核验:%s: %s" % (
                 icons[status], name, e.get("country_cn"),
                 e["event_id"], status, e.get("summary_cn") or "见来源"))
-        elif status == "verified" and not e.get("china_risk"):
+        elif status == "verified" and not e.get("china_risk") and not e.get("impact_level"):
             lines.append("- ⏳ %s @ %s(%s) 已核验、待影响研判: %s" % (
                 name, e.get("country_cn"), e["event_id"],
                 e.get("summary_cn") or "见来源"))
@@ -219,6 +219,18 @@ def make_sources(events):
 
 # ---------- 政策变化日报(--policy) ----------
 
+POLICY_LEVEL_LABEL = {"high": "高影响", "medium": "中影响", "low": "低影响"}
+POLICY_LEVEL_REVERSE = {v: k for k, v in POLICY_LEVEL_LABEL.items()}
+
+
+def policy_impact_level(p):
+    """政策对华影响等级(新字段优先,兼容旧 china_risk.level)。"""
+    level = p.get("impact_level")
+    if level in ("高影响", "中影响", "低影响"):
+        return level
+    return POLICY_LEVEL_LABEL.get((p.get("china_risk") or {}).get("level"))
+
+
 def policy_title(p):
     return p.get("title_cn") or p.get("title_en") or p.get("summary_cn") or "（无标题）"
 
@@ -229,11 +241,13 @@ def policy_row(i, p):
     products = "、".join(p.get("products") or []) or \
         ("、".join(filter(None, [p.get("disease_name_cn") or p.get("disease_name_en")])) or "-")
     icon = ACTION_ICON.get(p.get("action_type"), "⚪")
-    return "| %d | %s%s | %s%s | %s | %s | %s | %s | %s | %s | %s |" % (
+    return "| %d | %s%s | %s%s | %s | %s | %s | %s | %s | %s | %s | %s | %s |" % (
         i, p.get("country_cn") or "-", ("·" + str(p["region"])) if p.get("region") else "",
-        icon, p.get("action_type") or "-", domain, products, p.get("event_date"),
-        (policy_title(p) or "-")[:40], p.get("verification_status"),
-        risk.get("level", "-"), src_link(p.get("source")))
+        icon, p.get("action_type") or "-", domain, products,
+        p.get("effective_date") or p.get("event_date") or "-",
+        p.get("policy_status") or "已生效", (policy_title(p) or "-")[:40],
+        p.get("impact_type") or "未研判", p.get("impact_level") or (risk.get("level") or "未研判"),
+        p.get("recommended_action") or "未注明", src_link(p.get("source")))
 
 
 def make_policy_table(events):
@@ -262,7 +276,8 @@ def policy_headline_items(new, active):
                       for p in new if p.get("policy_domain")})
     highs = [p for p in covered
              if (p.get("china_risk") or {}).get("focus") == "立即关注"
-             or p.get("action_type") == "收紧"]
+             or p.get("action_type") == "收紧"
+             or policy_impact_level(p) == "高影响"]
     unverified = sum(1 for p in covered if p.get("verification_status") == "unverified")
     return [
         "变化了多少: 本期新增 %d 条政策变化(收紧 %d / 放松或恢复 %d / 其他 %d), 另有 %d 条近期变动持续跟踪中。" % (
@@ -270,11 +285,11 @@ def policy_headline_items(new, active):
         "哪些国家: 涉及 %d 个国家/地区: %s。" % (
             len(countries), "、".join(countries[:8]) + ("等" if len(countries) > 8 else "") if countries else "—"),
         "涉及领域: %s。" % ("、".join(domains) if domains else "—"),
-        "对华影响: high %d 条 / medium %d 条 / low %d 条 / 未研判 %d 条。" % (
-            sum(1 for p in covered if (p.get("china_risk") or {}).get("level") == "high"),
-            sum(1 for p in covered if (p.get("china_risk") or {}).get("level") == "medium"),
-            sum(1 for p in covered if (p.get("china_risk") or {}).get("level") == "low"),
-            sum(1 for p in covered if not (p.get("china_risk") or {}).get("level"))),
+        "对华影响: 高影响 %d 条 / 中影响 %d 条 / 低影响 %d 条 / 未研判 %d 条。" % (
+            sum(1 for p in covered if policy_impact_level(p) == "高影响"),
+            sum(1 for p in covered if policy_impact_level(p) == "中影响"),
+            sum(1 for p in covered if policy_impact_level(p) == "低影响"),
+            sum(1 for p in covered if policy_impact_level(p) is None)),
         "值得立即关注: %s" % (
             "; ".join("%s(%s·%s)" % (policy_title(p)[:24], p.get("country_cn"),
                                      p.get("action_type")) for p in highs[:5]) if highs else "本期无。"),
@@ -286,10 +301,11 @@ def make_policy_headline(new, active):
 
 
 def make_policy_detail(events):
-    """收紧/重大调整动作的详情块。"""
-    keys = [p for p in events if p.get("action_type") in ("收紧", "调整")]
+    """收紧/调整/高影响动作的详情块。"""
+    keys = [p for p in events if p.get("action_type") in ("收紧", "调整")
+            or policy_impact_level(p) == "高影响"]
     if not keys:
-        return "_本期无收紧或调整类政策变化。_\n"
+        return "_本期无收紧、调整或高影响类政策变化。_\n"
     blocks = []
     for i, p in enumerate(keys, 1):
         risk = p.get("china_risk") or {}
@@ -297,37 +313,46 @@ def make_policy_detail(events):
             [src_link(s) for s in p.get("cross_sources", []) if isinstance(s, dict)]
         blocks.append(
             "### %d. %s · %s(%s)\n"
-            "- **动作**: %s → %s\n"
+            "- **动作**: %s → %s | **政策状态**: %s\n"
             "- **摘要**: %s\n"
             "- **相关病害/商品**: %s\n"
             "- **生效日期**: %s | **有效期末**: %s\n"
             "- **对华影响**: %s%s(%s)— %s\n"
+            "- **影响类型/中国关联**: %s / %s\n"
+            "- **建议动作**: %s\n"
             "- **依据/原文**: %s\n"
             "- **来源**: %s\n" % (
                 i, p.get("country_cn"), policy_title(p), p["event_id"],
                 p.get("prev_action") or "（此前无记录）", p.get("action_type") or "-",
+                p.get("policy_status") or "已生效",
                 p.get("summary_cn") or "见来源",
                 "、".join(filter(None, [p.get("disease_name_cn") or p.get("disease_name_en")])) or
                 ("、".join(p.get("products") or []) if p.get("products") else "背景资料未提及"),
                 p.get("event_date"), p.get("effective_until") or "未注明",
-                RISK_ICON.get(risk.get("level"), ""), risk.get("level") or "未研判",
+                RISK_ICON.get(POLICY_LEVEL_REVERSE.get(policy_impact_level(p)), ""),
+                policy_impact_level(p) or "未研判",
                 risk.get("score") if risk.get("score") is not None else "-",
                 risk.get("rationale") or "待研判",
+                p.get("impact_type") or "未研判", p.get("china_relevance") or "未研判",
+                p.get("recommended_action") or "待研判",
                 p.get("legal_basis") or "见来源原文",
                 " | ".join(links)))
     return "\n".join(blocks)
 
 
 def make_policy_impact_summary(events):
-    judged = [p for p in events if p.get("china_risk")]
+    judged = [p for p in events if p.get("china_risk") or p.get("impact_level")]
     if not judged:
         return "_本期暂无已完成对华影响研判的政策变化。_\n"
     lines = []
     for p in sorted(judged, key=lambda x: -((x.get("china_risk") or {}).get("score") or 0)):
-        r = p["china_risk"]
-        lines.append("- **%s(%s)** %s(%s): %s" % (
-            policy_title(p)[:36], p.get("country_cn"), r.get("level"), r.get("score"),
-            r.get("rationale") or ""))
+        r = p.get("china_risk") or {}
+        lines.append("- **%s(%s)** %s·%s(%s)·%s: %s" % (
+            policy_title(p)[:36], p.get("country_cn"),
+            p.get("impact_type") or "未分类", p.get("impact_level") or r.get("level") or "未研判",
+            p.get("china_relevance") or "未研判",
+            (r.get("score") if r.get("score") is not None else "-"),
+            r.get("rationale") or p.get("recommended_action") or ""))
     return "\n".join(lines) + "\n"
 
 
@@ -338,10 +363,9 @@ def make_policy_watchlist_diff(events):
         dis = p.get("disease_name_cn") or p.get("disease_name_en")
         if not dis:
             continue
-        risk = p.get("china_risk") or {}
         lines.append("- %s(%s) %s — %s: %s" % (
             dis, p.get("country_cn"), p.get("action_type") or "-",
-            risk.get("level") or "未研判", p.get("summary_cn") or policy_title(p)[:40]))
+            policy_impact_level(p) or "未研判", p.get("summary_cn") or policy_title(p)[:40]))
     return "\n".join(lines) + "\n" if lines else "_本期无记录明确关联病害或商品的政策变化。_\n"
 
 
@@ -352,8 +376,8 @@ def export_table(base_path, events, record_type="policy"):
     if record_type == "policy":
         headers = ["记录ID", "政策标题", "英文标题", "动作类型", "政策领域", "发布国家/地区", "发布机构",
                    "涉及国家/地区", "受影响商品", "关联病害", "适用范围", "发布日期", "生效日期", "有效期",
-                   "政策状态", "公告/法规编号", "核验状态", "对华影响等级", "影响分", "关注等级", "影响依据",
-                   "原文摘要", "来源名称", "来源URL", "来源层级", "抓取时间"]
+                   "政策状态", "公告/法规编号", "核验状态", "影响类型", "影响等级", "中国关联", "建议动作",
+                   "影响分", "关注等级", "影响依据", "原文摘要", "来源名称", "来源URL", "来源层级", "抓取时间"]
         rows = [[val(e.get("event_id")), val(e.get("title_cn")), val(e.get("title_en")),
                  val(e.get("action_type")), val(e.get("policy_domain")), val(e.get("country_cn")),
                  val(e.get("issuer_cn") or e.get("issuer_en")),
@@ -362,8 +386,10 @@ def export_table(base_path, events, record_type="policy"):
                  val(e.get("disease_name_cn") or e.get("disease_name_en")), val(e.get("scope")),
                  val(e.get("published_date") or e.get("report_date") or (e.get("source") or {}).get("publish_date")),
                  val(e.get("effective_date") or e.get("event_date")), val(e.get("effective_until")),
-                 val(e.get("policy_status") or "生效中"), val(e.get("legal_basis")), val(e.get("verification_status")),
-                 val((e.get("china_risk") or {}).get("level")), val((e.get("china_risk") or {}).get("score")),
+                 val(e.get("policy_status") or "已生效"), val(e.get("legal_basis")), val(e.get("verification_status")),
+                 val(e.get("impact_type")), val(e.get("impact_level") or policy_impact_level(e)),
+                 val(e.get("china_relevance")), val(e.get("recommended_action")),
+                 val((e.get("china_risk") or {}).get("score")),
                  val((e.get("china_risk") or {}).get("focus")), val((e.get("china_risk") or {}).get("rationale")),
                  val(e.get("summary_cn")), val((e.get("source") or {}).get("name")),
                  val((e.get("source") or {}).get("url")), val((e.get("source") or {}).get("tier")),

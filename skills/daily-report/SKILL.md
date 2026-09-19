@@ -11,7 +11,7 @@ description: 生成每日动植物检疫政策监测日报(Markdown + Word 简�
 
 ## 前置检查
 
-- 生成前快速检查:今日新增事件是否走完 抽取→核验→研判?若有高风险事件缺 `china_risk`,先提示用户跑 `epidemic-verification` / `china-risk-analysis`,或在日报中如实标注缺口。
+- 生成前快速检查:今日新增政策是否走完 抽取→核验→影响研判?若有高影响政策缺 `impact_level`,先提示用户跑 `epidemic-verification` / `policy-impact`,或在日报中如实标注缺口。旧疫情兼容模式才检查 `china_risk`。
 
 ## 步骤
 

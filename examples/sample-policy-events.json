@@ -17,6 +17,10 @@
     "effective_until": null,
     "scope": "全境口岸",
     "source": {"tier": 1, "name": "演示国甲农业部", "url": "https://example.com/policy-demo-1", "publish_date": "2026-09-15", "quote": "The ministry suspends imports of fresh beef from Demo Land Beta effective immediately (演示数据)"},
+    "impact_type": "约束",
+    "impact_level": "高影响",
+    "china_relevance": "间接影响",
+    "recommended_action": "立即核查我国相关进口准入与替代来源",
     "summary_cn": "演示国甲即日起暂停演示国乙新鲜牛肉进口(演示数据)",
     "raw_excerpt": "演示用原始文本: import suspension notice ..."
   },

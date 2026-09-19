@@ -234,26 +234,26 @@ def _build_outbreak(date, data=None, out_dir=None, db_path=None):
 
 
 def _policy_table(doc, events):
-    cols = ["政策标题", "动作", "领域", "国家/地区", "商品/病害", "生效日期", "状态", "核验", "影响"]
+    cols = ["政策标题", "动作", "领域", "国家/地区", "商品/病害", "生效日期", "政策状态",
+            "影响类型", "影响等级", "后续动作"]
     t = doc.add_table(rows=1, cols=len(cols))
     t.style = "Table Grid"
     for i, c in enumerate(cols):
         _cell_text(t.rows[0].cells[i], c, bold=True)
     for e in events:
-        p = e.get("policy") or {}
-        risk = e.get("china_risk") or {}
         title = e.get("title_cn") or e.get("title_en") or e.get("summary_cn") or "（无标题）"
         domain = e.get("policy_domain") or "-"
         subject = "、".join(e.get("products") or []) or e.get("disease_name_cn") or e.get("disease_name_en") or "-"
+        level = report.policy_impact_level(e) or "未研判"
         vals = [title, e.get("action_type") or "-", domain,
                 "%s%s" % (e.get("country_cn") or "-", ("·" + str(e["region"])) if e.get("region") else ""),
                 subject, e.get("effective_date") or e.get("event_date") or "-",
-                e.get("policy_status") or "生效中", e.get("verification_status") or "-",
-                RISK_TEXT.get(risk.get("level"), risk.get("level") or "未研判")]
+                e.get("policy_status") or "已生效", e.get("impact_type") or "未研判",
+                level, e.get("recommended_action") or "未注明"]
         row = t.add_row().cells
         for i, v in enumerate(vals):
             _cell_text(row[i], v)
-        fill = RISK_FILL.get(risk.get("level"))
+        fill = RISK_FILL.get(report.POLICY_LEVEL_REVERSE.get(level))
         if fill:
             _shade(row[8], fill)
     return t
@@ -289,9 +289,10 @@ def _build_policy(date, data=None, out_dir=None, db_path=None):
         _policy_table(doc, active)
 
     _h("收紧与调整动作详情")
-    focus = [e for e in covered if e.get("action_type") in ("收紧", "调整")]
+    focus = [e for e in covered if e.get("action_type") in ("收紧", "调整")
+             or report.policy_impact_level(e) == "高影响"]
     if not focus:
-        _para(doc, "本期无收紧或调整类政策变化。", color=GRAY)
+        _para(doc, "本期无收紧、调整或高影响类政策变化。", color=GRAY)
     for i, e in enumerate(focus, 1):
         p = e.get("policy") or {}
         risk = e.get("china_risk") or {}
@@ -306,10 +307,13 @@ def _build_policy(date, data=None, out_dir=None, db_path=None):
         _bullet(doc, "发布机构/法律依据: ", "%s / %s" % (
             e.get("issuer_cn") or e.get("issuer_en") or "未注明", e.get("legal_basis") or "未注明"))
         _bullet(doc, "生效/状态: ", "%s / %s" % (
-            e.get("effective_date") or e.get("event_date") or "未注明", e.get("policy_status") or "生效中"))
+            e.get("effective_date") or e.get("event_date") or "未注明", e.get("policy_status") or "已生效"))
         _bullet(doc, "对华影响: ", "%s(%s) — %s" % (
-            RISK_TEXT.get(risk.get("level"), risk.get("level") or "未研判"),
+            report.policy_impact_level(e) or "未研判",
             risk.get("score") if risk.get("score") is not None else "-", risk.get("rationale") or "待研判"))
+        _bullet(doc, "影响类型/中国关联: ", "%s / %s" % (
+            e.get("impact_type") or "未研判", e.get("china_relevance") or "未研判"))
+        _bullet(doc, "建议动作: ", e.get("recommended_action") or "待研判")
         pnode = doc.add_paragraph(style="List Bullet")
         pnode.paragraph_format.space_after = Pt(3)
         _run(pnode, "来源: ")
@@ -319,15 +323,17 @@ def _build_policy(date, data=None, out_dir=None, db_path=None):
                 _run(pnode, "   ")
 
     _h("对华影响研判综述")
-    judged = sorted([e for e in covered if e.get("china_risk")],
+    judged = sorted([e for e in covered if e.get("china_risk") or e.get("impact_level")],
                     key=lambda x: -((x.get("china_risk") or {}).get("score") or 0))
     if not judged:
         _para(doc, "本期暂无已完成对华影响研判的政策变化。", color=GRAY)
     for e in judged:
-        r = e["china_risk"]
+        r = e.get("china_risk") or {}
         _bullet(doc, "%s(%s): " % (e.get("title_cn") or e.get("title_en") or "（无标题）", e.get("country_cn") or "-"),
-                "%s(%s) %s" % (RISK_TEXT.get(r.get("level"), r.get("level")),
-                               r.get("score"), r.get("rationale") or ""))
+                "%s·%s(%s) %s" % (e.get("impact_type") or "未分类",
+                                  report.policy_impact_level(e) or r.get("level") or "未研判",
+                                  r.get("score") if r.get("score") is not None else "-",
+                                  r.get("rationale") or e.get("recommended_action") or ""))
 
     _h("待核实信息")
     open_rows = [e for e in covered if e.get("verification_status") in ("unverified", "false_positive")

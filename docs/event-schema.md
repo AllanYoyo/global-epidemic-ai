@@ -29,7 +29,10 @@
 | verification_status | string | 自动 | verified / single_source / unverified / false_positive / merged | unverified |
 | verification_notes | string | – | 核验结论一句话 | – |
 | checked_urls | string[] | – | 核验时查过的链接(含无效线索,留轨迹) | – |
-| china_risk | object | 研判后 | `{level, score, focus, rationale, trade_relevance, existing_gacc_measures, dimension_scores}` | 见下 |
+| china_risk | object | 兼容研判后 | `{level, score, focus, rationale, trade_relevance, existing_gacc_measures, dimension_scores}`;政策记录仅作旧排序兼容 |
+| impact_type / impact_level | string | 政策研判后 | 约束/机会/中性;高影响/中影响/低影响(政策专属) |
+| china_relevance | string | 政策研判后 | 直接涉及中国 / 间接影响 / 暂无明显关联 |
+| recommended_action | string | 政策研判后 | 建议动作(核查准入/持续跟踪/提醒企业/常规记录) |
 | summary_cn | string | – | 一句话中文摘要(≤60 字) | – |
 | raw_excerpt | string | – | 原文关键段落 | – |
 | first_seen / updated_at | datetime | 自动 | 首次入库 / 最近更新 | – |
@@ -54,6 +57,11 @@
 |---|---|---|---|
 | title_cn / title_en | string | ✅(至少其一) | 政策动作一句话标题 |
 | action_type | string | – | 收紧(加严/新增限制) / 放松(取消/简化) / 调整(范围/程序变更) / 恢复(解除后重新允许) |
+| policy_status | string | – | 草案 / 已发布未生效 / 已生效 / 已解除 / 不明 |
+| impact_type | string | 研判后 | 约束 / 机会 / 中性 |
+| impact_level | string | 研判后 | 高影响 / 中影响 / 低影响(不是病原风险) |
+| china_relevance | string | 研判后 | 直接涉及中国 / 间接影响 / 暂无明显关联 |
+| recommended_action | string | 研判后 | 后续建议动作 |
 | policy_domain | string | – | animal / plant / both / trade / measures |
 | prev_action | string | – | 该国该领域此前动作(原文提及才填) |
 | products | string[] | – | 涉及商品/品类(HS 章节或品名,原文口径) |
@@ -71,7 +79,7 @@
 raw(原始情报)
   → unverified ──(epidemic-verification)──→ verified / single_source / false_positive
   └────────(deduplicate, 仅 outbreak)────→ merged(merged_into 指向保留事件)
-verified ──(china-risk-analysis / policy 影响研判)──→ 写入 china_risk(focus: 立即关注 / 持续观察 / 常规记录)
+verified ──(china-risk-analysis / policy 影响研判)──→ 政策写入 impact_type/impact_level/china_relevance/recommended_action, 同步保留 china_risk(focus: 立即关注 / 持续观察 / 常规记录)
 ```
 
 ## 设计原则

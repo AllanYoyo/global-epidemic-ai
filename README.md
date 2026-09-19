@@ -58,13 +58,15 @@
 ### policy 分支: 政策变化监测(`global-policy-search`)
 
 监测**外国政府**动植物检疫管控政策变化:进出口暂停/禁止/恢复/放宽、WTO ePing SPS 通报、
-封锁区划定与防疫管制等,判定动作方向(收紧/放松/调整/恢复)并研判对华影响。
+封锁区划定与防疫管制等,判定动作方向(收紧/放松/调整/恢复)、政策状态(草案/已生效/已解除),并研判对华影响。
+政策研判使用"高影响/中影响/低影响"、"约束/机会/中性"、中国关联程度和建议动作;
+不再把病原风险的高/中/低直接套用到政策。
 
 | 环节 | 说明 | 入口 |
 |---|---|---|
 | 侦察 | 按 `config/sources.yaml` 的 `policy_queries` 检索(不含海关总署采集) | `skills/global-policy-search` |
 | 抽取 | `record_type=policy` 记录, title/action_type/policy_domain/products/legal_basis | `prompts/policy-extraction.md` + `normalize.py` |
-| 研判 | 对华影响(复用 china_risk 字段与 `risk.py`) | `prompts/policy-impact.md` |
+| 研判 | 对华影响等级(高/中/低)、影响类型(约束/机会/中性)、中国关联与建议动作;兼容写入 china_risk | `prompts/policy-impact.md` |
 | 日报 | 政策变化日报(速览/新增表/收紧详情/影响综述/病害与商品关联) | `python scripts/report.py --excel --docx`(默认) |
 | 定时 | `scripts/run_scan.sh policy`(建议每日 07:30, 见 `config/crontab.example`) | crontab |
 

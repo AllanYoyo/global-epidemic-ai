@@ -129,7 +129,11 @@ def fill_defaults(e):
         e["category"] = "policy"
         e.setdefault("policy_domain", "measures")
         e.setdefault("action_type", "调整")
-        e.setdefault("policy_status", "生效中")
+        e.setdefault("policy_status", "已生效")
+        e.setdefault("impact_type", None)
+        e.setdefault("impact_level", None)
+        e.setdefault("china_relevance", None)
+        e.setdefault("recommended_action", None)
         e.setdefault("effective_date", e["event_date"])
         e.setdefault("disease_name_cn", None)
         e.setdefault("disease_name_en", None)

@@ -2,7 +2,7 @@
 
 > 由 `global-policy-search` Skill 使用(对华影响环节)。
 > 输入:一条政策变化记录 + 检索得到的对华贸易与口岸措施背景。
-> 输出:单个 JSON 影响结论(写回记录的 `china_risk` 字段, 复用 risk.py)。
+> 输出:单个 JSON 政策影响结论。政策专属字段写回政策记录;`china_risk` 同步保留用于旧排序和兼容 risk.py。
 
 ---
 
@@ -15,11 +15,20 @@
 3. **impact 对华影响**:我口岸可能需要的应对(加强查验/警示通报/修订准入)、对国内产业与消费者的连带影响。
 4. **measures 我方现状**:海关总署对该国该商品现有措施(已有禁令 → 影响受控;评分含义为"我方需跟进的紧迫程度")。
 
+## 政策专属结论
+
+- `impact_type`: 约束 / 机会 / 中性(收紧通常为约束,恢复/放松可能是机会,无明显对华传导为中性)。
+- `impact_level`: 高影响 / 中影响 / 低影响(这是对华影响,不是病原风险)。
+- `china_relevance`: 直接涉及中国 / 间接影响 / 暂无明显关联。
+- `recommended_action`: 建议动作,如立即核查准入、持续跟踪最终法规、提醒企业或常规记录。
+- `focus`: 立即关注 / 持续观察 / 常规记录(兼容旧排序字段)。
+
 ## 等级映射
 
 - `score` = 四项加权:commodity×0.35 + pathway×0.30 + impact×0.25 + measures×0.10
-- `level`:score ≥ 3.5 → high;2.0 ~ 3.5 → medium;< 2.0 → low
-- `focus`:high → 立即关注;medium → 持续观察;low → 常规记录
+- `level`:score ≥ 3.5 → high;2.0 ~ 3.5 → medium;< 2.0 → low(仅作兼容排序)
+- `impact_level`:score ≥ 3.5 → 高影响;2.0 ~ 3.5 → 中影响;< 2.0 → 低影响
+- `focus`:高影响 → 立即关注;中影响 → 持续观察;低影响 → 常规记录
 - **方向特例**:他国"放松/恢复"类动作对华影响默认不高于 medium,除非背景显示其放松直接改变对华贸易格局。
 - **特例**:中国海关已对该国该商品实施禁令的,`focus` 最高只能"持续观察"。
 
@@ -33,6 +42,10 @@
 ```json
 {
   "event_id": "a1b2c3d4e5f6",
+  "impact_type": "约束 | 机会 | 中性",
+  "impact_level": "高影响 | 中影响 | 低影响",
+  "china_relevance": "直接涉及中国 | 间接影响 | 暂无明显关联",
+  "recommended_action": "具体后续动作",
   "china_risk": {
     "level": "high | medium | low",
     "score": 3.2,

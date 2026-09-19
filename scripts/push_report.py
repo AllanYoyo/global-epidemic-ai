@@ -47,7 +47,7 @@ def brief_text(date, data, policy=False):
     new, active, covered = data["new"], data["active"], data["covered"]
     if policy:
         highs = [e for e in covered if (e.get("china_risk") or {}).get("focus") == "立即关注"
-                 or e.get("action_type") == "收紧"]
+                 or e.get("action_type") == "收紧" or e.get("impact_level") == "高影响"]
         countries = sorted({e.get("country_cn") for e in new if e.get("country_cn")})
         lines = [
             "# 🛃 疫见全球 · 政策监测日报 %s" % date, "",
@@ -59,7 +59,7 @@ def brief_text(date, data, policy=False):
             "", "**需要立即关注:**"]
         lines += ["- %s @ %s(%s)%s" % (
             e.get("title_cn") or e.get("title_en") or "（无标题）", e.get("country_cn"),
-            (e.get("china_risk") or {}).get("level", "未研判"),
+            e.get("impact_level") or (e.get("china_risk") or {}).get("level", "未研判"),
             (" — " + str((e.get("china_risk") or {}).get("rationale", ""))[:60])
             if (e.get("china_risk") or {}).get("rationale") else "") for e in highs[:5]]
         if not highs: lines.append("- 本期无。")
@@ -83,7 +83,7 @@ def brief_text(date, data, policy=False):
     ]
     lines += ["- %s @ %s(%s)%s" % (
         e.get("disease_name_cn"), e.get("country_cn"),
-        (e.get("china_risk") or {}).get("level", "-"),
+            e.get("impact_level") or (e.get("china_risk") or {}).get("level", "-"),
         (" — " + str((e.get("china_risk") or {}).get("rationale", ""))[:60])
         if (e.get("china_risk") or {}).get("rationale") else "") for e in highs[:5]]
     if not highs:

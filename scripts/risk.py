@@ -17,11 +17,16 @@ import json
 from normalize import load_events, now, open_db, upsert
 
 RISK_FIELDS = ["level", "score", "focus", "rationale",
-               "trade_relevance", "existing_gacc_measures", "dimension_scores"]
+               "trade_relevance", "existing_gacc_measures", "dimension_scores",
+               "impact_type", "impact_level", "china_relevance", "recommended_action"]
 LEVELS = {"high", "medium", "low"}
 FOCUS = {"立即关注", "持续观察", "常规记录"}
 DIMS = {"commodity", "pathway", "impact", "measures"}
 POLICY_DIMS = {"trade", "biosecurity", "response", "alignment"}
+POLICY_IMPACT_TYPES = {"约束", "机会", "中性"}
+POLICY_IMPACT_LEVELS = {"高影响", "中影响", "低影响"}
+POLICY_CHINA_RELEVANCE = {"直接涉及中国", "间接影响", "暂无明显关联"}
+POLICY_IMPACT_FIELDS = ("impact_type", "impact_level", "china_relevance", "recommended_action")
 
 
 def validate_risk(r, record_type="outbreak"):
@@ -38,6 +43,13 @@ def validate_risk(r, record_type="outbreak"):
         errs.append("rationale 必填(必须能看出事实依据)")
     if r.get("dimension_scores") and set(r["dimension_scores"]) - allowed_dims:
         errs.append("dimension_scores 只允许 %s" % sorted(allowed_dims))
+    if record_type == "policy":
+        if r.get("impact_type") and r["impact_type"] not in POLICY_IMPACT_TYPES:
+            errs.append("impact_type 必须为 约束|机会|中性")
+        if r.get("impact_level") and r["impact_level"] not in POLICY_IMPACT_LEVELS:
+            errs.append("impact_level 必须为 高影响|中影响|低影响")
+        if r.get("china_relevance") and r["china_relevance"] not in POLICY_CHINA_RELEVANCE:
+            errs.append("china_relevance 取值不合法")
     return errs
 
 
@@ -52,13 +64,18 @@ def write_back(con, event_id, risk):
         print("[校验失败] %s: %s" % (event_id, "; ".join(errs)))
         return False
     risk = dict(risk)
+    if e.get("record_type") == "policy":
+        for k in POLICY_IMPACT_FIELDS:
+            if risk.get(k) not in (None, "", [], {}):
+                e[k] = risk.pop(k)
     risk["scored_at"] = now()
     e["china_risk"] = risk
     e["updated_at"] = now()
     upsert(con, e)
     label = e.get("title_cn") or e.get("title_en") or e.get("disease_name_en") or ""
-    print("[OK] %s  %s风险:%s(%s) %s" % (
-        event_id, (label + " ") if label else "", risk["level"], risk["score"], risk["focus"]))
+    level_text = e.get("impact_level") or risk["level"]
+    print("[OK] %s  %s影响:%s(%s) %s" % (
+        event_id, (label + " ") if label else "", level_text, risk["score"], risk["focus"]))
     return True
 
 
@@ -73,6 +90,10 @@ def main():
     ap.add_argument("--rationale", help="一句话依据(必填)")
     ap.add_argument("--trade", help="trade_relevance: 对华贸易关联")
     ap.add_argument("--gacc", help="existing_gacc_measures: 海关现有措施")
+    ap.add_argument("--impact-type", choices=sorted(POLICY_IMPACT_TYPES), help="政策影响类型: 约束|机会|中性")
+    ap.add_argument("--impact-level", choices=sorted(POLICY_IMPACT_LEVELS), help="政策影响等级: 高影响|中影响|低影响")
+    ap.add_argument("--china-relevance", choices=sorted(POLICY_CHINA_RELEVANCE), help="中国关联程度")
+    ap.add_argument("--action", dest="recommended_action", help="政策后续建议动作")
     ap.add_argument("--db-path", help="SQLite 路径覆盖")
     args = ap.parse_args()
 
@@ -95,7 +116,10 @@ def main():
         items = data if isinstance(data, list) else [data]
         ok = 0
         for item in items:
-            risk = item.get("china_risk") or {k: v for k in RISK_FIELDS if k in item}
+            risk = dict(item.get("china_risk") or {})
+            for k in RISK_FIELDS:
+                if k in item and k not in risk:
+                    risk[k] = item[k]
             if item.get("event_id"):
                 risk.setdefault("event_id", item["event_id"])
             event_id = risk.pop("event_id", None)
@@ -109,7 +133,10 @@ def main():
     if args.event_id:
         risk = {"level": args.level, "score": args.score, "focus": args.focus,
                 "rationale": args.rationale, "trade_relevance": args.trade,
-                "existing_gacc_measures": args.gacc}
+                "existing_gacc_measures": args.gacc,
+                "impact_type": args.impact_type, "impact_level": args.impact_level,
+                "china_relevance": args.china_relevance,
+                "recommended_action": args.recommended_action}
         ok = write_back(con, args.event_id, risk)
         return 0 if ok else 1
 

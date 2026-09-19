@@ -127,10 +127,14 @@ def slim_event(e):
         "pathogen": e.get("pathogen"), "scope": e.get("scope"), "legal_basis": e.get("legal_basis"),
         "verification_status": e.get("verification_status"),
         "summary_cn": e.get("summary_cn"),
-        "risk_level": risk.get("level"), "risk_score": risk.get("score"),
+        "risk_level": report.POLICY_LEVEL_REVERSE.get(report.policy_impact_level(e)) or risk.get("level"),
+        "risk_score": risk.get("score"),
         "focus": risk.get("focus"), "rationale": risk.get("rationale"),
         "trade_relevance": risk.get("trade_relevance"),
         "gacc_measures": risk.get("existing_gacc_measures"),
+        "impact_type": e.get("impact_type"), "impact_level": e.get("impact_level"),
+        "china_relevance": e.get("china_relevance"),
+        "recommended_action": e.get("recommended_action"),
         "source_name": src.get("name"), "source_url": src.get("url"),
         "cross_count": len(e.get("cross_sources") or []),
         "lat": lat, "lon": lon, "coord_src": coord_src,
@@ -160,13 +164,25 @@ def api_summary():
     all_e = [e for e in events["all"] if e.get("verification_status") != "merged"]
     covered = [e for e in all_e if str(e.get("first_seen", ""))[:10] == today]
     countries = {e.get("country_cn") for e in all_e if e.get("country_cn")}
+    if rtype == "policy":
+        levels = [report.policy_impact_level(e) for e in all_e]
+        focus_now = sum(1 for e, level in zip(all_e, levels)
+                        if level == "高影响" or (e.get("china_risk") or {}).get("focus") == "立即关注")
+        high = sum(1 for level in levels if level == "高影响")
+        constraints = sum(1 for e in all_e if e.get("impact_type") == "约束")
+        opportunities = sum(1 for e in all_e if e.get("impact_type") == "机会")
+        neutral = sum(1 for e in all_e if e.get("impact_type") == "中性")
+    else:
+        focus_now = sum(1 for e in all_e if (e.get("china_risk") or {}).get("focus") == "立即关注")
+        high = sum(1 for e in all_e if (e.get("china_risk") or {}).get("level") == "high")
+        constraints = opportunities = neutral = 0
     return jsonify({
         "record_type": rtype, "total": len(all_e), "today_new": len(covered),
-        "focus_now": sum(1 for e in all_e if (e.get("china_risk") or {}).get("focus") == "立即关注"),
-        "high": sum(1 for e in all_e if (e.get("china_risk") or {}).get("level") == "high"),
+        "focus_now": focus_now, "high": high,
         "unverified": sum(1 for e in all_e if e.get("verification_status") == "unverified"),
         "tighten": sum(1 for e in all_e if e.get("action_type") == "收紧"),
         "relax": sum(1 for e in all_e if e.get("action_type") in ("放松", "恢复")),
+        "constraints": constraints, "opportunities": opportunities, "neutral": neutral,
         "countries": len(countries),
     })
 
@@ -320,9 +336,9 @@ a{color:#7ab3ff;text-decoration:none} a:hover{text-decoration:underline}
   <div style="position:relative">
     <div id="map"></div>
     <div class="legend">
-      <span><i style="background:#ff4d4f"></i>高风险</span>
-      <span><i style="background:#faad14"></i>中风险</span>
-      <span><i style="background:#52c41a"></i>低风险</span>
+      <span><i style="background:#ff4d4f"></i>高影响</span>
+      <span><i style="background:#faad14"></i>中影响</span>
+      <span><i style="background:#52c41a"></i>低影响</span>
       <span><i style="background:#8c8c8c"></i>未研判</span>
     </div>
   </div>
@@ -333,6 +349,7 @@ a{color:#7ab3ff;text-decoration:none} a:hover{text-decoration:underline}
     <select id="fType"><option value="">全部类型</option><option value="outbreak">疫情事件</option><option value="policy">政策变化</option></select>
     <select id="fCat"><option value="">全部类别</option><option value="animal">动物</option><option value="plant">植物</option><option value="policy">政策</option></select>
     <select id="fRisk"><option value="">全部影响</option><option value="high">高影响</option><option value="medium">中影响</option><option value="low">低影响</option><option value="none">未研判</option></select>
+    <select id="fImpactType"><option value="">全部影响类型</option><option value="约束">约束</option><option value="机会">机会</option><option value="中性">中性</option></select>
     <select id="fAction"><option value="">全部动作</option><option value="收紧">收紧</option><option value="放松">放松</option><option value="调整">调整</option><option value="恢复">恢复</option></select>
     <select id="fStatus"><option value="">全部核验状态</option><option value="verified">verified</option><option value="single_source">single_source</option><option value="unverified">unverified</option><option value="false_positive">false_positive</option></select>
     <select id="fDays"><option value="0">全部时间</option><option value="7">近7天</option><option value="30">近30天</option><option value="90">近90天</option></select>
@@ -342,7 +359,7 @@ a{color:#7ab3ff;text-decoration:none} a:hover{text-decoration:underline}
   <div style="overflow:auto;max-height:calc(100vh - 230px);border:1px solid var(--line);border-radius:10px">
     <table><thead><tr>
       <th>政策标题</th><th>动作</th><th>领域</th><th>国家/地区</th><th>商品/病害</th>
-      <th>生效日期</th><th>政策状态</th><th>核验</th><th>对华影响</th><th>来源</th>
+      <th>生效日期</th><th>政策状态</th><th>核验</th><th>影响类型/等级</th><th>来源</th>
     </tr></thead><tbody id="tbody"></tbody></table>
   </div>
 </section>
@@ -369,7 +386,8 @@ function renderStats(s){
    '<span class="chip">政策记录<b>'+s.total+'</b></span>'+
    '<span class="chip">今日新增<b>'+s.today_new+'</b></span>'+
    '<span class="chip">收紧<b style="color:#ff7875">'+(s.tighten||0)+'</b></span>'+
-   '<span class="chip">放松/恢复<b style="color:#52c41a">'+(s.relax||0)+'</b></span>'+
+   '<span class="chip">约束<b style="color:#ff7875">'+(s.constraints||0)+'</b></span>'+
+   '<span class="chip">机会<b style="color:#52c41a">'+(s.opportunities||0)+'</b></span>'+
    '<span class="chip">涉及国家<b>'+ (s.countries||0)+'</b></span>'+
    '<span class="chip">待核实<b>'+s.unverified+'</b></span>';
 }
@@ -396,10 +414,12 @@ function popupHtml(e){
    esc(e.country_cn)+(e.region?(' · '+esc(e.region)):'')+' | '+esc(e.event_date)+
    ' <span style="color:'+(isP?'#60a5fa':(e.category==='animal'?'#f59e0b':'#10b981'))+'">'+
    (isP?'🛃政策':(e.category==='animal'?'🐾动物':'🌱植物'))+'</span><br>'+
-   chip(e.risk_level||'none','风险 '+(e.risk_level||'未研判'))+' '+
+   chip(e.risk_level||'none',(isP?'影响 ':'风险 ')+(e.impact_level||(e.risk_level||'未研判')))+' '+
    (e.focus?chip(e.focus==='立即关注'?'focus':'watch',e.focus):'')+' '+
    chip('none',e.verification_status)+'<br>'+
    '<span style="color:#b9c6dd">'+esc(e.summary_cn||'')+'</span>'+
+   (isP&&e.impact_type?'<br><span style="color:#8493ab">影响类型: '+esc(e.impact_type)+(e.china_relevance?' · '+esc(e.china_relevance):'')+'</span>':'')+
+   (isP&&e.recommended_action?'<br><span style="color:#8493ab">建议动作: '+esc(e.recommended_action)+'</span>':'')+
    (e.rationale?'<br><span style="color:#8493ab">研判: '+esc(e.rationale)+'</span>':'')+
    (e.source_url?'<br>来源: <a href="'+esc(e.source_url)+'" target="_blank">'+esc(e.source_name||'链接')+'</a>':'')+
    '</div>';
@@ -422,7 +442,8 @@ function renderMap(evts){
 
 function renderTable(){
   const cat=$('#fCat').value,risk=$('#fRisk').value,st=$('#fStatus').value,
-        action=$('#fAction').value, days=+$('#fDays').value,q=$('#fQ').value.trim().toLowerCase(),
+        impactType=$('#fImpactType').value, action=$('#fAction').value,
+        days=+$('#fDays').value,q=$('#fQ').value.trim().toLowerCase(),
         typ=$('#fType').value;
   const limit=days?Date.now()-days*864e5:0;
   const rows=EVENTS.filter(e=>{
@@ -437,6 +458,7 @@ function renderTable(){
     const lv=e.risk_level||'none';
     if(risk&&lv!==risk)return false;
     if(action&&e.action_type!==action)return false;
+    if(impactType&&e.impact_type!==impactType)return false;
     if(st&&e.verification_status!==st)return false;
     if(limit&&new Date(e.event_date).getTime()<limit)return false;
     if(q&&!(JSON.stringify(e).toLowerCase().includes(q)))return false;
@@ -463,7 +485,7 @@ function renderTable(){
     '<td>'+esc(effective)+'</td>'+
     '<td>'+esc(isP?(e.policy_status||'生效中'):(e.spread_status||'-'))+'</td>'+
     '<td>'+chip('none',e.verification_status)+'</td>'+
-    '<td>'+chip(e.risk_level||'none',(e.risk_score!=null?e.risk_score+' ':'')+(e.risk_level||'未研判'))+'</td>'+
+    '<td>'+chip(e.risk_level||'none',(isP?((e.impact_type||'未研判')+'·'+(e.impact_level||'未研判')):((e.risk_score!=null?e.risk_score+' ':'')+(e.risk_level||'未研判'))))+'</td>'+
     '<td>'+(e.source_url?'<a href="'+esc(e.source_url)+'" target="_blank">'+esc(e.source_name||'链接')+'</a>':'-')+
     (e.cross_count?' <span style="color:#8493ab">+'+e.cross_count+'</span>':'')+'</td>';
   }).join('');
@@ -535,7 +557,7 @@ document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{
   if(t.dataset.tab==='map'&&MAP_READY)MAP.invalidateSize();
   if(t.dataset.tab==='reports')loadReports();
 });
-['fType','fCat','fRisk','fAction','fStatus','fDays'].forEach(id=>$('#'+id).onchange=renderTable);
+['fType','fCat','fRisk','fImpactType','fAction','fStatus','fDays'].forEach(id=>$('#'+id).onchange=renderTable);
 $('#fQ').oninput=renderTable;
 
 refresh();

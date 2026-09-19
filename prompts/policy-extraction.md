@@ -30,7 +30,9 @@
 - `products`:涉及的商品/品类列表(HS 章节或品名,原文口径)。
 - `legal_basis`:公告文号 / 法规编号 / 通报编号(如 G/SPS/N/xxx)。
 - `effective_date` / `effective_until`:生效与有效期(event_date 为公告/生效日期,粒度不足自动补齐)。
+- `policy_status`:草案 / 已发布未生效 / 已生效 / 已解除 / 不明。
 - `scope`:适用地区/企业/口岸范围,原文口径。
+- 本阶段不臆判影响等级; `impact_type`、`impact_level`、`china_relevance`、`recommended_action`由 policy-impact 研判环节填写。
 
 ## 输出格式示例
 

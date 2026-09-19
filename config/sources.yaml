@@ -1,39 +1,15 @@
 # ============================================================
-# 疫见全球 · 情报源清单与病害关注表
+# 疫见全球 · 外国政府动植物检疫政策情报源
 # 说明:
-#   - sources 供 global-epidemic-search Skill 使用, tier 越小越权威
-#   - 每个源带 schedule 运行档位(am/pm/weekly/passive), 由 crontab 双扫调度
-#   - watchlist 带 tier 分级(core=每轮必查, general=仅晨扫; 未标 tier 视为 general)
-#   - 所有 URL 是检索入口; 站点改版后由搜索重新定位, 不需要频繁维护本文件
+#   - sources 为政策监测源清单, tier 越小越权威
+#   - policy_queries 是生产检索模板, 只面向外国政府/国际组织政策变化
+#   - 中国海关总署只作为影响研判背景, 不作为政策记录采集源
+#   - 所有 URL 是检索入口;站点改版后由搜索重新定位
 # ============================================================
 
-# ---- 运行档位: crontab 调用 scripts/run_scan.sh 触发 ----
+# ---- 政策监测运行档位 ----
 runs:
-  am:     {time: "06:30", desc: 全量晨扫, 产出: 日报+推送, sources: [am, am_pm], watchlist: [core, general]}
-  pm:     {time: "18:00", desc: 增量晚扫, 产出: 刷新当日日报, sources: [am_pm], watchlist: [core]}
-  weekly: {on: 每周一并入晨扫, sources: [weekly], watchlist: [core, general]}
-  passive: {desc: 不主动扫描, 仅作核验时的交叉回溯, sources: [passive]}
-  policy: {time: "07:30", desc: 政策变化扫(检疫/进出口管控动作), 产出: 政策日报, sources: [measures], watchlist: [core]}
-
-watchlist:
-  animal:
-    - {cn: 非洲猪瘟, en: African Swine Fever, abbrev: ASF, tier: core}
-    - {cn: 高致病性禽流感, en: Highly pathogenic avian influenza, abbrev: HPAI, tier: core}
-    - {cn: 口蹄疫, en: Foot-and-mouth disease, abbrev: FMD, tier: core}
-    - {cn: 小反刍兽疫, en: Peste des petits ruminants, abbrev: PPR}
-    - {cn: 结节性皮肤病, en: Lumpy skin disease, abbrev: LSD}
-    - {cn: 经典猪瘟, en: Classical swine fever, abbrev: CSF}
-    - {cn: 新城疫, en: Newcastle disease, abbrev: ND}
-    - {cn: 非洲马瘟, en: African horse sickness, abbrev: AHS}
-  plant:
-    - {cn: 番茄褐色皱果病毒, en: Tomato brown rugose fruit virus, abbrev: ToBRFV}
-    - {cn: 香蕉枯萎病4号小种, en: Fusarium wilt (TR4), abbrev: TR4}
-    - {cn: 小麦秆锈病Ug99, en: Wheat stem rust Ug99, abbrev: Ug99}
-    - {cn: 沙漠蝗, en: Desert Locust, abbrev: DL}
-    - {cn: 草地贪夜蛾, en: Fall Armyworm, abbrev: FAW}
-    - {cn: 柑橘黄龙病, en: Citrus greening (Huanglongbing), abbrev: HLB}
-    - {cn: 马铃薯晚疫病, en: Potato late blight, abbrev: PLB}
-    - {cn: 松材线虫病, en: Pine wilt disease, abbrev: PWD}
+  policy: {time: "07:30", desc: 外国政府政策变化扫, 产出: 政策日报+Word+Excel+推送, sources: [measures]}
 
 # ---- 情报源分级: 1 官方(可直接支撑 verified) / 2 专业(需交叉) / 3 媒体(仅线索) ----
 # schedule 档位: am_pm=晨扫+晚扫 / am=仅晨扫 / weekly=每周一晨扫附加 / passive=不主动扫
@@ -119,7 +95,7 @@ sources:
     schedule: am_pm
     lang: [zh]
     method: browse
-    notes: 检索"警示通报""禁止进口""检疫要求"; 是 china-risk-analysis 的关键输入(现有对华措施)
+    notes: 对外国政府政策变化的背景源; 中国海关总署公告不进入政策采集台账
 
   # ========== Tier 2: 专业早期信号(核验后才可升级) ==========
   - id: promed
@@ -469,7 +445,7 @@ sources:
     schedule: weekly
     lang: [en]
     method: browse
-    notes: 各成员动植物检疫措施通报官方平台; china-risk-analysis 的措施背景源
+    notes: 各成员动植物检疫措施通报官方平台; 政策变化监测核心源
   - id: usda-aphis
     name: 美国农业部动植物卫生检验局(APHIS)
     url: https://www.aphis.usda.gov/
@@ -543,24 +519,9 @@ sources:
     method: search
     notes: 学术期刊, 不作事件来源; 研判时的病原背景资料用
 
-# ---- 每日例行检索模板; 占位符: {disease_en} {disease_cn} {country} {country_cn} {month_en_year} {year} ----
-search_queries:
-  official:
-    - 'site:wahis.woah.org "{disease_en}" immediate notification {month_en_year}'
-    - '"{disease_en}" outbreak "{country}" site:fao.org'
-    - '"{disease_en}" "{country}" EPPO reporting service'
-    - '"{disease_cn}" 疫情 农业农村部 {year}'
-  early_signal:
-    - '"{disease_en}" "{country}" promed'
-    - '"{disease_en}" outbreak "{country}" news {month_en_year}'
-  china:
-    - '"{disease_cn}" OR "{disease_en}" 海关总署 警示通报 禁止进口'
-    - '"{disease_cn}" {country_cn} 出口 暂停'
-
 # ---- 政策变化监测检索模板(global-policy-search Skill / policy 分支) ----
 # 范围: 仅外国政府的动植物检疫管控政策变化。
-# 中国海关总署公告不作为政策记录采集 —— 对华口岸措施由 china-risk-analysis 按事件
-# 按需检索(search_queries.china), 这里重复收集没有增量价值。
+# 中国海关总署公告不作为政策记录采集; 仅作为影响研判的背景资料。
 policy_queries:
   sps:         # WTO SPS 通报(各成员措施变化官方渠道)
     - 'site:eping.wto.org SPS emergency measure animal {month_en_year}'
@@ -572,6 +533,6 @@ policy_queries:
     - 'site:aphis.usda.gov import ban OR suspension {month_en_year}'
     - '"European Commission" SERS "emergency measures" animal health {month_en_year}'
     - '"{country}" import suspension OR ban "{disease_en}" {month_en_year}'
-  reactive:    # 高关注疫情引发的他国连带反应(需疫情事件驱动)
+  reactive:    # 外国政府因动植物检疫事件发布的连带贸易措施
     - '"{disease_en}" "{country}" "suspends imports" OR "bans imports" {month_en_year}'
-    - '"{disease_en}" outbreak "{country}" trade ban beef OR pork OR poultry {month_en_year}'
+    - '"{disease_en}" "{country}" trade restriction OR import requirement {month_en_year}'

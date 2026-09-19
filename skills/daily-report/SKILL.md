@@ -1,6 +1,6 @@
 ---
 name: daily-report
-description: 生成每日动植物检疫政策监测日报(Markdown + Word 简报 + Excel)。默认服务于 policy 分支: 当用户要"生成今日政策日报""汇总各国检疫政策变化"时使用;旧疫情日报用 --outbreak 显式触发。按政策变化、动作方向、对华影响与来源索引输出到 data/reports/, 并可推送到企业微信/钉钉/邮箱。
+description: 生成每日动植物检疫政策监测日报(Markdown + Word 简报 + Excel)。当用户要"生成今日政策日报""汇总各国检疫政策变化"时使用。按政策变化、动作方向、对华影响与来源索引输出到 data/reports/, 并可推送到企业微信/钉钉/邮箱。
 ---
 
 # daily-report · 政策监测日报
@@ -11,14 +11,14 @@ description: 生成每日动植物检疫政策监测日报(Markdown + Word 简�
 
 ## 前置检查
 
-- 生成前快速检查:今日新增政策是否走完 抽取→核验→影响研判?若有高影响政策缺 `impact_level`,先提示用户跑 `epidemic-verification` / `policy-impact`,或在日报中如实标注缺口。旧疫情兼容模式才检查 `china_risk`。
+- 生成前快速检查:今日新增政策是否走完 抽取→核验→影响研判?若有高影响政策缺 `impact_level`,先在政策核验与 policy-impact 环节补齐,或在日报中如实标注缺口。
 
 ## 步骤
 
 1. 生成:
 
    ```bash
-   python scripts/report.py --policy --date <YYYY-MM-DD> --excel --docx
+   python scripts/report.py --date <YYYY-MM-DD> --excel --docx
    ```
 
    产出 `data/reports/<日期>-policy-report.md` + `.xlsx`(无 openpyxl 时降级 CSV) + `.docx` 政策监测 Word 简报(无 python-docx 时跳过)。

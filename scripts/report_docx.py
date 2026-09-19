@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""生成政策监测/疫情兼容 Word 简报(.docx)。
+"""生成外国政府动植物检疫政策监测 Word 简报(.docx)。
 
 用法:
   python report.py --date 2026-09-12 --docx       # 默认政策监测版
-  python report.py --outbreak --date 2026-09-12 --docx  # 疫情兼容版
   python report_docx.py --date 2026-09-12
 输出: data/reports/<date>-policy-report.docx(默认)
 """
@@ -106,132 +105,6 @@ def add_hyperlink(paragraph, url, text, size=9.5):
     paragraph._p.append(link)
 
 
-def _event_table(doc, events):
-    cols = ["病害", "类别", "国家/地区", "日期", "数量", "核验", "风险", "关注"]
-    t = doc.add_table(rows=1, cols=len(cols))
-    t.style = "Table Grid"
-    for i, c in enumerate(cols):
-        _cell_text(t.rows[0].cells[i], c, bold=True)
-    for e in events:
-        risk = e.get("china_risk") or {}
-        qty = "、".join("%s:%s" % (k, v) for k, v in (e.get("quantity") or {}).items()) or "-"
-        place = "%s%s" % (e.get("country_cn"), ("·" + str(e["region"])) if e.get("region") else "")
-        vals = ["%s(%s)" % (e.get("disease_name_cn"), e.get("disease_name_en")),
-                "动物" if e.get("category") == "animal" else "植物",
-                place, e.get("event_date"), qty, e.get("verification_status"),
-                RISK_TEXT.get(risk.get("level"), risk.get("level") or "-"),
-                risk.get("focus") or "-"]
-        row = t.add_row().cells
-        for i, v in enumerate(vals):
-            _cell_text(row[i], v)
-        fill = RISK_FILL.get(risk.get("level"))
-        if fill:
-            _shade(row[6], fill)
-    return t
-
-
-def _build_outbreak(date, data=None, out_dir=None, db_path=None):
-    """生成疫情 Word 简报(兼容模式)。"""
-    if data is None:
-        data = report.collect(date, 14, db_path, record_type="outbreak")
-    if data is None:
-        raise SystemExit("[提示] 事件库为空: 先运行 normalize.py 入库事件。")
-    new, active, covered = data["new"], data["active"], data["covered"]
-
-    doc = Document()
-    _para(doc, "全球动植物疫情情报日报", size=18, bold=True,
-          align=WD_ALIGN_PARAGRAPH.CENTER, space_after=2)
-    _para(doc, "疫见全球 · Epidemic Intelligence Radar   |   %s   |   生成于 %s" % (
-        date, datetime.datetime.now().strftime("%Y-%m-%d %H:%M")),
-        size=9, color=GRAY, align=WD_ALIGN_PARAGRAPH.CENTER, space_after=10)
-
-    sec = 0
-
-    def _h(title):
-        nonlocal sec
-        sec += 1
-        _heading(doc, "%s、%s" % ("一二三四五六七八九十"[sec - 1], title))
-
-    _h("今日五问速览")
-    for item in report.headline_items(new, active):
-        _bullet(doc, item)
-
-    _h("今日新增疫情事件(%d 起)" % len(new))
-    _event_table(doc, new)
-    if active:
-        _h("持续关注事件(%d 起)" % len(active))
-        _event_table(doc, active)
-
-    _h("立即关注事件详情")
-    highs = [e for e in covered if (e.get("china_risk") or {}).get("focus") == "立即关注"]
-    if not highs:
-        _para(doc, "今日无“立即关注”级别事件。", color=GRAY)
-    for i, e in enumerate(highs, 1):
-        risk = e.get("china_risk") or {}
-        _para(doc, "%d. %s · %s(%s)" % (i, e.get("country_cn"),
-              e.get("disease_name_cn"), e["event_id"]), bold=True, size=11, space_after=2)
-        _bullet(doc, "摘要: ", e.get("summary_cn") or "见来源")
-        _bullet(doc, "对华风险: ", "%s(%s) — %s" % (
-            RISK_TEXT.get(risk.get("level"), risk.get("level")), risk.get("score"),
-            risk.get("rationale") or "-"))
-        _bullet(doc, "贸易关联: ", risk.get("trade_relevance") or "背景资料未提及")
-        _bullet(doc, "现有措施: ", risk.get("existing_gacc_measures") or "背景资料未提及")
-        p = doc.add_paragraph(style="List Bullet")
-        p.paragraph_format.space_after = Pt(3)
-        _run(p, "来源: ")
-        for s in [e.get("source")] + list(e.get("cross_sources") or []):
-            if isinstance(s, dict) and s.get("url"):
-                add_hyperlink(p, s["url"], s.get("name") or s["url"])
-                _run(p, "   ")
-
-    _h("对华风险研判综述")
-    judged = sorted([e for e in covered if e.get("china_risk")],
-                    key=lambda x: -((x.get("china_risk") or {}).get("score") or 0))
-    if not judged:
-        _para(doc, "本期暂无已完成对华风险研判的事件。", color=GRAY)
-    for e in judged:
-        r = e["china_risk"]
-        _bullet(doc, "%s(%s): " % (e.get("disease_name_cn"), e.get("country_cn")),
-                "%s(%s) %s" % (RISK_TEXT.get(r.get("level"), r.get("level")),
-                               r.get("score"), r.get("rationale") or ""))
-
-    _h("待核实信息")
-    open_rows = [e for e in covered
-                 if e.get("verification_status") in ("unverified", "false_positive")
-                 or (e.get("verification_status") == "verified" and not e.get("china_risk"))]
-    if not open_rows:
-        _para(doc, "无待核实/待研判事件。", color=GRAY)
-    for e in open_rows:
-        st = e.get("verification_status")
-        tag = {"unverified": "未核验", "false_positive": "存疑"}.get(st, "待研判")
-        _bullet(doc, "[%s] " % tag,
-                "%s @ %s(%s): %s" % (e.get("disease_name_cn"), e.get("country_cn"),
-                                     e["event_id"], e.get("summary_cn") or "见来源"),
-                color=RED if st == "false_positive" else None)
-
-    _h("来源索引")
-    seen, idx = set(), 0
-    for e in covered:
-        for s in [e.get("source")] + list(e.get("cross_sources") or []):
-            if isinstance(s, dict) and s.get("url") and s["url"] not in seen:
-                seen.add(s["url"])
-                idx += 1
-                p = doc.add_paragraph()
-                p.paragraph_format.space_after = Pt(2)
-                _run(p, "%d. " % idx, size=9.5)
-                add_hyperlink(p, s["url"],
-                              "%s — 事件 %s" % (s.get("name") or s["url"], e["event_id"]))
-
-    _para(doc, "", space_after=8)
-    _para(doc, "声明: 本简报由 AI 辅助生成, 所有事件附原始来源; 核验状态与风险等级仅为情报参考, "
-               "不构成决策或执法依据。口岸措施以海关总署等官方公告为准。", size=8.5, color=GRAY)
-
-    out_dir = out_dir or os.path.join(DATA_DIR, "reports")
-    os.makedirs(out_dir, exist_ok=True)
-    path = os.path.join(out_dir, "%s-daily-report.docx" % date)
-    doc.save(path)
-    return path
-
 
 def _policy_table(doc, events):
     cols = ["政策标题", "动作", "领域", "国家/地区", "商品/病害", "生效日期", "政策状态",
@@ -262,7 +135,7 @@ def _policy_table(doc, events):
 def _build_policy(date, data=None, out_dir=None, db_path=None):
     """生成政策监测 Word 简报。"""
     if data is None:
-        data = report.collect(date, 14, db_path, record_type="policy")
+        data = report.collect(date, 14, db_path)
     if data is None:
         raise SystemExit("[提示] 政策库为空: 先运行 normalize.py 入库政策记录。")
     new, active, covered = data["new"], data["active"], data["covered"]
@@ -290,12 +163,10 @@ def _build_policy(date, data=None, out_dir=None, db_path=None):
 
     _h("收紧与调整动作详情")
     focus = [e for e in covered if e.get("action_type") in ("收紧", "调整")
-             or report.policy_impact_level(e) == "高影响"]
+             or e.get("impact_level") == "高影响"]
     if not focus:
         _para(doc, "本期无收紧、调整或高影响类政策变化。", color=GRAY)
     for i, e in enumerate(focus, 1):
-        p = e.get("policy") or {}
-        risk = e.get("china_risk") or {}
         title = e.get("title_cn") or e.get("title_en") or "（无标题）"
         _para(doc, "%d. %s · %s(%s)" % (i, e.get("country_cn") or "-", title, e["event_id"]),
               bold=True, size=11, space_after=2)
@@ -308,9 +179,8 @@ def _build_policy(date, data=None, out_dir=None, db_path=None):
             e.get("issuer_cn") or e.get("issuer_en") or "未注明", e.get("legal_basis") or "未注明"))
         _bullet(doc, "生效/状态: ", "%s / %s" % (
             e.get("effective_date") or e.get("event_date") or "未注明", e.get("policy_status") or "已生效"))
-        _bullet(doc, "对华影响: ", "%s(%s) — %s" % (
-            report.policy_impact_level(e) or "未研判",
-            risk.get("score") if risk.get("score") is not None else "-", risk.get("rationale") or "待研判"))
+        _bullet(doc, "对华影响: ", "%s — %s" % (
+            e.get("impact_level") or "未研判", e.get("impact_rationale") or "待研判"))
         _bullet(doc, "影响类型/中国关联: ", "%s / %s" % (
             e.get("impact_type") or "未研判", e.get("china_relevance") or "未研判"))
         _bullet(doc, "建议动作: ", e.get("recommended_action") or "待研判")
@@ -323,21 +193,18 @@ def _build_policy(date, data=None, out_dir=None, db_path=None):
                 _run(pnode, "   ")
 
     _h("对华影响研判综述")
-    judged = sorted([e for e in covered if e.get("china_risk") or e.get("impact_level")],
-                    key=lambda x: -((x.get("china_risk") or {}).get("score") or 0))
+    judged = [e for e in covered if e.get("impact_level")]
     if not judged:
         _para(doc, "本期暂无已完成对华影响研判的政策变化。", color=GRAY)
     for e in judged:
-        r = e.get("china_risk") or {}
         _bullet(doc, "%s(%s): " % (e.get("title_cn") or e.get("title_en") or "（无标题）", e.get("country_cn") or "-"),
-                "%s·%s(%s) %s" % (e.get("impact_type") or "未分类",
-                                  report.policy_impact_level(e) or r.get("level") or "未研判",
-                                  r.get("score") if r.get("score") is not None else "-",
-                                  r.get("rationale") or e.get("recommended_action") or ""))
+                "%s·%s·%s — %s" % (e.get("impact_type") or "未分类", e.get("impact_level"),
+                                   e.get("china_relevance") or "未研判",
+                                   e.get("impact_rationale") or e.get("recommended_action") or ""))
 
     _h("待核实信息")
     open_rows = [e for e in covered if e.get("verification_status") in ("unverified", "false_positive")
-                 or (e.get("verification_status") == "verified" and not e.get("china_risk"))]
+                 or (e.get("verification_status") == "verified" and not e.get("impact_level"))]
     if not open_rows:
         _para(doc, "无待核实/待研判政策记录。", color=GRAY)
     for e in open_rows:
@@ -366,9 +233,8 @@ def _build_policy(date, data=None, out_dir=None, db_path=None):
     return path
 
 
-def build(date, data=None, out_dir=None, db_path=None, record_type="policy"):
-    return (_build_policy if record_type == "policy" else _build_outbreak)(
-        date, data=data, out_dir=out_dir, db_path=db_path)
+def build(date, data=None, out_dir=None, db_path=None):
+    return _build_policy(date, data=data, out_dir=out_dir, db_path=db_path)
 
 
 def main():

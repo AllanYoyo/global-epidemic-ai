@@ -2,8 +2,7 @@
 # -*- coding: utf-8 -*-
 """把当日政策监测日报要点推送到办公渠道: 企业微信群机器人 / 钉钉机器人 / 邮箱。
 
-默认推送政策记录; --outbreak 才推送旧疫情日报。配了哪个渠道的环境变量就发哪个;
-都未配置则提示并退出(码 1)。--dry-run 只打印不发送。
+配了哪个渠道的环境变量就发哪个;都未配置则提示并退出(码 1)。--dry-run 只打印不发送。
 邮件发送(Tuta 网页邮箱)不经本脚本: 由 Hermes 直接调用其 tuta-webmail 技能完成。
 
 环境变量:
@@ -42,55 +41,25 @@ def _cut(text, nbytes):
     return raw[:nbytes].decode("utf-8", errors="ignore") if len(raw) > nbytes else text
 
 
-def brief_text(date, data, policy=False):
-    """日报 IM 卡片摘要(企微/钉钉 markdown 语法)。"""
+def brief_text(date, data):
+    """政策日报 IM 卡片摘要。"""
     new, active, covered = data["new"], data["active"], data["covered"]
-    if policy:
-        highs = [e for e in covered if (e.get("china_risk") or {}).get("focus") == "立即关注"
-                 or e.get("action_type") == "收紧" or e.get("impact_level") == "高影响"]
-        countries = sorted({e.get("country_cn") for e in new if e.get("country_cn")})
-        lines = [
-            "# 🛃 疫见全球 · 政策监测日报 %s" % date, "",
-            "**新增政策变化 %d 条** · 收紧 %d · 放松/恢复 %d · 近期跟踪 %d · 待核实 %d" % (
-                len(new), sum(1 for e in new if e.get("action_type") == "收紧"),
-                sum(1 for e in new if e.get("action_type") in ("放松", "恢复")), len(active),
-                sum(1 for e in covered if e.get("verification_status") == "unverified")), "",
-            "**涉及国家**: %s" % ("、".join(countries[:8]) + ("等" if len(countries) > 8 else "") if countries else "—"),
-            "", "**需要立即关注:**"]
-        lines += ["- %s @ %s(%s)%s" % (
-            e.get("title_cn") or e.get("title_en") or "（无标题）", e.get("country_cn"),
-            e.get("impact_level") or (e.get("china_risk") or {}).get("level", "未研判"),
-            (" — " + str((e.get("china_risk") or {}).get("rationale", ""))[:60])
-            if (e.get("china_risk") or {}).get("rationale") else "") for e in highs[:5]]
-        if not highs: lines.append("- 本期无。")
-        lines += ["", "---", "全文见政策 Markdown / Word / Excel 报告", "> AI 辅助生成 · 仅供情报参考"]
-        return "\n".join(lines)
-
-    highs = [e for e in covered if (e.get("china_risk") or {}).get("focus") == "立即关注"]
-    unverified = sum(1 for e in covered if e.get("verification_status") == "unverified")
+    highs = [e for e in covered if e.get("impact_level") == "高影响" or e.get("action_type") == "收紧"]
     countries = sorted({e.get("country_cn") for e in new if e.get("country_cn")})
-    animals = sum(1 for e in new if e.get("category") == "animal")
     lines = [
-        "# 🌍 疫见全球 · 疫情日报 %s" % date,
-        "",
-        "**今日新增 %d 起**(动物 %d / 植物 %d)· 持续关注 %d 起 · 立即关注 **%d** 起 · 待核实 %d 起" % (
-            len(new), animals, len(new) - animals, len(active), len(highs), unverified),
-        "",
-        "**发生在哪里**: %s" % ("、".join(countries[:8]) + ("等" if len(countries) > 8 else "")
-                                if countries else "—"),
-        "",
-        "**值得立即关注:**",
-    ]
+        "# 🛃 疫见全球 · 政策监测日报 %s" % date, "",
+        "**新增政策变化 %d 条** · 收紧 %d · 放松/恢复 %d · 近期跟踪 %d · 待核实 %d" % (
+            len(new), sum(1 for e in new if e.get("action_type") == "收紧"),
+            sum(1 for e in new if e.get("action_type") in ("放松", "恢复")), len(active),
+            sum(1 for e in covered if e.get("verification_status") == "unverified")), "",
+        "**涉及国家**: %s" % ("、".join(countries[:8]) + ("等" if len(countries) > 8 else "") if countries else "—"),
+        "", "**需要立即关注:**"]
     lines += ["- %s @ %s(%s)%s" % (
-        e.get("disease_name_cn"), e.get("country_cn"),
-            e.get("impact_level") or (e.get("china_risk") or {}).get("level", "-"),
-        (" — " + str((e.get("china_risk") or {}).get("rationale", ""))[:60])
-        if (e.get("china_risk") or {}).get("rationale") else "") for e in highs[:5]]
-    if not highs:
-        lines.append("- 今日无。")
-    tail = os.environ.get("RADAR_PUBLIC_URL")
-    lines += ["", "---", "全文见 Word 简报与疫情面板%s" % (": " + tail if tail else ""),
-              "> AI 辅助生成 · 仅供情报参考"]
+        e.get("title_cn") or e.get("title_en") or "（无标题）", e.get("country_cn"),
+        e.get("impact_level") or "未研判",
+        (" — " + str(e.get("impact_rationale", ""))[:60]) if e.get("impact_rationale") else "") for e in highs[:5]]
+    if not highs: lines.append("- 本期无。")
+    lines += ["", "---", "全文见政策 Markdown / Word / Excel 报告", "> AI 辅助生成 · 仅供情报参考"]
     return "\n".join(lines)
 
 
@@ -156,8 +125,6 @@ def main():
     ap.add_argument("--date", default=datetime.date.today().isoformat())
     ap.add_argument("--days-back", type=int, default=14)
     ap.add_argument("--db-path", help="SQLite 路径覆盖")
-    ap.add_argument("--policy", action="store_true", help="推送政策监测日报(默认)")
-    ap.add_argument("--outbreak", action="store_true", help="推送旧疫情日报兼容模式")
     ap.add_argument("--message", help="发送自定义提醒文本(跳过日报汇总, 供 run_scan.sh 等调用)")
     ap.add_argument("--dry-run", action="store_true", help="只打印消息内容与目标渠道, 不发送")
     args = ap.parse_args()
@@ -166,26 +133,21 @@ def main():
         text = args.message
         docx = None
     else:
-        policy = not args.outbreak
-        rtype = "policy" if policy else "outbreak"
-        data = report.collect(args.date, args.days_back, args.db_path, record_type=rtype)
+        data = report.collect(args.date, args.days_back, args.db_path)
         if data is None:
-            print("[提示] %s库为空, 无可推送内容。" % ("政策" if policy else "疫情"))
+            print("[提示] 政策库为空, 无可推送内容。")
             return 1
-        text = brief_text(args.date, data, policy=policy)
-        suffix = "policy-report" if policy else "daily-report"
-        docx = os.path.join(DATA_DIR, "reports", "%s-%s.docx" % (args.date, suffix))
+        text = brief_text(args.date, data)
+        docx = os.path.join(DATA_DIR, "reports", "%s-policy-report.docx" % args.date)
 
     channels = []
     if os.environ.get("WECHAT_WEBHOOK"):
         channels.append(("企业微信", lambda: send_wechat(text)))
     if os.environ.get("DINGTALK_WEBHOOK"):
-        title = "疫见全球·政策监测日报 %s" if not args.outbreak else "疫见全球·疫情日报 %s"
-        channels.append(("钉钉", lambda: send_dingtalk(text, title % args.date)))
+        channels.append(("钉钉", lambda: send_dingtalk(text, "疫见全球·政策监测日报 %s" % args.date)))
     if os.environ.get("SMTP_HOST"):
-        subject = "疫见全球·政策监测日报 %s" if not args.outbreak else "疫见全球·疫情日报 %s"
         channels.append(("邮箱(%s)" % os.environ.get("SMTP_TO", ""),
-                         lambda: send_mail(subject % args.date, text, docx)))
+                         lambda: send_mail("疫见全球·政策监测日报 %s" % args.date, text, docx)))
 
     if args.dry_run or not channels:
         print(text)

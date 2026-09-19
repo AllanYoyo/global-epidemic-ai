@@ -1,17 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""事件标准化入库: 校验字段 -> 生成 event_id -> 写 data/events/ 与 SQLite。
+"""政策变化记录标准化入库。
 
-事件字段权威定义见 docs/event-schema.md; 本脚本是该模型的唯一代码实现,
-deduplicate.py / risk.py / report.py 都从本模块导入公共函数。
-
-记录分两类(record_type): outbreak=疫情事件(默认) / policy=政策变化事件(policy 分支),
-共用同一套存储、去重、核验、研判与日报管线, 仅必填字段与 event_id 派生方式不同。
-
-用法:
-  python normalize.py --input events.json --out data/events/2026-09-12 --db
-  python normalize.py --input patch.json --update --db    # 按 event_id 合并更新已有事件
-  cat raw.json | python normalize.py --input - --db
+本分支生产数据合同只有 record_type=policy。字段权威定义见
+ docs/event-schema.md; 本脚本负责校验字段、生成稳定 event_id、写 JSON 与 SQLite。
 """
 import argparse
 import datetime
@@ -23,97 +15,76 @@ import sqlite3
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.environ.get("EPIDEMIC_DATA_DIR") or os.path.join(REPO, "data")
 DB_PATH = os.environ.get("EPIDEMIC_DB") or os.path.join(REPO, "database", "epidemic.db")
-
-REQUIRED = ["disease_name_cn", "disease_name_en", "category", "country_cn",
-            "country_en", "event_date", "source"]
-CATEGORIES = {"animal", "plant", "policy"}
 VERIF_STATUS = {"verified", "single_source", "unverified", "false_positive", "merged"}
-RECORD_TYPES = {"outbreak", "policy"}
 POLICY_ACTIONS = {"收紧", "放松", "调整", "恢复"}
+POLICY_DOMAINS = {"animal", "plant", "both", "trade", "measures"}
+POLICY_IMPACT_TYPES = {"约束", "机会", "中性"}
+POLICY_IMPACT_LEVELS = {"高影响", "中影响", "低影响"}
+POLICY_CHINA_RELEVANCE = {"直接涉及中国", "间接影响", "暂无明显关联"}
 
 
 def now():
     return datetime.datetime.now().isoformat(timespec="seconds")
 
 
-def infer_record_type(e):
-    """默认生产口径为政策;含病名的旧 JSON 自动识别为疫情事件。"""
-    if e.get("record_type") in RECORD_TYPES:
-        return e["record_type"]
-    if e.get("category") == "policy" or any(e.get(k) for k in
-            ("title_cn", "title_en", "action_type", "policy_domain", "products")):
-        return "policy"
-    if e.get("disease_name_cn") or e.get("disease_name_en"):
-        return "outbreak"
-    return "policy"
-
-
-def is_policy(e):
-    return infer_record_type(e) == "policy"
-
-
 def event_id_of(e):
-    if is_policy(e):
-        products = e.get("products") or e.get("affected_products") or []
-        targets = e.get("target_countries") or e.get("affected_countries") or []
-        subject = e.get("policy_key") or "|".join([
-            str(e.get("disease_name_en") or "").strip().lower(),
-            ",".join(sorted(str(x).strip().lower() for x in products)),
-            ",".join(sorted(str(x).strip().lower() for x in targets)),
-            str(e.get("scope") or "").strip().lower(),
-        ])
-        key = "|".join([
-            "policy", str(e.get("country_en", "")).strip().lower(),
-            str(e.get("policy_domain") or "").strip().lower(),
-            str(e.get("action_type") or "").strip().lower(), subject,
-            str(e.get("effective_date") or e.get("event_date") or "").strip(),
-        ])
-        return hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
+    products = e.get("products") or []
+    targets = e.get("target_countries") or []
+    subject = e.get("policy_key") or "|".join([
+        str(e.get("disease_name_en") or "").strip().lower(),
+        ",".join(sorted(str(x).strip().lower() for x in products)),
+        ",".join(sorted(str(x).strip().lower() for x in targets)),
+        str(e.get("scope") or "").strip().lower(),
+    ])
     key = "|".join([
-        str(e.get("disease_name_en", "")).strip().lower(),
-        str(e.get("country_en", "")).strip().lower(),
-        str(e.get("event_date", "")), str(e.get("region") or ""),
+        "policy", str(e.get("country_en", "")).strip().lower(),
+        str(e.get("policy_domain") or "").strip().lower(),
+        str(e.get("action_type") or "").strip().lower(), subject,
+        str(e.get("effective_date") or e.get("event_date") or "").strip(),
     ])
     return hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
 
 
 def validate(e):
-    policy = is_policy(e)
     errs = []
-    if e.get("record_type") is not None and e["record_type"] not in RECORD_TYPES:
-        errs.append("record_type 必须为 outbreak|policy")
-    if policy:
-        errs += ["缺少必填字段 %s" % k for k in
-                 ("country_cn", "country_en", "source") if not e.get(k)]
-        if not (e.get("event_date") or e.get("effective_date")):
-            errs.append("政策记录需要 event_date 或 effective_date")
-        if e.get("category") not in (None, "policy"):
-            errs.append("policy 记录的 category 必须为 policy, 政策领域请写入 policy_domain")
-        if e.get("action_type") and e["action_type"] not in POLICY_ACTIONS:
-            errs.append("action_type 必须为 收紧|放松|调整|恢复")
-        if not (e.get("title_cn") or e.get("title_en") or e.get("summary_cn")):
-            errs.append("政策记录需要 title_cn / title_en / summary_cn 至少其一")
-    else:
-        errs += ["缺少必填字段 %s" % k for k in REQUIRED if not e.get(k)]
-        if e.get("category") not in ("animal", "plant"):
-            errs.append("outbreak 记录的 category 必须为 animal|plant")
+    if e.get("record_type") not in (None, "policy"):
+        errs.append("record_type 必须为 policy")
+    for key in ("country_cn", "country_en", "source"):
+        if not e.get(key):
+            errs.append("缺少必填字段 %s" % key)
+    if not (e.get("event_date") or e.get("effective_date")):
+        errs.append("政策记录需要 event_date 或 effective_date")
+    if e.get("category") not in (None, "policy"):
+        errs.append("政策记录的 category 必须为 policy")
+    if e.get("action_type") and e["action_type"] not in POLICY_ACTIONS:
+        errs.append("action_type 必须为 收紧|放松|调整|恢复")
+    if e.get("policy_domain") and e["policy_domain"] not in POLICY_DOMAINS:
+        errs.append("policy_domain 取值不合法")
+    if not (e.get("title_cn") or e.get("title_en") or e.get("summary_cn")):
+        errs.append("政策记录需要 title_cn / title_en / summary_cn 至少其一")
     src = e.get("source")
     if not isinstance(src, dict) or not src.get("url"):
         errs.append("source.url 必填(可溯源是硬要求)")
-    if policy and isinstance(src, dict):
+    if isinstance(src, dict):
         if not src.get("quote"):
-            errs.append("policy 记录的 source.quote 必填")
+            errs.append("source.quote 必填")
         elif len(str(src["quote"])) > 120:
             errs.append("source.quote 不得超过 120 字")
     if e.get("verification_status") and e["verification_status"] not in VERIF_STATUS:
         errs.append("verification_status 非法: %s" % e["verification_status"])
+    if e.get("impact_type") and e["impact_type"] not in POLICY_IMPACT_TYPES:
+        errs.append("impact_type 必须为 约束|机会|中性")
+    if e.get("impact_level") and e["impact_level"] not in POLICY_IMPACT_LEVELS:
+        errs.append("impact_level 必须为 高影响|中影响|低影响")
+    if e.get("china_relevance") and e["china_relevance"] not in POLICY_CHINA_RELEVANCE:
+        errs.append("china_relevance 取值不合法")
     return errs
 
 
 def fill_defaults(e):
-    policy = is_policy(e)
-    if policy:
-        e["event_date"] = e.get("effective_date") or e.get("event_date")
+    e["record_type"] = "policy"
+    e["category"] = "policy"
+    e["event_date"] = e.get("effective_date") or e.get("event_date")
     d = str(e["event_date"]).strip()
     precision = e.get("date_precision")
     if len(d) == 4:
@@ -123,29 +94,25 @@ def fill_defaults(e):
     else:
         precision = precision or "day"
     e["event_date"], e["date_precision"] = d, precision
-
-    e["record_type"] = "policy" if policy else "outbreak"
-    if policy:
-        e["category"] = "policy"
-        e.setdefault("policy_domain", "measures")
-        e.setdefault("action_type", "调整")
-        e.setdefault("policy_status", "已生效")
-        e.setdefault("impact_type", None)
-        e.setdefault("impact_level", None)
-        e.setdefault("china_relevance", None)
-        e.setdefault("recommended_action", None)
-        e.setdefault("effective_date", e["event_date"])
-        e.setdefault("disease_name_cn", None)
-        e.setdefault("disease_name_en", None)
+    e.setdefault("policy_domain", "measures")
+    e.setdefault("action_type", "调整")
+    e.setdefault("policy_status", "已生效")
+    e.setdefault("effective_date", e["event_date"])
+    e.setdefault("impact_type", None)
+    e.setdefault("impact_level", None)
+    e.setdefault("impact_score", None)
+    e.setdefault("impact_focus", None)
+    e.setdefault("impact_rationale", None)
+    e.setdefault("china_relevance", None)
+    e.setdefault("recommended_action", None)
+    e.setdefault("dimension_scores", {})
+    e.setdefault("disease_name_cn", None)
+    e.setdefault("disease_name_en", None)
     e.setdefault("region", None)
-    e.setdefault("host_species", [])
-    e.setdefault("quantity", {})
     e.setdefault("cross_sources", [])
     e.setdefault("checked_urls", [])
     e.setdefault("verification_status", "unverified")
-    e.setdefault("china_risk", None)
     e.setdefault("summary_cn", None)
-
     ts = now()
     e["event_id"] = e.get("event_id") or event_id_of(e)
     e["first_seen"] = e.get("first_seen") or ts
@@ -161,14 +128,17 @@ def open_db(path=None):
     con = sqlite3.connect(path)
     con.execute(
         "CREATE TABLE IF NOT EXISTS events ("
-        " event_id TEXT PRIMARY KEY,"
-        " payload TEXT NOT NULL,"
+        " event_id TEXT PRIMARY KEY, payload TEXT NOT NULL,"
         " disease_en TEXT, country_en TEXT, category TEXT, event_date TEXT,"
-        " verification_status TEXT, risk_level TEXT, focus TEXT, updated_at TEXT)"
+        " verification_status TEXT, impact_level TEXT, impact_focus TEXT, updated_at TEXT)"
     )
     cols = {r[1] for r in con.execute("PRAGMA table_info(events)").fetchall()}
-    if "record_type" not in cols:  # 旧库升级: 追加 record_type 列
+    if "record_type" not in cols:
         con.execute("ALTER TABLE events ADD COLUMN record_type TEXT")
+    if "impact_level" not in cols:
+        con.execute("ALTER TABLE events ADD COLUMN impact_level TEXT")
+    if "impact_focus" not in cols:
+        con.execute("ALTER TABLE events ADD COLUMN impact_focus TEXT")
     con.execute("CREATE INDEX IF NOT EXISTS idx_events_date ON events(event_date)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_events_status ON events(verification_status)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_events_type ON events(record_type)")
@@ -176,7 +146,6 @@ def open_db(path=None):
 
 
 def upsert(con, e, merge=False):
-    """写入一条事件。merge=True 时与库中已有记录合并(新值非空才覆盖)。"""
     row = con.execute("SELECT payload FROM events WHERE event_id = ?", (e["event_id"],)).fetchone()
     if row and merge:
         old = json.loads(row[0])
@@ -187,14 +156,12 @@ def upsert(con, e, merge=False):
         e["first_seen"] = old.get("first_seen") or e.get("first_seen")
         e["updated_at"] = now()
     con.execute(
-        "INSERT OR REPLACE INTO events VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-        (e["event_id"], json.dumps(e, ensure_ascii=False),
-         e.get("disease_name_en"), e.get("country_en"), e.get("category"),
-         e.get("event_date"), e.get("verification_status"),
-         (e.get("china_risk") or {}).get("level"),
-         (e.get("china_risk") or {}).get("focus"),
-         e.get("updated_at"),
-         e.get("record_type", "outbreak")),
+        "INSERT OR REPLACE INTO events "
+        "(event_id,payload,disease_en,country_en,category,event_date,verification_status,impact_level,impact_focus,updated_at,record_type) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (e["event_id"], json.dumps(e, ensure_ascii=False), None,
+         e.get("country_en"), "policy", e.get("event_date"),
+         e.get("verification_status"), e.get("impact_level"), e.get("impact_focus"), e.get("updated_at"), "policy"),
     )
     con.commit()
     return e
@@ -214,31 +181,24 @@ def write_event_file(e, out_dir):
 
 
 def _load_input(spec):
-    raw = __import__("sys").stdin.read() if spec == "-" else \
-        open(spec, encoding="utf-8").read()
+    raw = __import__("sys").stdin.read() if spec == "-" else open(spec, encoding="utf-8").read()
     data = json.loads(raw)
-    if isinstance(data, dict):
-        data = data.get("events") or [data]
-    return data
+    return data.get("events") or [data] if isinstance(data, dict) else data
 
 
 def main():
-    ap = argparse.ArgumentParser(
-        description="疫情事件标准化入库(字段定义见 docs/event-schema.md)",
-        formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--input", required=True, help="JSON 文件路径; - 为 stdin; 事件对象或数组")
-    ap.add_argument("--out", help="事件 JSON 落盘目录(默认 data/events/<今天>/)")
-    ap.add_argument("--db", action="store_true", help="写入 SQLite(EPIDEMIC_DB, 默认 database/epidemic.db)")
+    ap = argparse.ArgumentParser(description="政策变化记录标准化入库")
+    ap.add_argument("--input", required=True, help="政策 JSON 文件路径; - 为 stdin")
+    ap.add_argument("--out", help="政策 JSON 落盘目录")
+    ap.add_argument("--db", action="store_true", help="写入 SQLite")
     ap.add_argument("--db-path", help="SQLite 路径覆盖")
-    ap.add_argument("--update", action="store_true", help="按 event_id 合并更新已有事件(保留 china_risk 等)")
+    ap.add_argument("--update", action="store_true", help="按 event_id 合并更新已有政策")
     args = ap.parse_args()
-
     try:
         records = _load_input(args.input)
     except (OSError, ValueError) as exc:
         print("[错误] 读取/解析输入失败: %s" % exc)
         return 2
-
     events, failed = [], []
     for i, e in enumerate(records):
         errs = validate(e)
@@ -250,21 +210,16 @@ def main():
         print("[校验失败] 第%d条: %s" % (i, "; ".join(errs)))
     if not events:
         return 2
-
     out_dir = args.out or os.path.join(DATA_DIR, "events", datetime.date.today().isoformat())
     con = open_db(args.db_path) if (args.db or args.db_path) else None
     for e in events:
         if con:
             e = upsert(con, e, merge=args.update)
         write_event_file(e, out_dir)
-        risk = e.get("china_risk") or {}
-        kind = "政策" if is_policy(e) else "疫情"
-        title = e.get("title_cn") or e.get("title_en") if is_policy(e) else e.get("disease_name_en")
-        print("[OK] %s  %s  %s @ %s  %s  [%s] 风险:%s/%s" % (
-            e["event_id"], kind, title, e.get("country_en"),
-            e.get("event_date"), e.get("verification_status"),
-            risk.get("level", "-"), risk.get("focus", "-")))
-
+        print("[OK] %s  政策  %s @ %s  %s  [%s] 影响:%s" % (
+            e["event_id"], e.get("title_cn") or e.get("title_en") or "（无标题）",
+            e.get("country_en"), e.get("event_date"), e.get("verification_status"),
+            e.get("impact_level") or "未研判"))
     print("\n入库 %d 条(校验失败 %d 条) -> %s%s" % (
         len(events), len(failed), out_dir,
         (" + SQLite: %s" % (args.db_path or DB_PATH)) if con else ""))

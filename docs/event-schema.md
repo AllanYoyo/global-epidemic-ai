@@ -1,90 +1,75 @@
-# 事件数据模型(Event Schema)
+# 政府动植物检疫政策变化数据模型
 
-> 本模型是各 Skill 与 `scripts/` 之间的"合同"。
+> 本模型是政策监测 Skill 与 `scripts/` 之间的合同。
 > 代码唯一权威实现:`scripts/normalize.py`;本页是人类可读版。
-> 任何一方改字段,必须同步:本文档、`normalize.py`、`prompts/extraction.md` / `prompts/policy-extraction.md`。
+> 本分支生产数据只允许 `record_type=policy`;未来如重新建设疫情检测,应另建数据合同与管线。
 
-## 两类记录(record_type)
+## 记录范围
 
-| record_type | 含义 | 事件来源 | 专用 Prompt |
-|---|---|---|---|
-| `outbreak`(兼容) | 疫情事件:发生了什么病、在哪里、多大范围 | `global-epidemic-search` | `prompts/extraction.md` |
-| `policy` | 政策变化:外国政府对动植物检疫/进出口管控做了什么动作(仅外国政府;中国海关总署公告不采集,由 china-risk-analysis 按需检索) | `global-policy-search`(policy 分支) | `prompts/policy-extraction.md` |
+只收录**外国政府或国际组织发布的动植物检疫/进出口管控政策变化**:
+暂停、禁止、恢复、放宽、检疫要求、区域化、SPS 通报、移动管控、免疫/扑杀政策、企业/口岸准入等。
+中国海关总署不作为政策记录采集源,只在政策影响研判中按需作为背景。
 
-两类记录共用同一事件库、核验分级与 `china_risk` 研判(对政策记录含义为"对华影响"),按 `record_type` 区分。生产入口默认写入 `policy`;旧 JSON 缺少 `record_type` 时由 normalize.py 按病名/政策字段兼容推断。
-
-## 字段表(公共)
-
-| 字段 | 类型 | 必填 | 说明 | 示例 |
-|---|---|---|---|---|
-| event_id | string | 自动 | outbreak: sha1(病名EN\|国名EN\|event_date\|region) 前 12 位;policy: sha1("policy"\|国名EN\|policy_domain\|action_type\|标题) —— 同一政策修订入库即更新,不新建 | `a1b2c3d4e5f6` |
-| record_type | string | 自动 | `outbreak` / `policy` | policy |
-| category | string | ✅ | outbreak: `animal` / `plant`; policy: 标记 `policy`, 具体领域写 `policy_domain` | policy |
-| country_cn / country_en | string | ✅ | 国家(中/英) | 德国 / Germany |
-| region | string | – | 一级行政区(州/省) | Brandenburg |
-| event_date | string | ✅ | 发生/生效/公告日期;粒度不足自动补齐并写 date_precision | 2026-09-10 |
-| date_precision | string | 自动 | day / month / year | day |
-| source | object | ✅ | `tier`(1-3) / `name` / `url` / `publish_date` / `quote`(政策记录≤120字, outbreak按原文关键句) | 见下 |
-| cross_sources | object[] | – | 其他独立来源,结构同 source | – |
-| verification_status | string | 自动 | verified / single_source / unverified / false_positive / merged | unverified |
-| verification_notes | string | – | 核验结论一句话 | – |
-| checked_urls | string[] | – | 核验时查过的链接(含无效线索,留轨迹) | – |
-| china_risk | object | 兼容研判后 | `{level, score, focus, rationale, trade_relevance, existing_gacc_measures, dimension_scores}`;政策记录仅作旧排序兼容 |
-| impact_type / impact_level | string | 政策研判后 | 约束/机会/中性;高影响/中影响/低影响(政策专属) |
-| china_relevance | string | 政策研判后 | 直接涉及中国 / 间接影响 / 暂无明显关联 |
-| recommended_action | string | 政策研判后 | 建议动作(核查准入/持续跟踪/提醒企业/常规记录) |
-| summary_cn | string | – | 一句话中文摘要(≤60 字) | – |
-| raw_excerpt | string | – | 原文关键段落 | – |
-| first_seen / updated_at | datetime | 自动 | 首次入库 / 最近更新 | – |
-| merged_into | string | – | (重复事件)指向保留事件的 event_id | – |
-
-## 字段表(outbreak 疫情事件专用)
+## 公共字段
 
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
-| disease_name_cn / disease_name_en | string | ✅ | 病害中英文名(优先 watchlist 标准命名) |
-| pathogen | string | – | 病原(血清型/小种/株型) |
-| host_species | string[] | – | 宿主动物 / 受害作物 |
-| location_detail | string | – | 更具体的位置 |
-| latitude / longitude | number | – | 有则填,用于地图与邻近计算 |
-| report_date | string | – | 官方发布日期 |
-| quantity | object | – | 动物: susceptible/cases/deaths/killed_or_disposed;植物: affected_area(带单位)/destroyed |
-| spread_status | string | – | 新发 / 持续 / 已控制 / 不明 |
+| event_id | string | 自动 | sha1(政策国EN\|政策领域\|动作\|关联对象\|生效日期) 前 12 位;同一政策修订按主键幂等更新 |
+| record_type | string | 自动 | 固定为 `policy` |
+| category | string | 自动 | 固定为 `policy`;具体领域使用 `policy_domain` |
+| country_cn / country_en | string | ✅ | 发布/适用政策的国家或地区 |
+| region | string | – | 省州/保护区/口岸范围 |
+| event_date | string | ✅ | 公告/生效日期;政策优先使用 `effective_date` |
+| effective_date / effective_until | string | – | 生效日/有效期截止日 |
+| source | object | ✅ | tier/name/url/publish_date/quote; quote 不超过 120 字 |
+| cross_sources | object[] | – | 其他独立来源 |
+| verification_status | string | 自动 | verified / single_source / unverified / false_positive / merged |
+| verification_notes | string | – | 官方核验结论 |
+| checked_urls | string[] | – | 核验轨迹 |
+| first_seen / updated_at | datetime | 自动 | 首次入库/最近更新; update 不刷新 first_seen |
+| summary_cn | string | – | 政策变化一句话摘要 |
+| raw_excerpt | string | – | 原文关键段落 |
 
-## 字段表(policy 政策变化专用)
+## 政策内容字段
 
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
-| title_cn / title_en | string | ✅(至少其一) | 政策动作一句话标题 |
-| action_type | string | – | 收紧(加严/新增限制) / 放松(取消/简化) / 调整(范围/程序变更) / 恢复(解除后重新允许) |
+| title_cn / title_en | string | ✅至少其一 | 政策动作标题 |
+| action_type | string | – | 收紧 / 放松 / 调整 / 恢复 |
 | policy_status | string | – | 草案 / 已发布未生效 / 已生效 / 已解除 / 不明 |
-| impact_type | string | 研判后 | 约束 / 机会 / 中性 |
-| impact_level | string | 研判后 | 高影响 / 中影响 / 低影响(不是病原风险) |
-| china_relevance | string | 研判后 | 直接涉及中国 / 间接影响 / 暂无明显关联 |
-| recommended_action | string | 研判后 | 后续建议动作 |
 | policy_domain | string | – | animal / plant / both / trade / measures |
-| prev_action | string | – | 该国该领域此前动作(原文提及才填) |
-| products | string[] | – | 涉及商品/品类(HS 章节或品名,原文口径) |
-| legal_basis | string | – | 公告文号 / 法规编号 / 通报编号(如 G/SPS/N/xxx) |
-| effective_until | string | – | 有效期截止(ISO 8601) |
-| scope | string | – | 适用地区/企业/口岸范围 |
-| disease_name_cn / disease_name_en | string | – | 仅针对特定病害的政策才填 |
+| prev_action | string | – | 此前政策状态 |
+| issuer_cn / issuer_en | string | – | 发布机构 |
+| target_countries | string[] | – | 涉及国家/地区 |
+| products | string[] | – | 受影响商品 |
+| disease_name_cn / disease_name_en | string | – | 关联病害,可为空 |
+| scope | string | – | 适用地区/企业/口岸 |
+| legal_basis | string | – | 公告文号/法规编号/SPS 通报号 |
 
-> 政策记录的病名可缺(不针对单一病害的政策),`country_cn/en` + `event_date` + `source` 仍必填;`title_cn/title_en/summary_cn` 至少其一。
-> 政策记录不参与 `deduplicate.py` 聚合(同一条政策靠稳定 event_id 幂等更新)。
+## 政策影响研判字段
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| impact_type | string | 研判后 | 约束 / 机会 / 中性 |
+| impact_level | string | 研判后 | 高影响 / 中影响 / 低影响;不是病原风险 |
+| china_relevance | string | 研判后 | 直接涉及中国 / 间接影响 / 暂无明显关联 |
+| recommended_action | string | 研判后 | 核查准入、跟踪法规、提醒企业、常规记录等 |
+| impact_score | number | 研判后 | 0–5 影响分 |
+| impact_focus | string | 研判后 | 立即关注 / 持续观察 / 常规记录 |
+| impact_rationale | string | 研判后 | 事实依据 |
+| dimension_scores | object | 研判后 | trade/biosecurity/response/alignment 四维分数 |
 
 ## 状态流转
 
 ```text
-raw(原始情报)
-  → unverified ──(epidemic-verification)──→ verified / single_source / false_positive
-  └────────(deduplicate, 仅 outbreak)────→ merged(merged_into 指向保留事件)
-verified ──(china-risk-analysis / policy 影响研判)──→ 政策写入 impact_type/impact_level/china_relevance/recommended_action, 同步保留 china_risk(focus: 立即关注 / 持续观察 / 常规记录)
+raw(政策原文)
+  → unverified ──(官方核验)──→ verified / single_source / false_positive
+verified ──(政策影响研判)──→ 写入 impact_type / impact_level / china_relevance / recommended_action
 ```
 
 ## 设计原则
 
-1. **可溯源**:每条事件必须能通过 `source.url` 回到原始出处;摘不出原文引用的情报不进入事件库。
-2. **不编造**:抽取时缺什么填 `null`,绝不推测;贸易背景没有就如实写"背景资料未提及"。
-3. **幂等**:`event_id` 稳定,重复入库即更新;修改已有事件一律用 `normalize.py --update`(合并写入,保留 china_risk 等已写入字段)。
-4. **一库两类**:疫情与政策变化共用存储与管线,日报与面板按 `record_type` 分流,避免两套数据模型漂移。
+1. **可溯源**:政策必须能通过 `source.url` 回到外国政府/国际组织原文。
+2. **不编造**:原文没有的商品、日期、影响和建议动作填 null 或“未注明”。
+3. **政策优先**:生产入口、网页、Word、Excel、推送只处理政策变化。
+4. **幂等**:政策主键稳定,重复入库更新原记录并保留 first_seen。

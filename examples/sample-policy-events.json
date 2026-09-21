@@ -64,5 +64,25 @@
     "scope": "全部入境种苗企业",
     "source": {"tier": 1, "name": "演示国丙植物保护局", "url": "https://example.com/policy-demo-3", "publish_date": "2026-09-16", "quote": "ToBRFV interception rate rising; imported tomato seedlings must complete 30-day quarantine (演示数据)"},
     "summary_cn": "演示国丙针对ToBRFV拦截率上升, 对番茄种苗加施30天入境隔离(演示数据)"
+  },
+  {
+    "record_type": "policy",
+    "category": "policy",
+    "title_cn": "演示国丁拟修订检疫执行令, 将活兔及活蜜蜂纳入进口前通报制度(演示数据)",
+    "title_en": "Demo Land Delta proposes amending quarantine execution ordinance to add live rabbits and bees to advance notification scheme (demo)",
+    "country_cn": "演示国丁",
+    "country_en": "Demo Land Delta",
+    "policy_domain": "animal",
+    "action_type": "调整",
+    "prev_action": "仅马反刍动物与家禽需进口前通报",
+    "disease_name_cn": null,
+    "disease_name_en": null,
+    "products": ["活兔", "活蜜蜂"],
+    "legal_basis": "Demo Act on Domestic Animal Infectious Diseases Control, Execution Ordinance draft",
+    "event_date": "2026-09-17",
+    "effective_until": null,
+    "scope": "全部活兔与活蜜蜂进口商",
+    "source": {"tier": 1, "name": "演示国丁农林部门", "url": "https://example.com/policy-demo-4", "publish_date": "2026-09-17", "quote": "Live rabbits and live bees will be added to the advance notification scheme for animal imports (演示数据)"},
+    "summary_cn": "演示国丁拟将活兔及活蜜蜂纳入动物进口前通报制度, 处于草案阶段(演示数据)"
   }
 ]

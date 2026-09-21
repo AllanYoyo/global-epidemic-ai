@@ -6,8 +6,12 @@
 
 ## 记录范围
 
-只收录**外国政府或国际组织发布的动植物检疫/进出口管控政策变化**:
-暂停、禁止、恢复、放宽、检疫要求、区域化、SPS 通报、移动管控、免疫/扑杀政策、企业/口岸准入等。
+只收录**外国政府或国际组织发布的动植物检疫/进出口管控政策变化**,主题包括:
+进出口暂停/禁止/恢复/放宽、检疫要求与进口卫生标准修订、双边进口议定书更新、SPS 通报、
+区域化与等效性认可、企业/口岸/名单准入、进口前通报制度、个体标识要求(微芯片/腿环)、
+动物源性生物制品与生物材料(细胞系/牛血清/诊断试剂盒)、病原微生物目录与实验活动审批、
+兽药与违禁物质管控、食品/饲料添加剂与原料准入、植物检疫(种子/种苗/有害生物名录/新生物体)、
+移动管控、免疫/扑杀政策、国际组织(WOAH/FAO/GPP-TAD/ECTAD/IPPC/EPPO)行动呼吁等。
 中国海关总署不作为政策记录采集源,只在政策影响研判中按需作为背景。
 
 ## 公共字段
@@ -37,7 +41,7 @@
 | title_cn / title_en | string | ✅至少其一 | 政策动作标题 |
 | action_type | string | – | 收紧 / 放松 / 调整 / 恢复 |
 | policy_status | string | – | 草案 / 已发布未生效 / 已生效 / 已解除 / 不明 |
-| policy_domain | string | – | animal / plant / both / trade / measures |
+| policy_domain | string | – | animal / plant / both / trade / measures;按政策的主要对象归类 |
 | prev_action | string | – | 此前政策状态 |
 | issuer_cn / issuer_en | string | – | 发布机构 |
 | target_countries | string[] | – | 涉及国家/地区 |

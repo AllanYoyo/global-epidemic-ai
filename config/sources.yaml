@@ -519,20 +519,174 @@ sources:
     method: search
     notes: 学术期刊, 不作事件来源; 研判时的病原背景资料用
 
-# ---- 政策变化监测检索模板(global-policy-search Skill / policy 分支) ----
+# ---- 政策关键词词库(global-policy-search 检索与抽取共用; 每条 {cn, en, aliases[]}) ----
+# 用法: 检索时"国家 × 关键词组 × 动作词"组合; 抽取时用于识别政策主题与同义词归一。
+# 范围: 动物与植物; 不含中国海关总署。
+policy_keywords:
+  # -- 核心主题与机制 --
+  organizations:
+    - {cn: SPS 通报(卫生与植物卫生措施), en: SPS notification, aliases: ["sanitary and phytosanitary measures", "G/SPS/N/", "ePing"]}
+    - {cn: 进口卫生标准, en: import health standards, aliases: ["IHS", "import health requirement"]}
+    - {cn: 动物源性产品检疫, en: animal origin product inspection, aliases: ["animal by-products", "processed animal protein"]}
+    - {cn: 跨境动物疾病, en: transboundary animal diseases, aliases: ["TADs"]}
+    - {cn: 生物安全法, en: biosecurity law/act, aliases: ["biosecurity legislation", "biosafety act"]}
+    - {cn: 世界动物卫生组织, en: WOAH, aliases: ["OIE", "World Organisation for Animal Health"]}
+    - {cn: 联合国粮农组织, en: FAO, aliases: ["Food and Agriculture Organization"]}
+    - {cn: 跨境动物疾病全球伙伴计划, en: GPP-TAD, aliases: ["Global Partnership for Transboundary Animal Diseases"]}
+    - {cn: 跨界动物疾病紧急中心, en: ECTAD, aliases: ["Emergency Centre for Transboundary Animal Diseases"]}
+    - {cn: 国际植物保护公约, en: IPPC, aliases: ["International Plant Protection Convention", "IPPC contact points"]}
+    - {cn: 欧洲与地中海植物保护组织, en: EPPO, aliases: ["European and Mediterranean Plant Protection Organization"]}
+    - {cn: 技术性贸易壁垒, en: TBT, aliases: ["technical barriers to trade"]}
+    - {cn: 兽医立法, en: veterinary legislation, aliases: ["veterinary law", "animal health law"]}
+    - {cn: 植物检疫, en: plant quarantine, aliases: ["phytosanitary", "plant health"]}
+  # -- 产品与生物材料 --
+  commodities:
+    - {cn: 微生物, en: microorganisms, aliases: ["microbes", "pathogenic agents"]}
+    - {cn: 动物源性生物制品, en: biological products of animal origin, aliases: ["animal biologicals", "biologics"]}
+    - {cn: 细胞系, en: cell lines, aliases: ["cell cultures"]}
+    - {cn: 牛血清, en: bovine serum, aliases: ["fetal bovine serum", "FBS", "newborn calf serum"]}
+    - {cn: 病毒载体, en: viral vectors, aliases: ["virus vectors"]}
+    - {cn: 诊断试剂盒, en: diagnostic kits, aliases: ["test kits", "diagnostic reagents"]}
+    - {cn: 动物源性产品, en: animal origin products, aliases: ["animal products", "products of animal origin"]}
+    - {cn: 水产品, en: aquatic products, aliases: ["fishery products", "aquatic animal products"]}
+    - {cn: 明胶, en: gelatin, aliases: ["gelatine", "collagen"]}
+    - {cn: 食品添加剂, en: food additives, aliases: ["feed additives", "processing aids"]}
+    - {cn: 维生素 D3, en: vitamin D3, aliases: ["cholecalciferol"]}
+    - {cn: 宠物食品, en: pet food, aliases: ["petfood", "animal feed for companion animals"]}
+    - {cn: 饲料原料, en: feed ingredients, aliases: ["feed raw materials", "feedstuff"]}
+    - {cn: 硫酸软骨素, en: chondroitin sulfate, aliases: ["chondroitin sulphate"]}
+    - {cn: 氨基葡萄糖, en: glucosamine, aliases: ["glucosamine sulfate"]}
+    - {cn: 壳聚糖, en: chitosan, aliases: ["chitosan derivatives"]}
+    - {cn: L-半胱氨酸, en: L-cysteine, aliases: ["cysteine hydrochloride"]}
+    - {cn: 兽药, en: veterinary drugs, aliases: ["veterinary medicines", "veterinary pharmaceuticals"]}
+    - {cn: 违禁物质, en: prohibited substances, aliases: ["banned substances", "residue limits", "MRL"]}
+  # -- 活动物与繁殖材料 --
+  animals:
+    - {cn: 马科动物, en: equines, aliases: ["equidae", "horses", "马匹"]}
+    - {cn: 家禽, en: poultry, aliases: ["birds", "avian"]}
+    - {cn: 雏鸡, en: day-old chicks, aliases: ["DOC", "一天龄雏鸡"]}
+    - {cn: 受精种蛋, en: fertile hatching eggs, aliases: ["hatching eggs"]}
+    - {cn: 种禽, en: breeding poultry, aliases: ["parent stock", "grandparent stock"]}
+    - {cn: 火鸡/鹅/鸭/鹌鹑/雉鸡/石鸡, en: turkeys / geese / ducks / quail / pheasants / partridges, aliases: ["game birds", "waterfowl"]}
+    - {cn: 蜜蜂, en: bees, aliases: ["honey bees", "bee products", "queens"]}
+    - {cn: 活兔, en: live rabbits, aliases: ["rabbits", "lagomorphs"]}
+    - {cn: 种猪/种牛/种羊, en: breeding swine / cattle / sheep, aliases: ["breeding livestock", "genetic material", "semen", "embryos"]}
+    - {cn: 犬猫等伴侣动物, en: companion animals, aliases: ["dogs", "cats", "pet animals"]}
+    - {cn: 水生活体, en: live aquatic animals, aliases: ["ornamental fish", "aquaculture stock", "fish fry"]}
+  # -- 植物与繁殖材料 --
+  plants:
+    - {cn: 种子, en: seeds, aliases: ["seed lots", "sowing seeds"]}
+    - {cn: 种苗/组培苗, en: plant propagating material, aliases: ["cuttings", "tissue culture", "in vitro material", "nursery stock"]}
+    - {cn: 水果蔬菜, en: fruits and vegetables, aliases: ["fresh produce", "fresh fruits", "vegetables"]}
+    - {cn: 谷物, en: cereals, aliases: ["grains", "oilseeds"]}
+    - {cn: 木材与木质包装, en: wood and wood packaging, aliases: ["timber", "ISPM 15", "wood packaging material"]}
+    - {cn: 花卉, en: flowers, aliases: ["bulbs", "cut flowers", "ornamental plants"]}
+    - {cn: 有害生物, en: plant pests, aliases: ["pests", "quarantine pests", "regulated pests"]}
+    - {cn: 新生物体, en: novel organisms, aliases: ["new organisms", "GMO", "living modified organisms", "LMO"]}
+  # -- 疫病与风险 --
+  pathogens_diseases:
+    - {cn: 禽流感, en: avian influenza, aliases: ["HPAI", "LPAI", "H5N5", "H7N9", "H5N1"]}
+    - {cn: 新城疫, en: Newcastle disease, aliases: ["ND", "paramyxovirus"]}
+    - {cn: 非洲猪瘟, en: African swine fever, aliases: ["ASF"]}
+    - {cn: 口蹄疫, en: foot-and-mouth disease, aliases: ["FMD", "FMDV", "SAT1", "SAT2", "O/PanAsia"]}
+    - {cn: 非洲马瘟, en: African horse sickness, aliases: ["AHS"]}
+    - {cn: 马传染性贫血, en: equine infectious anaemia, aliases: ["EIA", "Coggins"]}
+    - {cn: 马流感, en: equine influenza, aliases: ["EI"]}
+    - {cn: 马鼻疽, en: glanders, aliases: ["Burkholderia mallei"]}
+    - {cn: 狂犬病, en: rabies, aliases: ["rabies virus"]}
+    - {cn: 炭疽, en: anthrax, aliases: ["Bacillus anthracis"]}
+    - {cn: 鸡白痢, en: pullorum disease, aliases: ["Salmonella pullorum"]}
+    - {cn: 鸡毒支原体, en: Mycoplasma gallisepticum, aliases: ["MG"]}
+    - {cn: 禽霍乱, en: fowl cholera, aliases: ["Pasteurella multocida"]}
+    - {cn: 马立克病, en: Marek's disease, aliases: ["MDV"]}
+    - {cn: 禽白血病, en: avian leukosis, aliases: ["ALV"]}
+    - {cn: 传染性法氏囊病, en: infectious bursal disease, aliases: ["IBD", "Gumboro"]}
+    - {cn: 人畜共患病, en: zoonoses, aliases: ["zoonotic diseases"]}
+  # -- 证书与流程 --
+  certificates_processes:
+    - {cn: 进口许可证, en: import permit, aliases: ["import licence", "import authorization"]}
+    - {cn: 官方兽医证书, en: official veterinary certificate, aliases: ["veterinary health certificate"]}
+    - {cn: 国际兽医证书, en: international veterinary certificate, aliases: ["veterinary certificate model"]}
+    - {cn: 健康声明, en: health declaration, aliases: ["health certification", "self-declaration"]}
+    - {cn: 隔离检疫, en: quarantine, aliases: ["post-entry quarantine", "isolation"]}
+    - {cn: 临床检查, en: clinical examination, aliases: ["clinical inspection"]}
+    - {cn: 实验室检测, en: laboratory testing, aliases: ["lab testing", "laboratory diagnosis"]}
+    - {cn: 疫苗接种, en: vaccination, aliases: ["vaccination policy", "emergency vaccination", "ring vaccination"]}
+    - {cn: 免疫扩散试验, en: AGID test, aliases: ["agar gel immunodiffusion"]}
+    - {cn: PCR 检测, en: PCR testing, aliases: ["real-time PCR", "qPCR", "molecular testing"]}
+    - {cn: 病毒分离, en: virus isolation, aliases: ["viral isolation"]}
+    - {cn: 微芯片, en: microchip, aliases: ["ISO 11784", "identifCIATION chip", "ear tag", "封闭腿环", "closed leg ring"]}
+    - {cn: 风险评估, en: risk assessment, aliases: ["risk analysis", "IRA"]}
+    - {cn: 等效性认可, en: equivalence recognition, aliases: ["equivalence", "regionalization", "zoning", "compartmentalisation"]}
+    - {cn: 电子证书, en: electronic certificate, aliases: ["e-cert", "ePhyto"]}
+    - {cn: 标签要求, en: labelling requirements, aliases: ["labeling", "marking"]}
+    - {cn: 追溯性, en: traceability, aliases: ["trace-back", "identification and traceability"]}
+    - {cn: 评议期, en: comment period, aliases: ["consultation period"]}
+    - {cn: 过渡期, en: transition period, aliases: ["grace period", "phase-in period"]}
+  # -- 法规与标准 --
+  regulations:
+    - {cn: 欧盟食品添加剂法规, en: EC No 1331/2008, aliases: ["EC 1331/2008"]}
+    - {cn: 欧盟饲料添加剂法规, en: EC No 1831/2003, aliases: ["EC 1831/2003"]}
+    - {cn: 欧盟动物副产品法规, en: EC No 1069/2009, aliases: ["EC 1069/2009", "animal by-products regulation"]}
+    - {cn: 欧盟动物源性食品卫生法规, en: EC No 853/2004, aliases: ["EC 853/2004"]}
+    - {cn: 欧盟条例, en: EU Regulation, aliases: ["Commission Implementing Regulation", "Delegated Regulation"]}
+    - {cn: 美国联邦法令, en: Federal Order, aliases: ["Federal Register", "9 CFR", "interim rule"]}
+    - {cn: 家畜传染病管制法(日), en: Act on Domestic Animal Infectious Diseases Control, aliases: ["家畜伝染病予防法", "execution ordinance"]}
+    - {cn: 生物安全法(澳/新), en: Biosecurity Act, aliases: ["Biosecurity (Import Health Standards)", "novel organisms"]}
+    - {cn: 进口前通报制度, en: advance notification requirement, aliases: ["prior notification", "pre-import notification"]}
+    - {cn: 病原微生物目录, en: pathogenic microorganism catalogue, aliases: ["microorganism catalogue", "pathogen list"]}
+
+# ---- 政策变化监测检索模板(global-policy-search Skill) ----
 # 范围: 仅外国政府的动植物检疫管控政策变化。
 # 中国海关总署公告不作为政策记录采集; 仅作为影响研判的背景资料。
+# 组合方式: 国家(policy_keywords 涉及国) × 关键词组 × 动作动词。
 policy_queries:
-  sps:         # WTO SPS 通报(各成员措施变化官方渠道)
+  sps:             # WTO SPS 通报(各成员措施变化官方渠道)
     - 'site:eping.wto.org SPS emergency measure animal {month_en_year}'
     - 'site:eping.wto.org SPS plant phytosanitary {month_en_year}'
     - 'G/SPS/N "{disease_en}" OR "import suspension" {year}'
-  official:    # 重点伙伴官方检疫机构公告
+    - '"G/SPS/N/" comment period animal OR plant health {month_en_year}'
+  official:        # 重点伙伴官方检疫机构公告
     - '"{country}" suspends imports livestock "animal health" {month_en_year}'
     - '"{country}" lifts ban imports poultry OR beef OR pork {month_en_year}'
     - 'site:aphis.usda.gov import ban OR suspension {month_en_year}'
     - '"European Commission" SERS "emergency measures" animal health {month_en_year}'
     - '"{country}" import suspension OR ban "{disease_en}" {month_en_year}'
-  reactive:    # 外国政府因动植物检疫事件发布的连带贸易措施
+  disease_triggered:  # 因动植物检疫事件发布的连带贸易措施
     - '"{disease_en}" "{country}" "suspends imports" OR "bans imports" {month_en_year}'
     - '"{disease_en}" "{country}" trade restriction OR import requirement {month_en_year}'
+  product_access:  # 商品 × 准入动作
+    - '"{country}" import requirements "animal origin products" OR "fishery products" {month_en_year}'
+    - '"{country_cn}" "{product_cn}" 进口 检疫 要求 公告 {year}'
+    - '"{country}" pet food OR "feed ingredients" import conditions {year}'
+    - 'gelatin OR "chondroitin sulfate" OR glucosamine OR chitosan import "{country}" {year}'
+  animals:         # 活动物/繁殖材料检疫条件
+    - '"{country}" equines OR horses import health requirements {year}'
+    - '"day-old chicks" OR "fertile hatching eggs" import conditions "{country}" {year}'
+    - '"{country}" "breeding swine" OR "breeding cattle" OR "genetic material" import {year}'
+    - 'bees OR "live rabbits" OR "companion animals" import requirements "{country}" {year}'
+    - '"{country}" "live aquatic animals" OR "ornamental fish" import health {year}'
+  plants:          # 植物检疫与繁殖材料
+    - 'IPPC "emergency measures" plant pest {month_en_year}'
+    - '"{country}" seeds OR "nursery stock" OR "tissue culture" phytosanitary import {year}'
+    - 'EPPO alert OR "reporting service" quarantine pest {month_en_year}'
+    - '"{country_cn}" 植物检疫 有害生物 名录 OR 通报 {year}'
+  biologics:       # 生物制品与病原微生物监管
+    - '"{country}" "cell lines" OR "bovine serum" OR "viral vectors" import requirements {year}'
+    - '"pathogenic microorganisms" import OR handling requirements "{country}" {year}'
+    - 'veterinary biologicals OR "diagnostic kits" registration OR import authorization "{country}" {year}'
+    - '实验室 高致病性 病原微生物 审批 OR 目录 {year}'
+  certification:   # 证书/许可/标识/隔离流程
+    - '"{country}" "import permit" OR "official veterinary certificate" changes {year}'
+    - 'microchip OR "ISO 11784" OR "closed leg ring" import requirement birds OR "pet animals" {year}'
+    - 'electronic certification OR ePhyto phytosanitary "{country}" {year}'
+    - 'post-entry quarantine requirements "{country}" animals OR plants {year}'
+  regulation:      # 法规修订与制度调整
+    - '"{country}" amends OR revises "veterinary legislation" OR "animal health law" {year}'
+    - 'draft OR proposed amendment "import health standards" "{country}" {year}'
+    - '"{country}" "advance notification" OR "prior notification" imports animals {year}'
+    - '"{country_cn}" 修订 进出口 检疫 要求 OR 管理办法 {year}'
+  organisations:   # 国际组织行动与呼吁
+    - 'WOAH OR FAO urges OR calls action "{disease_en}" {year}'
+    - 'FAO "GPP-TAD" OR ECTAD animal disease action {year}'
+    - 'WOAH recommendation OR statement trade measures animal health {year}'

@@ -248,6 +248,7 @@ def export_table(base_path, events):
 def main():
     ap = argparse.ArgumentParser(description="生成政策监测日报")
     ap.add_argument("--date", default=datetime.date.today().isoformat()); ap.add_argument("--days-back", type=int, default=14)
+    ap.add_argument("--policy", action="store_true", help="(已废弃, 无效果) 政策为唯一模式, 兼容旧定时/面板命令")
     ap.add_argument("--excel", action="store_true"); ap.add_argument("--docx", action="store_true"); ap.add_argument("--db-path")
     args = ap.parse_args(); data = collect(args.date, args.days_back, args.db_path)
     if data is None: data = {"all": [], "new": [], "active": [], "covered": []}

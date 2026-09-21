@@ -15,6 +15,7 @@ description: 监测各国政府动植物检疫与进出口管控政策变化。�
 
 - `config/sources.yaml`:
   - `sources`:含 measures 覆盖的官方源清单;
+  - `policy_watch_countries`:priority_1 / priority_2 / state_level 国家和官方 source_ids;
   - `policy_keywords`:政策关键词词库(组织机制/商品生物材料/活动物/植物/疫病风险/证书流程/法规标准,每条 {cn, en, aliases[]});
   - `policy_queries`:按主题分组的检索模板。
 
@@ -36,12 +37,14 @@ description: 监测各国政府动植物检疫与进出口管控政策变化。�
 ## 步骤
 
 1. **定窗口**:确认时间窗(默认今天)。运行标识为当天日期 `YYYY-MM-DD`。
-2. **组合检索**:按"国家 × 关键词组 × 动作动词"生成查询,以 `policy_keywords` 各组为核心:
+2. **按优先级组合检索**:按 `policy_watch_countries.priority_1` → `priority_2` → `state_level` 顺序扫描,每个国家至少覆盖动物、植物、进出口/措施三个主题面:
+   - 第一优先级国家每日扫描;第二优先级国家分批/每周扫描;美国州级通道以州名+州农业部门/州兽医官/植物监管官检索;
+   - 每个国家使用 aliases 和 source_ids 定位官方站内公告,再用 `policy_keywords` 主题词与动作词组合;
    - 用 `policy_queries.sps` 过一遍 WTO ePing 动植物 SPS 通报列表;
-   - 用 `policy_queries.official` 检索重点伙伴(美/欧/澳/新/巴西/俄/日/韩/东南亚)官方检疫机构新闻页;
-   - 用 `policy_queries.animals / plants / biologics / certification / product_access / regulation` 逐主题检索;
+   - 用 `policy_queries.official` 检索国家官方检疫机构新闻页;
+   - 用 `policy_queries.animals / plants / biologics / certification / product_access / regulation / country_sweep` 逐主题检索;
    - 用 `policy_queries.organisations` 跟踪 WOAH/FAO/GPP-TAD/ECTAD/IPPC/EPPO 的行动与呼吁;
-   - 对已知高关注病害,用 `policy_queries.disease_triggered` 检索各国连带措施。
+   - 用 `policy_queries.disease_triggered` 作为疫情背景触发型补充,不让病害清单决定国家范围。
 3. **逐条存档**:
    - 网页:`python scripts/collect.py --url "<URL>" --title "<标题>"`(存到 `data/raw/<日期>/`);
    - 搜索摘要:写入 `data/raw/<日期>/search-log.md`(每行:国家 | 主题 | 动作 | 来源 | 标题 | URL | 摘要 | 命中查询)。
@@ -62,7 +65,7 @@ description: 监测各国政府动植物检疫与进出口管控政策变化。�
    政策影响分级(不是病原风险):高影响/中影响/低影响;影响类型:约束/机会/中性;
    中国关联:直接涉及中国/间接影响/暂无明显关联。仅中高影响政策做完整贸易背景检索,低影响只做基础判断。
 
-6. **汇总产出**:写 `data/raw/<日期>/policy-findings.md`:本期动作数(按收紧/放松/调整/恢复分组)、按政策主题分组(检疫条件/生物制品/标识要求/通报制度/兽药管控/国际组织行动等)、涉及国家与商品、关联病害、对华影响要点。
+6. **汇总产出**:写 `data/raw/<日期>/policy-findings.md`:按优先级国家、政策主题、动作类型和影响等级分组,列出涉及国家、机构、商品/动物/植物、关联病害与对华影响要点。
 
 ## 红线
 

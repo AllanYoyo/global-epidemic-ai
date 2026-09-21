@@ -11,6 +11,66 @@
 runs:
   policy: {time: "07:30", desc: 外国政府政策变化扫, 产出: 政策日报+Word+Excel+推送, sources: [measures]}
 
+# ---- 政策监测国家优先级 ----
+policy_watch_countries:
+  priority_1:
+    - {cn: 加拿大, en: Canada, aliases: [CFIA], source_ids: [ca-cfia]}
+    - {cn: 泰国, en: Thailand, aliases: [DLD, DOA], source_ids: [th-dld, th-doa]}
+    - {cn: 越南, en: Vietnam, aliases: [MARD, DAH], source_ids: [vn-mard]}
+    - {cn: 印度尼西亚, en: Indonesia, aliases: [DVS Indonesia], source_ids: [id-dvs]}
+    - {cn: 马来西亚, en: Malaysia, aliases: [DVS Malaysia], source_ids: [my-dvs]}
+    - {cn: 菲律宾, en: Philippines, aliases: [BAI, BPI], source_ids: [ph-bai, ph-bpi]}
+    - {cn: 印度, en: India, aliases: [DAHD, PPQS], source_ids: [in-dahd, in-ppqs]}
+    - {cn: 哈萨克斯坦, en: Kazakhstan, aliases: [Kazakhstan Agriculture], source_ids: [kz-agri]}
+    - {cn: 蒙古, en: Mongolia, aliases: [Mongolia Veterinary], source_ids: [mn-vet]}
+    - {cn: 南非, en: South Africa, aliases: [DALRRD], source_ids: [za-dalrrd]}
+    - {cn: 巴西, en: Brazil, aliases: [MAPA, Vigiagro], source_ids: [br-mapa]}
+    - {cn: 阿根廷, en: Argentina, aliases: [SENASA], source_ids: [ar-senasa]}
+    - {cn: 智利, en: Chile, aliases: [SAG], source_ids: [cl-sag]}
+  priority_2:
+    - {cn: 英国, en: United Kingdom, aliases: [DEFRA, APHA], source_ids: [uk-defra]}
+    - {cn: 法国, en: France, aliases: [French Agriculture], source_ids: [fr-agri]}
+    - {cn: 德国, en: Germany, aliases: [FLI, BMEL], source_ids: [de-fli, de-bmel]}
+    - {cn: 意大利, en: Italy, aliases: [MASAF], source_ids: [it-masaf]}
+    - {cn: 西班牙, en: Spain, aliases: [MAPA], source_ids: [es-mapa]}
+    - {cn: 荷兰, en: Netherlands, aliases: [NVWA], source_ids: [nl-nvwa]}
+    - {cn: 波兰, en: Poland, aliases: [WetGIW], source_ids: [pl-wetgiw]}
+    - {cn: 罗马尼亚, en: Romania, aliases: [ANSVSA], source_ids: [ro-ansvsa]}
+    - {cn: 墨西哥, en: Mexico, aliases: [SENASICA], source_ids: [mx-senasica]}
+    - {cn: 美国, en: United States, aliases: [USDA APHIS, state agriculture departments], source_ids: [usda-aphis, us-state-agri]}
+  state_level:
+    - {cn: 美国州级农业部门, en: US state agriculture departments, aliases: [state veterinarian, state plant regulatory official], source_ids: [us-state-agri]}
+
+# ---- 政策监测国家优先级 ----
+policy_watch_countries:
+  priority_1:
+    - {cn: 加拿大, en: Canada, aliases: [CFIA], source_ids: [ca-cfia]}
+    - {cn: 泰国, en: Thailand, aliases: [DLD, DOA], source_ids: [th-dld, th-doa]}
+    - {cn: 越南, en: Vietnam, aliases: [MARD, DAH], source_ids: [vn-mard]}
+    - {cn: 印度尼西亚, en: Indonesia, aliases: [DVS Indonesia], source_ids: [id-dvs]}
+    - {cn: 马来西亚, en: Malaysia, aliases: [DVS Malaysia], source_ids: [my-dvs]}
+    - {cn: 菲律宾, en: Philippines, aliases: [BAI, BPI], source_ids: [ph-bai, ph-bpi]}
+    - {cn: 印度, en: India, aliases: [DAHD, PPQS], source_ids: [in-dahd, in-ppqs]}
+    - {cn: 哈萨克斯坦, en: Kazakhstan, aliases: [Kazakhstan Agriculture], source_ids: [kz-agri]}
+    - {cn: 蒙古, en: Mongolia, aliases: [Mongolia Veterinary], source_ids: [mn-vet]}
+    - {cn: 南非, en: South Africa, aliases: [DALRRD], source_ids: [za-dalrrd]}
+    - {cn: 巴西, en: Brazil, aliases: [MAPA, Vigiagro], source_ids: [br-mapa]}
+    - {cn: 阿根廷, en: Argentina, aliases: [SENASA], source_ids: [ar-senasa]}
+    - {cn: 智利, en: Chile, aliases: [SAG], source_ids: [cl-sag]}
+  priority_2:
+    - {cn: 英国, en: United Kingdom, aliases: [DEFRA, APHA], source_ids: [uk-defra]}
+    - {cn: 法国, en: France, aliases: [French Agriculture], source_ids: [fr-agri]}
+    - {cn: 德国, en: Germany, aliases: [FLI, BMEL], source_ids: [de-fli, de-bmel]}
+    - {cn: 意大利, en: Italy, aliases: [MASAF], source_ids: [it-masaf]}
+    - {cn: 西班牙, en: Spain, aliases: [MAPA], source_ids: [es-mapa]}
+    - {cn: 荷兰, en: Netherlands, aliases: [NVWA], source_ids: [nl-nvwa]}
+    - {cn: 波兰, en: Poland, aliases: [WetGIW], source_ids: [pl-wetgiw]}
+    - {cn: 罗马尼亚, en: Romania, aliases: [ANSVSA], source_ids: [ro-ansvsa]}
+    - {cn: 墨西哥, en: Mexico, aliases: [SENASICA], source_ids: [mx-senasica]}
+    - {cn: 美国, en: United States, aliases: [USDA APHIS, state agriculture departments], source_ids: [usda-aphis, us-state-agri]}
+  state_level:
+    - {cn: 美国州级农业部门, en: US state agriculture departments, aliases: [state veterinarian, state plant regulatory official], source_ids: [us-state-agri]}
+
 # ---- 情报源分级: 1 官方(可直接支撑 verified) / 2 专业(需交叉) / 3 媒体(仅线索) ----
 # schedule 档位: am_pm=晨扫+晚扫 / am=仅晨扫 / weekly=每周一晨扫附加 / passive=不主动扫
 sources:
@@ -436,6 +496,224 @@ sources:
     method: browse
     notes: 州级卫生部门, 人畜共患病线索; Excel给的是深层页, 归一到门户
 
+  # ---- 政策监测国家官方源(优先级清单) ----
+  - id: ca-cfia
+    name: 加拿大食品检验局(CFIA)
+    url: https://inspection.canada.ca/
+    coverage: [measures, animal, plant]
+    tier: 1
+    schedule: am
+    lang: [en, fr]
+    method: browse
+    notes: 加拿大动物卫生、植物保护和进口检疫政策
+  - id: th-dld
+    name: 泰国畜牧发展厅(DLD)
+    url: https://dld.go.th/
+    coverage: [measures, animal]
+    tier: 1
+    schedule: am
+    lang: [th, en]
+    method: browse
+    notes: 活动物、动物产品和兽医条件
+  - id: th-doa
+    name: 泰国农业厅(DOA)
+    url: https://www.doa.go.th/
+    coverage: [measures, plant]
+    tier: 1
+    schedule: am
+    lang: [th, en]
+    method: browse
+    notes: 植物检疫和种苗进口要求
+  - id: id-dvs
+    name: 印度尼西亚农业部动物卫生部门(DVS)
+    url: https://ditjenpkh.pertanian.go.id/
+    coverage: [measures, animal]
+    tier: 1
+    schedule: am
+    lang: [id, en]
+    method: browse
+    notes: 动物及动物产品进口和疫病管控
+  - id: my-dvs
+    name: 马来西亚兽医服务局(DVS)
+    url: https://www.dvs.gov.my/
+    coverage: [measures, animal]
+    tier: 1
+    schedule: am
+    lang: [ms, en]
+    method: browse
+    notes: 活动物、动物产品和进口议定书
+  - id: ph-bai
+    name: 菲律宾动物工业局(BAI)
+    url: https://www.bai.gov.ph/
+    coverage: [measures, animal]
+    tier: 1
+    schedule: am
+    lang: [en]
+    method: browse
+    notes: 动物进口许可和兽医条件
+  - id: ph-bpi
+    name: 菲律宾植物工业局(BPI)
+    url: https://www.bpi.da.gov.ph/
+    coverage: [measures, plant]
+    tier: 1
+    schedule: am
+    lang: [en]
+    method: browse
+    notes: 植物检疫和有害生物管控
+  - id: in-dahd
+    name: 印度畜牧与乳业部(DAHD)
+    url: https://dahd.nic.in/
+    coverage: [measures, animal]
+    tier: 1
+    schedule: am
+    lang: [en]
+    method: browse
+    notes: 动物卫生和进口条件
+  - id: in-ppqs
+    name: 印度植物保护检疫与储存局(PPQS)
+    url: https://ppqs.gov.in/
+    coverage: [measures, plant]
+    tier: 1
+    schedule: am
+    lang: [en]
+    method: browse
+    notes: 植物检疫和有害生物措施
+  - id: kz-agri
+    name: 哈萨克斯坦农业部及兽医/植物检疫部门
+    url: https://www.gov.kz/memleket/entities/moa
+    coverage: [measures, animal, plant]
+    tier: 1
+    schedule: am
+    lang: [kk, ru, en]
+    method: browse
+    notes: 中亚通道国家政策源
+  - id: mn-vet
+    name: 蒙古兽医与动物卫生主管部门
+    url: https://vet.gov.mn/
+    coverage: [measures, animal]
+    tier: 1
+    schedule: am
+    lang: [mn, en]
+    method: browse
+    notes: 中蒙边境活畜和动物产品检疫
+  - id: za-dalrrd
+    name: 南非农业、土地改革与农村发展部(DALRRD)
+    url: https://www.dlrrd.gov.za/
+    coverage: [measures, animal, plant]
+    tier: 1
+    schedule: am
+    lang: [en]
+    method: browse
+    notes: 动植物卫生和进口许可
+  - id: br-mapa
+    name: 巴西农业与畜牧部(MAPA)
+    url: https://www.gov.br/agricultura/pt-br
+    coverage: [measures, animal, plant]
+    tier: 1
+    schedule: am
+    lang: [pt, en]
+    method: browse
+    notes: 动植物产品准入与检疫法规
+  - id: ar-senasa
+    name: 阿根廷国家农牧食品卫生质量局(SENASA)
+    url: https://www.argentina.gob.ar/senasa
+    coverage: [measures, animal, plant]
+    tier: 1
+    schedule: am
+    lang: [es, en]
+    method: browse
+    notes: 动物/植物产品和区域化措施
+  - id: cl-sag
+    name: 智利农牧局(SAG)
+    url: https://www.sag.gob.cl/
+    coverage: [measures, animal, plant]
+    tier: 1
+    schedule: am
+    lang: [es, en]
+    method: browse
+    notes: 动植物检疫和进口议定书
+  - id: uk-defra
+    name: 英国环境、食品与农村事务部(DEFRA/APHA)
+    url: https://www.gov.uk/government/organisations/department-for-environment-food-rural-affairs
+    coverage: [measures, animal, plant]
+    tier: 1
+    schedule: weekly
+    lang: [en]
+    method: browse
+    notes: 英国动物与植物卫生和法规
+  - id: fr-agri
+    name: 法国农业与粮食部门
+    url: https://agriculture.gouv.fr/
+    coverage: [measures, animal, plant]
+    tier: 1
+    schedule: weekly
+    lang: [fr, en]
+    method: browse
+    notes: 法国动植物卫生和欧盟政策落地
+  - id: de-bmel
+    name: 德国联邦食品与农业部(BMEL)
+    url: https://www.bmel.de/
+    coverage: [measures, animal, plant]
+    tier: 1
+    schedule: weekly
+    lang: [de, en]
+    method: browse
+    notes: 德国联邦动物卫生、植物保护和法规
+  - id: it-masaf
+    name: 意大利农业、粮食主权与林业部(MASAF)
+    url: https://www.masaf.gov.it/
+    coverage: [measures, animal, plant]
+    tier: 1
+    schedule: weekly
+    lang: [it, en]
+    method: browse
+    notes: 动植物检疫与农产品进口政策
+  - id: es-mapa
+    name: 西班牙农业、渔业与食品部(MAPA)
+    url: https://www.mapa.gob.es/
+    coverage: [measures, animal, plant]
+    tier: 1
+    schedule: weekly
+    lang: [es, en]
+    method: browse
+    notes: 动物卫生、植物检疫和农产品准入
+  - id: nl-nvwa
+    name: 荷兰食品与消费品安全局(NVWA)
+    url: https://www.nvwa.nl/
+    coverage: [measures, animal, plant]
+    tier: 1
+    schedule: weekly
+    lang: [nl, en]
+    method: browse
+    notes: 荷兰动植物卫生和进口检疫
+  - id: ro-ansvsa
+    name: 罗马尼亚国家卫生兽医与食品安全局(ANSVSA)
+    url: https://www.ansvsa.ro/
+    coverage: [measures, animal]
+    tier: 1
+    schedule: weekly
+    lang: [ro, en]
+    method: browse
+    notes: 动物卫生和动物产品进口
+  - id: mx-senasica
+    name: 墨西哥国家农业食品卫生、安全与质量服务局(SENASICA)
+    url: https://www.gob.mx/senasica
+    coverage: [measures, animal, plant]
+    tier: 1
+    schedule: weekly
+    lang: [es, en]
+    method: browse
+    notes: 动植物检疫和农产品准入
+  - id: us-state-agri
+    name: 美国州级农业与州兽医部门集合入口
+    url: https://www.nasda.org/organizations/state-departments-of-agriculture
+    coverage: [measures, animal, plant]
+    tier: 1
+    schedule: weekly
+    lang: [en]
+    method: search
+    notes: 以州名+state veterinarian/department of agriculture/plant regulatory official检索并回溯各州官方域名
+
   # ---- 全球组织与行业媒体 ----
   - id: wto-eping
     name: WTO ePing(SPS/TBT 通报预警)
@@ -690,3 +968,15 @@ policy_queries:
     - 'WOAH OR FAO urges OR calls action "{disease_en}" {year}'
     - 'FAO "GPP-TAD" OR ECTAD animal disease action {year}'
     - 'WOAH recommendation OR statement trade measures animal health {year}'
+  country_sweep:    # 国家 × 主题词组 × 动作词,不依赖单一病害
+    - '"{country}" (amends OR revises OR updates OR introduces OR suspends OR resumes) (quarantine OR import requirement OR veterinary certificate OR phytosanitary) {year}'
+    - '"{country}" (animal health law OR biosecurity law OR veterinary legislation) (draft OR amendment OR regulation) {year}'
+    - '"{country}" (SPS OR G/SPS/N OR TBT) (animal OR plant OR feed OR veterinary) {year}'
+    - '"{country}" (microchip OR "ISO 11784" OR "advance notification" OR "import permit") animals {year}'
+    - '"{country}" (cell lines OR "bovine serum" OR "diagnostic kits" OR microorganisms) import regulation {year}'
+    - '"{country_cn}" 动植物 检疫 (修订 OR 调整 OR 新增 OR 取消 OR 暂停 OR 恢复) {year}'
+  state_us:        # 美国州级农业/州兽医/植物监管机构
+    - '"{state}" department of agriculture (quarantine OR import OR animal health OR plant health) {year}'
+    - '"{state}" state veterinarian (order OR quarantine OR disease control) {year}'
+    - '"{state}" plant regulatory official (phytosanitary OR quarantine pest OR nursery stock) {year}'
+    - 'site:gov "{state}" "animal health" "import requirements" {year}'

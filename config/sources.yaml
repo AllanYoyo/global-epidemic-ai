@@ -41,36 +41,6 @@ policy_watch_countries:
   state_level:
     - {cn: 美国州级农业部门, en: US state agriculture departments, aliases: [state veterinarian, state plant regulatory official], source_ids: [us-state-agri]}
 
-# ---- 政策监测国家优先级 ----
-policy_watch_countries:
-  priority_1:
-    - {cn: 加拿大, en: Canada, aliases: [CFIA], source_ids: [ca-cfia]}
-    - {cn: 泰国, en: Thailand, aliases: [DLD, DOA], source_ids: [th-dld, th-doa]}
-    - {cn: 越南, en: Vietnam, aliases: [MARD, DAH], source_ids: [vn-mard]}
-    - {cn: 印度尼西亚, en: Indonesia, aliases: [DVS Indonesia], source_ids: [id-dvs]}
-    - {cn: 马来西亚, en: Malaysia, aliases: [DVS Malaysia], source_ids: [my-dvs]}
-    - {cn: 菲律宾, en: Philippines, aliases: [BAI, BPI], source_ids: [ph-bai, ph-bpi]}
-    - {cn: 印度, en: India, aliases: [DAHD, PPQS], source_ids: [in-dahd, in-ppqs]}
-    - {cn: 哈萨克斯坦, en: Kazakhstan, aliases: [Kazakhstan Agriculture], source_ids: [kz-agri]}
-    - {cn: 蒙古, en: Mongolia, aliases: [Mongolia Veterinary], source_ids: [mn-vet]}
-    - {cn: 南非, en: South Africa, aliases: [DALRRD], source_ids: [za-dalrrd]}
-    - {cn: 巴西, en: Brazil, aliases: [MAPA, Vigiagro], source_ids: [br-mapa]}
-    - {cn: 阿根廷, en: Argentina, aliases: [SENASA], source_ids: [ar-senasa]}
-    - {cn: 智利, en: Chile, aliases: [SAG], source_ids: [cl-sag]}
-  priority_2:
-    - {cn: 英国, en: United Kingdom, aliases: [DEFRA, APHA], source_ids: [uk-defra]}
-    - {cn: 法国, en: France, aliases: [French Agriculture], source_ids: [fr-agri]}
-    - {cn: 德国, en: Germany, aliases: [FLI, BMEL], source_ids: [de-fli, de-bmel]}
-    - {cn: 意大利, en: Italy, aliases: [MASAF], source_ids: [it-masaf]}
-    - {cn: 西班牙, en: Spain, aliases: [MAPA], source_ids: [es-mapa]}
-    - {cn: 荷兰, en: Netherlands, aliases: [NVWA], source_ids: [nl-nvwa]}
-    - {cn: 波兰, en: Poland, aliases: [WetGIW], source_ids: [pl-wetgiw]}
-    - {cn: 罗马尼亚, en: Romania, aliases: [ANSVSA], source_ids: [ro-ansvsa]}
-    - {cn: 墨西哥, en: Mexico, aliases: [SENASICA], source_ids: [mx-senasica]}
-    - {cn: 美国, en: United States, aliases: [USDA APHIS, state agriculture departments], source_ids: [usda-aphis, us-state-agri]}
-  state_level:
-    - {cn: 美国州级农业部门, en: US state agriculture departments, aliases: [state veterinarian, state plant regulatory official], source_ids: [us-state-agri]}
-
 # ---- 情报源分级: 1 官方(可直接支撑 verified) / 2 专业(需交叉) / 3 媒体(仅线索) ----
 # schedule 档位: am_pm=晨扫+晚扫 / am=仅晨扫 / weekly=每周一晨扫附加 / passive=不主动扫
 sources:

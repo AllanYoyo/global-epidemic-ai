@@ -378,7 +378,7 @@ function initMap(){
     $('#map').innerHTML='<div style="padding:40px;color:#8493ab">Leaflet 未加载: 请确认服务器 webapp/static/ 存在且未被拦截(刷新或查看浏览器控制台)</div>';
     return;
   }
-  MAP=L.map('map',{center:[28,45],zoom:2,worldCopyJump:true,minZoom:2});
+  MAP=L.map('map',{center:[28,45],zoom:2,worldCopyJump:true,minZoom:2,attributionControl:false});
   L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',{
     maxZoom:16,attribution:'Tiles © Esri — Esri, HERE, Garmin, USGS, NGA'}).addTo(MAP);
   MARKERS=L.layerGroup().addTo(MAP);

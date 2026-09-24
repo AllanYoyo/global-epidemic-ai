@@ -54,13 +54,18 @@ description: 监测各国政府动植物检疫与进出口管控政策变化。�
    python scripts/normalize.py --input data/raw/<日期>/extracted-policy.json --out data/events/<日期>/ --db
    ```
 
+   event_id 已存在时自动合并更新, 空值与默认状态不覆盖已完成的核验/研判结论。
+
 5. **对华影响研判**:对每条 verified 政策记录,检索对华贸易与海关现有措施背景,按 `prompts/policy-impact.md` 研判,用 risk.py 写回政策专属字段:
 
    ```bash
-   python scripts/risk.py --event-id <event_id> --impact-type 约束 --impact-level 高影响 \
+   python scripts/risk.py --event-id <event_id> --impact-type 约束 \
      --china-relevance 间接影响 --action "立即核查我国相关进口准入" \
-     --rationale "..." --score 3.8 --focus 立即关注
+     --rationale "..." --dim trade=4 --dim biosecurity=3,response=3,alignment=2
    ```
+
+   四维齐全时 score/level/focus 由代码按加权合同(trade*0.35+biosecurity*0.30+response*0.25+alignment*0.10)推导;
+   给出的 score/level/focus 与四维不一致会被拒绝写回。
 
    政策影响分级(不是病原风险):高影响/中影响/低影响;影响类型:约束/机会/中性;
    中国关联:直接涉及中国/间接影响/暂无明显关联。仅中高影响政策做完整贸易背景检索,低影响只做基础判断。

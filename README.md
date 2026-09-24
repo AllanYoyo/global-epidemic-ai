@@ -42,17 +42,16 @@ pip install openpyxl python-docx
 # 政策公告存档
 python scripts/collect.py --url "https://example.com/notice" --title "外国官方检疫公告"
 
-# 抽取后的政策 JSON 入库
+# 抽取后的政策 JSON 入库(重复入库按 event_id 自动合并, 不覆盖已完成的核验/研判; 整行替换需显式 --replace)
 python scripts/normalize.py --input data/raw/<日期>/extracted-policy.json \
   --out data/events/<日期>/ --db
 
-# 写回影响研判
+# 写回影响研判(四维齐全时 score/level/focus 由代码按加权合同推导并强校验)
 python scripts/risk.py --event-id <id> \
-  --impact-type 约束 --impact-level 高影响 \
-  --china-relevance 间接影响 \
+  --impact-type 约束 --china-relevance 间接影响 \
   --action "立即核查我国相关进口准入" \
   --rationale "依据官方措施与贸易背景" \
-  --score 3.8 --focus 立即关注
+  --dim trade=4 --dim biosecurity=3,response=3,alignment=2
 
 # 生成政策日报、Word 和 Excel
 python scripts/report.py --date $(date +%F) --excel --docx

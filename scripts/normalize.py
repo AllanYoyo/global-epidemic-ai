@@ -4,6 +4,8 @@
 
 本分支生产数据合同只有 record_type=policy。字段权威定义见
  docs/event-schema.md; 本脚本负责校验字段、生成稳定 event_id、写 JSON 与 SQLite。
+event_id 已存在时默认合并更新: 空值与兜底默认值不覆盖已有核验/研判结论,
+需要整行替换时显式传 --replace。
 """
 import argparse
 import datetime
@@ -21,6 +23,8 @@ POLICY_DOMAINS = {"animal", "plant", "both", "trade", "measures"}
 POLICY_IMPACT_TYPES = {"约束", "机会", "中性"}
 POLICY_IMPACT_LEVELS = {"高影响", "中影响", "低影响"}
 POLICY_CHINA_RELEVANCE = {"直接涉及中国", "间接影响", "暂无明显关联"}
+# 合并更新时的兜底默认值: 不覆盖库中更明确的取值, 防止重抽取抹掉核验/研判结论
+DEFAULT_SENTINELS = {"verification_status": "unverified", "policy_status": "已生效"}
 
 
 def now():
@@ -145,12 +149,15 @@ def open_db(path=None):
     return con
 
 
-def upsert(con, e, merge=False):
+def upsert(con, e, merge=True):
     row = con.execute("SELECT payload FROM events WHERE event_id = ?", (e["event_id"],)).fetchone()
     if row and merge:
         old = json.loads(row[0])
         patch = {k: v for k, v in e.items()
                  if v not in (None, [], {}) and k not in ("event_id", "first_seen")}
+        for key, default in DEFAULT_SENTINELS.items():
+            if patch.get(key) == default and old.get(key) not in (None, "", default):
+                del patch[key]
         e = dict(old, **patch)
         e["event_id"] = old.get("event_id") or e.get("event_id")
         e["first_seen"] = old.get("first_seen") or e.get("first_seen")
@@ -192,7 +199,9 @@ def main():
     ap.add_argument("--out", help="政策 JSON 落盘目录")
     ap.add_argument("--db", action="store_true", help="写入 SQLite")
     ap.add_argument("--db-path", help="SQLite 路径覆盖")
-    ap.add_argument("--update", action="store_true", help="按 event_id 合并更新已有政策")
+    ap.add_argument("--update", action="store_true", help="(已废弃) 合并更新已是默认行为")
+    ap.add_argument("--replace", action="store_true",
+                    help="整行替换已有政策(默认按 event_id 合并, 空值/默认状态不覆盖已核验、已研判字段)")
     args = ap.parse_args()
     try:
         records = _load_input(args.input)
@@ -214,7 +223,7 @@ def main():
     con = open_db(args.db_path) if (args.db or args.db_path) else None
     for e in events:
         if con:
-            e = upsert(con, e, merge=args.update)
+            e = upsert(con, e, merge=not args.replace)
         write_event_file(e, out_dir)
         print("[OK] %s  政策  %s @ %s  %s  [%s] 影响:%s" % (
             e["event_id"], e.get("title_cn") or e.get("title_en") or "（无标题）",

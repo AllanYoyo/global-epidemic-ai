@@ -32,6 +32,7 @@ fi
 
 STAMP="$(date '+%F %T')"
 echo "[$STAMP] run_scan mode=$MODE start"
+cd "$REPO"  # agent 依赖仓库相对路径(config/sources.yaml, scripts/*)
 
 if [ -n "${HERMES_RUN_CMD:-}" ]; then
   eval "${HERMES_RUN_CMD/\{PROMPT\}/$PROMPT}"

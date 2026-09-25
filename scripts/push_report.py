@@ -41,8 +41,15 @@ def _cut(text, nbytes):
     return raw[:nbytes].decode("utf-8", errors="ignore") if len(raw) > nbytes else text
 
 
+def _link(e, text="原文"):
+    """来源 markdown 链接; 无 URL 返回空串。"""
+    src = e.get("source") or {}
+    url = src.get("url")
+    return "[%s](%s)" % (text, url) if url else ""
+
+
 def brief_text(date, data):
-    """政策日报 IM 卡片摘要。"""
+    """政策日报 IM 卡片摘要(钉钉/企微不支持附件, 每条附原文链接便于核对)。"""
     new, active, covered = data["new"], data["active"], data["covered"]
     highs = [e for e in covered if e.get("impact_level") == "高影响" or e.get("action_type") == "收紧"]
     countries = sorted({e.get("country_cn") for e in new if e.get("country_cn")})
@@ -54,12 +61,22 @@ def brief_text(date, data):
             sum(1 for e in covered if e.get("verification_status") == "unverified")), "",
         "**涉及国家**: %s" % ("、".join(countries[:8]) + ("等" if len(countries) > 8 else "") if countries else "—"),
         "", "**需要立即关注:**"]
-    lines += ["- %s @ %s(%s)%s" % (
+    lines += ["- %s @ %s(%s)%s %s" % (
         e.get("title_cn") or e.get("title_en") or "（无标题）", e.get("country_cn"),
         e.get("impact_level") or "未研判",
-        (" — " + str(e.get("impact_rationale", ""))[:60]) if e.get("impact_rationale") else "") for e in highs[:5]]
+        (" — " + str(e.get("impact_rationale", ""))[:60]) if e.get("impact_rationale") else "",
+        _link(e)) for e in highs[:5]]
     if not highs: lines.append("- 本期无。")
-    lines += ["", "---", "全文见政策 Markdown / Word / Excel 报告", "> AI 辅助生成 · 仅供情报参考"]
+    if new:
+        lines += ["", "**今日新增一览**(点标题可核对原文):"]
+        lines += ["- [%s](%s) — %s · %s%s" % (
+            e.get("title_cn") or e.get("title_en") or "（无标题）",
+            (e.get("source") or {}).get("url") or "", e.get("action_type") or "-",
+            e.get("impact_type") or "未研判", "/" + e["impact_level"] if e.get("impact_level") else "")
+            for e in new]
+    lines += ["", "---",
+              "全文见政策 Markdown / Word / Excel 报告(面板可下载)",
+              "> AI 辅助生成 · 仅供情报参考"]
     return "\n".join(lines)
 
 

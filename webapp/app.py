@@ -110,7 +110,7 @@ def slim_event(e):
     src = e.get("source") or {}
     return {
         "event_id": e.get("event_id"),
-        "record_type": "policy",
+        "record_type": e.get("record_type"),
         "title_cn": e.get("title_cn"), "title_en": e.get("title_en"),
         "action_type": e.get("action_type"), "policy_domain": e.get("policy_domain"),
         "policy_status": e.get("policy_status"), "issuer_cn": e.get("issuer_cn"),
@@ -181,7 +181,7 @@ def api_events():
     con.close()
     out = [slim_event(e) for e in all_events
            if e.get("verification_status") != "merged"
-           and (e.get("record_type") or "policy") == "policy"]
+           and e.get("record_type") == "policy"]
     return jsonify(out)
 
 

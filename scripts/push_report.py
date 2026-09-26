@@ -15,6 +15,10 @@
 用法:
   python push_report.py --date 2026-09-12
   python push_report.py --date 2026-09-12 --dry-run
+  python push_report.py --date 2026-09-12 --force   # 当日已推送过, 强制重发
+
+幂等: 日报摘要在同一天只发送一次, 成功后写 data/reports/.pushed/<日期>.flag;
+重复调用自动跳过(防止 agent/定时任务重复推送)。--message 自定义消息不受限。
 """
 import argparse
 import base64
@@ -34,6 +38,8 @@ from email.mime.text import MIMEText
 
 import report
 from normalize import DATA_DIR
+
+PUSH_FLAG_DIR = os.path.join(DATA_DIR, "reports", ".pushed")
 
 
 def _cut(text, nbytes):
@@ -144,7 +150,13 @@ def main():
     ap.add_argument("--db-path", help="SQLite 路径覆盖")
     ap.add_argument("--message", help="发送自定义提醒文本(跳过日报汇总, 供 run_scan.sh 等调用)")
     ap.add_argument("--dry-run", action="store_true", help="只打印消息内容与目标渠道, 不发送")
+    ap.add_argument("--force", action="store_true", help="当日日报已推送过也强制重发")
     args = ap.parse_args()
+
+    flag_path = os.path.join(PUSH_FLAG_DIR, "%s.flag" % args.date)
+    if not args.message and not args.dry_run and not args.force and os.path.isfile(flag_path):
+        print("[跳过] %s 日报已推送过(标记: %s), 需重发请加 --force" % (args.date, flag_path))
+        return 0
 
     if args.message:
         text = args.message
@@ -185,6 +197,11 @@ def main():
         except Exception as exc:
             print("[失败] %s: %s" % (name, exc))
     print("\n推送完成: %d/%d 个渠道成功。" % (ok, len(channels)))
+    if not args.message and ok == len(channels) and channels:
+        os.makedirs(PUSH_FLAG_DIR, exist_ok=True)
+        with open(flag_path, "w", encoding="utf-8") as f:
+            f.write("%s 已推送: %s\n" % (datetime.datetime.now().isoformat(timespec="seconds"),
+                                         "、".join(c[0] for c in channels)))
     return 0 if ok else 1
 
 

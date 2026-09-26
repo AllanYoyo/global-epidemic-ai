@@ -37,11 +37,11 @@ cd "$REPO"  # agent 依赖仓库相对路径(config/sources.yaml, scripts/*)
 if [ -n "${HERMES_RUN_CMD:-}" ]; then
   eval "${HERMES_RUN_CMD/\{PROMPT\}/$PROMPT}"
   RC=$?
-  echo "[$STAMP] run_scan mode=$MODE done rc=$RC"
+  echo "[$(date '+%F %T')] run_scan mode=$MODE done rc=$RC"
   exit $RC
 fi
 
-echo "[$STAMP] HERMES_RUN_CMD 未配置, 发送待执行提醒"
+echo "[$(date '+%F %T')] HERMES_RUN_CMD 未配置, 发送待执行提醒"
 "$PY" "$REPO/scripts/push_report.py" --message "⏰ 疫见全球·$MODE 扫描待执行($STAMP)
 请对 Hermes 说: $PROMPT" || true
-echo "[$STAMP] run_scan mode=$MODE fallback-notify done"
+echo "[$(date '+%F %T')] run_scan mode=$MODE fallback-notify done"

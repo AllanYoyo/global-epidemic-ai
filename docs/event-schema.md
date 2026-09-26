@@ -71,6 +71,8 @@ raw(政策原文)
 verified ──(政策影响研判)──→ 写入 impact_type / impact_level / china_relevance / recommended_action
 ```
 
+> 核验状态的组合判定规则(几条 Tier 几的来源判成什么)见 `docs/verification-rules.md`。
+
 ## 设计原则
 
 1. **可溯源**:政策必须能通过 `source.url` 回到外国政府/国际组织原文。

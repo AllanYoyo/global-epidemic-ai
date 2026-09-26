@@ -129,6 +129,8 @@ def slim_event(e):
         "summary_cn": e.get("summary_cn"),
         "impact_type": e.get("impact_type"), "impact_level": impact_level,
         "impact_score": e.get("impact_score"), "china_relevance": e.get("china_relevance"),
+        "impact_focus": e.get("impact_focus"), "impact_rationale": e.get("impact_rationale"),
+        "dimension_scores": e.get("dimension_scores") or {},
         "recommended_action": e.get("recommended_action"), "impact_code": level_code,
         "source_name": src.get("name"), "source_url": src.get("url"),
         "cross_count": len(e.get("cross_sources") or []),
@@ -396,6 +398,8 @@ function popupHtml(e){
    chip('none',e.verification_status)+'<br>'+
    '<span style="color:#b9c6dd">'+esc(e.summary_cn||'')+'</span>'+
    (e.impact_type?'<br><span style="color:#8493ab">影响类型: '+esc(e.impact_type)+(e.china_relevance?' · '+esc(e.china_relevance):'')+'</span>':'')+
+   (e.impact_rationale?'<br><span style="color:#b9c6dd">依据: '+esc(e.impact_rationale)+'</span>':'')+
+   (e.dimension_scores&&Object.keys(e.dimension_scores).length?'<br><span style="color:#8493ab">四维: '+esc(Object.entries(e.dimension_scores).map(([k,v])=>k+' '+v).join(' / '))+(e.impact_score!=null?' → '+esc(e.impact_score)+'分':'')+'</span>':'')+
    (e.recommended_action?'<br><span style="color:#8493ab">建议动作: '+esc(e.recommended_action)+'</span>':'')+
    (e.source_url?'<br>来源: <a href="'+esc(e.source_url)+'" target="_blank">'+esc(e.source_name||'链接')+'</a>':'')+
    '</div>';

@@ -47,39 +47,57 @@ def _cut(text, nbytes):
     return raw[:nbytes].decode("utf-8", errors="ignore") if len(raw) > nbytes else text
 
 
-def _link(e, text="原文"):
-    """来源 markdown 链接; 无 URL 返回空串。"""
-    src = e.get("source") or {}
-    url = src.get("url")
-    return "[%s](%s)" % (text, url) if url else ""
+def _cut_sentence(text, limit=60):
+    """按句子截断, 避免依据被拦腰切断。"""
+    text = str(text or "").strip()
+    if len(text) <= limit:
+        return text
+    head = text[:limit]
+    pos = head.find("。")
+    return head[:pos + 1] if pos > 10 else head.rstrip("，、；") + "…"
+
+
+def _title(e):
+    return e.get("title_cn") or e.get("title_en") or "（无标题）"
 
 
 def brief_text(date, data):
-    """政策日报 IM 卡片摘要(钉钉/企微不支持附件, 每条附原文链接便于核对)。"""
-    new, active, covered = data["new"], data["active"], data["covered"]
-    highs = [e for e in covered if e.get("impact_level") == "高影响" or e.get("action_type") == "收紧"]
+    """政策日报 IM 卡片摘要: 重点关注(中影响/收紧) + 其他新增, 每条附原文链接。"""
+    new, active = data["new"], data["active"]
     countries = sorted({e.get("country_cn") for e in new if e.get("country_cn")})
+    act = {"收紧": 0, "调整": 1, "放松": 2, "恢复": 3}
     lines = [
         "# 🛃 疫见全球 · 政策监测日报 %s" % date, "",
-        "**新增政策变化 %d 条** · 收紧 %d · 放松/恢复 %d · 近期跟踪 %d · 待核实 %d" % (
-            len(new), sum(1 for e in new if e.get("action_type") == "收紧"),
+        "**新增 %d 条** · 收紧 %d · 调整 %d · 放松/恢复 %d · 近期跟踪 %d · 待核实 %d" % (
+            len(new),
+            sum(1 for e in new if e.get("action_type") == "收紧"),
+            sum(1 for e in new if e.get("action_type") == "调整"),
             sum(1 for e in new if e.get("action_type") in ("放松", "恢复")), len(active),
-            sum(1 for e in covered if e.get("verification_status") == "unverified")), "",
+            sum(1 for e in data["covered"] if e.get("verification_status") == "unverified")), "",
         "**涉及国家**: %s" % ("、".join(countries[:8]) + ("等" if len(countries) > 8 else "") if countries else "—"),
-        "", "**需要立即关注:**"]
-    lines += ["- %s @ %s(%s)%s %s" % (
-        e.get("title_cn") or e.get("title_en") or "（无标题）", e.get("country_cn"),
-        e.get("impact_level") or "未研判",
-        (" — " + str(e.get("impact_rationale", ""))[:60]) if e.get("impact_rationale") else "",
-        _link(e)) for e in highs[:5]]
-    if not highs: lines.append("- 本期无。")
-    if new:
-        lines += ["", "**今日新增一览**(点标题可核对原文):"]
-        lines += ["- [%s](%s) — %s · %s%s" % (
-            e.get("title_cn") or e.get("title_en") or "（无标题）",
-            (e.get("source") or {}).get("url") or "", e.get("action_type") or "-",
-            e.get("impact_type") or "未研判", "/" + e["impact_level"] if e.get("impact_level") else "")
-            for e in new]
+    ]
+    focus = [e for e in new if e.get("impact_level") == "中影响" or e.get("action_type") == "收紧"]
+    rest = [e for e in new if e.get("event_id") not in {x["event_id"] for x in focus}]
+    focus.sort(key=lambda e: (0 if e.get("impact_level") == "中影响" else 1,
+                              act.get(e.get("action_type"), 9)))
+    rest.sort(key=lambda e: (act.get(e.get("action_type"), 9), e.get("impact_level") or ""))
+    if focus:
+        lines += ["", "**重点关注** ⚠️"]
+        for e in focus:
+            line = "- [%s](%s) %s@%s · %s/%s" % (
+                _title(e), (e.get("source") or {}).get("url") or "",
+                e.get("action_type") or "-", e.get("country_cn") or "-",
+                e.get("impact_type") or "未研判", e.get("impact_level") or "未研判")
+            if e.get("impact_level") == "中影响" and e.get("impact_rationale"):
+                line += " — " + _cut_sentence(e["impact_rationale"])
+            lines.append(line)
+    if rest:
+        lines += ["", "**其他新增**:"]
+        for e in rest:
+            lines.append("- [%s](%s) %s@%s · %s/%s" % (
+                _title(e), (e.get("source") or {}).get("url") or "",
+                e.get("action_type") or "-", e.get("country_cn") or "-",
+                e.get("impact_type") or "未研判", e.get("impact_level") or "未研判"))
     lines += ["", "---",
               "全文见政策 Markdown / Word / Excel 报告(面板可下载)",
               "> AI 辅助生成 · 仅供情报参考"]

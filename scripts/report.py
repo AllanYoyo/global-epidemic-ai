@@ -37,6 +37,17 @@ def policy_impact_level(policy):
     return policy.get("impact_level") or "未研判"
 
 
+def policy_dims(policy):
+    """四维评分一行式: trade 4 / biosecurity 3 / ... → 3.25分; 便于追溯关注档来源。"""
+    dims = policy.get("dimension_scores") or {}
+    if not dims:
+        return None
+    parts = ["%s %s" % (k, dims.get(k, "-"))
+             for k in ("trade", "biosecurity", "response", "alignment")]
+    score = policy.get("impact_score")
+    return "%s → %s分" % (" / ".join(parts), score if score is not None else "?")
+
+
 def src_link(source):
     if not isinstance(source, dict):
         return "-"
@@ -137,6 +148,7 @@ def make_policy_detail(events):
             "- **生效日期**: %s | **有效期末**: %s\n"
             "- **影响类型/等级**: %s / %s\n"
             "- **中国关联**: %s\n"
+            "%s"
             "- **建议动作**: %s\n"
             "- **依据/原文**: %s\n"
             "- **来源**: %s\n" % (
@@ -145,7 +157,9 @@ def make_policy_detail(events):
                 p.get("summary_cn") or "见来源", subject,
                 p.get("effective_date") or p.get("event_date") or "未注明", p.get("effective_until") or "未注明",
                 p.get("impact_type") or "未研判", p.get("impact_level") or "未研判",
-                p.get("china_relevance") or "未研判", p.get("recommended_action") or "待研判",
+                p.get("china_relevance") or "未研判",
+                ("- **四维评分**: %s\n" % policy_dims(p)) if policy_dims(p) else "",
+                p.get("recommended_action") or "待研判",
                 p.get("legal_basis") or "见来源原文", " | ".join(links)))
     return "\n".join(blocks)
 
@@ -211,7 +225,8 @@ def export_table(base_path, events):
     def val(value): return "未注明" if value in (None, "", [], {}) else value
     headers = ["记录ID", "政策标题", "英文标题", "动作类型", "政策领域", "发布国家/地区", "发布机构",
                "涉及国家/地区", "受影响商品", "关联病害", "适用范围", "发布日期", "生效日期", "有效期",
-               "政策状态", "公告/法规编号", "核验状态", "影响类型", "影响等级", "中国关联", "建议动作",
+               "政策状态", "公告/法规编号", "核验状态", "影响类型", "影响等级", "关注档", "四维评分",
+               "中国关联", "建议动作",
                "原文摘要", "来源名称", "来源URL", "来源层级", "抓取时间"]
     rows = [[val(e.get("event_id")), val(e.get("title_cn")), val(e.get("title_en")),
              val(e.get("action_type")), val(e.get("policy_domain")), val(e.get("country_cn")),
@@ -220,6 +235,7 @@ def export_table(base_path, events):
              val(e.get("scope")), val(e.get("published_date") or e.get("report_date") or (e.get("source") or {}).get("publish_date")),
              val(e.get("effective_date") or e.get("event_date")), val(e.get("effective_until")), val(e.get("policy_status") or "已生效"),
              val(e.get("legal_basis")), val(e.get("verification_status")), val(e.get("impact_type")), val(e.get("impact_level")),
+             val(e.get("impact_focus")), val(policy_dims(e)),
              val(e.get("china_relevance")), val(e.get("recommended_action")), val(e.get("summary_cn")),
              val((e.get("source") or {}).get("name")), val((e.get("source") or {}).get("url")), val((e.get("source") or {}).get("tier")),
              val(e.get("first_seen"))] for e in events]

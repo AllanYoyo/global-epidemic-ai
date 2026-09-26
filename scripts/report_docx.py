@@ -181,6 +181,9 @@ def _build_policy(date, data=None, out_dir=None, db_path=None):
             e.get("effective_date") or e.get("event_date") or "未注明", e.get("policy_status") or "已生效"))
         _bullet(doc, "对华影响: ", "%s — %s" % (
             e.get("impact_level") or "未研判", e.get("impact_rationale") or "待研判"))
+        dims = report.policy_dims(e)
+        if dims:
+            _bullet(doc, "四维评分: ", "%s(关注档: %s)" % (dims, e.get("impact_focus") or "未注明"))
         _bullet(doc, "影响类型/中国关联: ", "%s / %s" % (
             e.get("impact_type") or "未研判", e.get("china_relevance") or "未研判"))
         _bullet(doc, "建议动作: ", e.get("recommended_action") or "待研判")

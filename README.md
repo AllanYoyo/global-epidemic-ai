@@ -56,8 +56,9 @@ python scripts/risk.py --event-id <id> \
 # 生成政策日报、Word 和 Excel
 python scripts/report.py --date $(date +%F) --excel --docx
 
-# 推送政策日报
-python scripts/push_report.py --date $(date +%F)
+# 推送政策日报(企业微信/钉钉/邮箱, 配了哪个发哪个; 建议先 --dry-run 预览)
+python scripts/push_report.py --date $(date +%F) --dry-run
+python scripts/push_report.py --date $(date +%F)          # 同一天只发一次(幂等), 重发需 --force
 
 # 启动政策监测面板
 python webapp/app.py
@@ -78,15 +79,15 @@ python scripts/report.py --excel --docx
 | Word | 政策变化表、收紧/调整/高影响详情、影响综述、待核实和来源索引 |
 | Excel | “政策变化台账”工作表，支持筛选、冻结表头、换行和打印 |
 | 网页 | 政策影响地图、政策台账、动作/领域/影响类型/核验筛选和政策报告下载 |
-| 推送 | 政策变化数、收紧数、约束/机会、高影响政策和后续建议 |
+| 推送 | 当日新增摘要：**重点关注**(中影响/收紧) + 其他新增, 每条附原文出处链接 |
 
 ## 定时运行
 
 ```bash
-scripts/run_scan.sh policy
+scripts/run_scan.sh policy   # 政策扫(建议每日 07:30): 检索→抽取→核验→研判→日报→推送
 ```
 
-建议每日 07:30 运行。网页生成按钮默认执行政策日报、Word 和 Excel；自定义生成命令使用 `RADAR_POLICY_GENERATE_CMD`。
+扫描完成后自动用 push_report.py 推送当日日报。另有 `am`(晨扫全量, 06:30) 和 `pm`(晚扫增量, 18:00) 两档, 见 `config/crontab.example`。网页生成按钮默认执行政策日报、Word 和 Excel；自定义生成命令使用 `RADAR_POLICY_GENERATE_CMD`。
 
 ## 部署到 VPS
 
@@ -108,11 +109,16 @@ ln -sfn /opt/global-epidemic-ai/repo/skills/daily-report ~/.hermes/skills/daily-
 ## 目录
 
 ```text
+ARCHITECTURE.md                    架构与数据流、schema、Hermes 调度
+CONTRIBUTING.md                    新增情报源 / 改提示词 / PR 清单
+TROUBLESHOOTING.md                 常见故障排查
+docs/event-schema.md               数据字段权威定义
 skills/global-policy-search/       政策变化侦察
 skills/policy-verification/        政策官方出处核验
 skills/daily-report/               政策日报交付
 prompts/policy-extraction.md       政策抽取
 prompts/policy-impact.md           对华影响研判
+scripts/collect.py                 原文存档(可溯源链第一环)
 scripts/normalize.py               政策数据合同与入库
 scripts/risk.py                    政策影响写回
 scripts/report.py                  Markdown/Word/Excel 入口

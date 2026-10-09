@@ -1,6 +1,9 @@
-"""轻量 Excel 台账样式工具,供政策/疫情导出共用。"""
+"""轻量 Excel 台账样式工具,供政策/疫情导出共用。
+
+依赖可选:openpyxl 仅在调用样式函数时按需导入,因此本模块本身在 openpyxl 缺失时
+仍可被 import;调用方(如 scripts/report.py)负责 try/except ImportError 后降级到 CSV。
+"""
 import platform
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
 PRIMARY = "1B2A4A"
 PRIMARY_LIGHT = "D6E4F0"
@@ -12,6 +15,12 @@ FONT_NAME = "Microsoft YaHei" if platform.system() == "Windows" else "Noto Sans 
 HEADER_BOLD = True
 
 
+def _require_openpyxl():
+    """延迟导入 openpyxl 样式符号;缺失时抛 ImportError 由调用方捕获降级。"""
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    return Alignment, Border, Font, PatternFill, Side
+
+
 def setup_sheet(ws, title, last_col):
     ws.title = title
     ws.freeze_panes = "A2"
@@ -20,6 +29,7 @@ def setup_sheet(ws, title, last_col):
 
 
 def style_header_row(ws, row_num=1, col_start=1, col_end=None):
+    Alignment, Border, Font, PatternFill, Side = _require_openpyxl()
     col_end = col_end or ws.max_column
     fill = PatternFill("solid", fgColor=PRIMARY)
     font = Font(name=FONT_NAME, size=10, bold=HEADER_BOLD, color="FFFFFF")
@@ -34,6 +44,7 @@ def style_header_row(ws, row_num=1, col_start=1, col_end=None):
 
 
 def style_data_row(ws, row_num, col_start=1, col_end=None, row_index=0):
+    Alignment, _, Font, PatternFill, _ = _require_openpyxl()
     col_end = col_end or ws.max_column
     fill = NEUTRAL_0 if row_index % 2 == 0 else NEUTRAL_100
     for col in range(col_start, col_end + 1):
@@ -44,6 +55,7 @@ def style_data_row(ws, row_num, col_start=1, col_end=None, row_index=0):
 
 
 def auto_fit_columns(ws, min_width=10, max_width=34):
+    _require_openpyxl()
     for col in range(1, ws.max_column + 1):
         values = [str(ws.cell(row, col).value or "") for row in range(1, min(ws.max_row, 100) + 1)]
         width = max([len(v) for v in values] or [0]) * 1.15 + 2
@@ -51,6 +63,7 @@ def auto_fit_columns(ws, min_width=10, max_width=34):
 
 
 def auto_fit_row_heights(ws, header_row=1, data_start_row=2):
+    _require_openpyxl()
     for row in range(data_start_row, ws.max_row + 1):
         max_lines = 1
         for cell in ws[row]:

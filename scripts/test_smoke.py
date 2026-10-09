@@ -66,14 +66,22 @@ class BaseLazyImportTests(unittest.TestCase):
     """P1#1: templates/base.py 不再模块级 import openpyxl。"""
 
     def test_base_has_no_top_level_openpyxl_import(self):
+        # 用 AST 只检测真正的模块级导入; 函数体内的按需导入是允许的
+        import ast
         path = os.path.join(REPO, "templates", "base.py")
         with open(path, encoding="utf-8") as f:
-            lines = f.read().split("\n")
-        for i, line in enumerate(lines, 1):
-            stripped = line.lstrip()
-            if stripped.startswith(("from openpyxl", "import openpyxl")):
-                self.fail("templates/base.py 第 %d 行存在模块级 openpyxl 导入: %s"
-                          % (i, line))
+            tree = ast.parse(f.read(), filename=path)
+        for node in tree.body:
+            if isinstance(node, ast.Import):
+                names = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                names = [node.module or ""]
+            else:
+                continue
+            for name in names:
+                if name == "openpyxl" or name.startswith("openpyxl."):
+                    self.fail("templates/base.py 第 %d 行存在模块级 openpyxl 导入: %s"
+                              % (node.lineno, name))
 
     def test_base_imports_when_openpyxl_blocked(self):
         blocker = _OpenpyxlBlocker()
@@ -81,10 +89,10 @@ class BaseLazyImportTests(unittest.TestCase):
         try:
             self._purge(["base", "openpyxl"])
             import base  # noqa: F401
+            self.assertIn("base", sys.modules)
         finally:
             sys.meta_path.remove(blocker)
             self._purge(["base", "openpyxl"])
-        self.assertIn("base", sys.modules)
 
     def test_style_function_raises_without_openpyxl(self):
         blocker = _OpenpyxlBlocker()

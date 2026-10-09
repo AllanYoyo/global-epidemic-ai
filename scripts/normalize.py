@@ -31,6 +31,19 @@ def now():
     return datetime.datetime.now().isoformat(timespec="seconds")
 
 
+def _subject_components(e):
+    """计算 event_id 的 subject 关联对象: policy_key 或四个关联字段之一非空。"""
+    products = e.get("products") or []
+    targets = e.get("target_countries") or []
+    return [
+        (e.get("policy_key") or "").strip(),
+        (e.get("disease_name_en") or "").strip().lower(),
+        ",".join(sorted(str(x).strip().lower() for x in products if str(x).strip())),
+        ",".join(sorted(str(x).strip().lower() for x in targets if str(x).strip())),
+        (e.get("scope") or "").strip().lower(),
+    ]
+
+
 def event_id_of(e):
     products = e.get("products") or []
     targets = e.get("target_countries") or []
@@ -66,6 +79,13 @@ def validate(e):
         errs.append("policy_domain 取值不合法")
     if not (e.get("title_cn") or e.get("title_en") or e.get("summary_cn")):
         errs.append("政策记录需要 title_cn / title_en / summary_cn 至少其一")
+    # 关联对象必填: event_id 强依赖 subject, 否则同国/同领域/同动作/同日的两条政策
+    # 会算出同一 event_id 并被默认合并吞掉。policy_key 是显式兜底。
+    if not any(_subject_components(e)):
+        errs.append(
+            "event_id 关联对象必填: 至少给出 policy_key / disease_name_en / "
+            "products / target_countries / scope 之一(原文未提及时给显式 policy_key 兜底)"
+        )
     src = e.get("source")
     if not isinstance(src, dict) or not src.get("url"):
         errs.append("source.url 必填(可溯源是硬要求)")

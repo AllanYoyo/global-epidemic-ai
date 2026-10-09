@@ -18,7 +18,7 @@
 
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
-| event_id | string | 自动 | sha1(政策国EN\|政策领域\|动作\|关联对象\|生效日期) 前 12 位;同一政策修订按主键幂等更新 |
+| event_id | string | 自动 | sha1(政策国EN\|政策领域\|动作\|关联对象\|生效日期) 前 12 位;同一政策修订按主键幂等更新。**关联对象必填**:需提供 `policy_key` 或 `target_countries` / `products` / `disease_name_en` / `scope` 至少其一,否则同国/同领域/同动作/同日的两条政策会算出相同 event_id 并被默认合并吞掉 |
 | record_type | string | 自动 | 固定为 `policy` |
 | category | string | 自动 | 固定为 `policy`;具体领域使用 `policy_domain` |
 | country_cn / country_en | string | ✅ | 发布/适用政策的国家或地区 |
@@ -44,10 +44,13 @@
 | policy_domain | string | – | animal / plant / both / trade / measures;按政策的主要对象归类 |
 | prev_action | string | – | 此前政策状态 |
 | issuer_cn / issuer_en | string | – | 发布机构 |
-| target_countries | string[] | – | 涉及国家/地区 |
-| products | string[] | – | 受影响商品 |
-| disease_name_cn / disease_name_en | string | – | 关联病害,可为空 |
-| scope | string | – | 适用地区/企业/口岸 |
+| target_countries | string[] | ✅ 见下 | 涉及国家/地区 |
+| products | string[] | ✅ 见下 | 受影响商品 |
+| disease_name_cn / disease_name_en | string | ✅ 见下 | 关联病害,可为空 |
+| scope | string | ✅ 见下 | 适用地区/企业/口岸 |
+| policy_key | string | 兜底 | 当以上四个字段均无法区分同日同类政策时,抽取员给一个显式标识(`|` 分隔)写入 subject,避免 event_id 碰撞 |
+
+> 上述 `target_countries / products / disease_name_en / scope` 四项**至少其一必填**(原文未提及时用 `policy_key` 兜底),是 event_id 稳定可区分的前置条件。
 | legal_basis | string | – | 公告文号/法规编号/SPS 通报号 |
 
 ## 政策影响研判字段

@@ -34,7 +34,8 @@
 5. 每条记录必须带 `source`(tier/name/url/publish_date/quote);`quote` 为原文关键句,不超过 80 字。
 6. `action_type` 取:收紧(新增/加严限制)、放松(取消/简化/放宽)、调整(范围/程序/商品变更)、恢复(解除后重新允许)。国际组织呼吁类无贸易方向变化时记"调整"。
 7. 同一公告含多项独立措施(对多国/多商品)时拆分为多条;同一措施不同来源合并为一条,其余来源放入 `cross_sources`。
-8. 输出 JSON 数组,除 JSON 外不要输出任何其他文字。
+8. **event_id 关联对象必填**:`target_countries` / `products` / `disease_name_en` / `scope` 至少其一非空;原文未涉及任何关联对象(如纯组织内训类公告)时,在 JSON 中加一个 `policy_key` 字段,值是显式标识(如 `internal-training|2026-Q3`),用于兜底 event_id subject,避免与同日同国同领域政策碰撞。
+9. 输出 JSON 数组,除 JSON 外不要输出任何其他文字。
 
 ## 字段要点
 

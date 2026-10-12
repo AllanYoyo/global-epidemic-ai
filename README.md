@@ -43,6 +43,7 @@ pip install openpyxl python-docx
 python scripts/collect.py --url "https://example.com/notice" --title "外国官方检疫公告"
 
 # 抽取后的政策 JSON 入库(重复入库按 event_id 自动合并, 不覆盖已完成的核验/研判; 整行替换需显式 --replace)
+# 默认只收发布时间在近 7 天内的新记录, 检索撞到的旧公告页会被"旧闻拒收"(回补历史传 --max-age-days N, 0 关闭)
 python scripts/normalize.py --input data/raw/<日期>/extracted-policy.json \
   --out data/events/<日期>/ --db
 
@@ -67,7 +68,7 @@ python webapp/app.py
 演示数据：
 
 ```bash
-python scripts/normalize.py --input examples/sample-policy-events.json --db
+python scripts/normalize.py --input examples/sample-policy-events.json --db --max-age-days 0  # 演示数据为历史日期, 关掉旧闻拦截
 python scripts/report.py --excel --docx
 ```
 

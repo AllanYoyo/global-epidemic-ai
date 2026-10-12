@@ -20,6 +20,7 @@ global-policy-search (skill, 检索入口)
 权威实现是 `scripts/normalize.py`；人类可读版是 `docs/event-schema.md`。改字段/枚举时必须同步：normalize.py、event-schema.md、两个 prompt、report.py/report_docx.py 展示层。
 
 - **event_id**：sha1(policy|country_en|policy_domain|action_type|主体|生效日期) 前 12 位，幂等主键。重复入库默认按 event_id **合并更新**：空值和兜底默认值（`DEFAULT_SENTINELS`）不覆盖已有核验/研判结论；整行替换须显式 `--replace`。
+- **旧闻不入库**：新增记录的发布时间（`source.publish_date`，缺省 `event_date`）距今天超过 `--max-age-days`（默认 7，`POLICY_MAX_AGE_DAYS` 覆盖，0 关闭）即拒收——日报"今日新增"按 first_seen 展示，旧公告一旦入库就会被当成当日新政策；只拦新增 event_id，合并更新不受影响，重放镜像 JSON 重建库时传 0。
 - **影响加权合同**（risk.py 强校验，须与 prompts/policy-impact.md 一致）：
   `impact_score = trade*0.35 + biosecurity*0.30 + response*0.25 + alignment*0.10`；≥3.5 高影响 / ≥2.0 中影响 / 其余低影响；高→立即关注、中→持续观察、低→常规记录。四维齐全时 score/level/focus 由代码推导，不得手写冲突值。
 - **枚举值是中文**：action_type 收紧|放松|调整|恢复；policy_domain animal|plant|both|trade|measures；impact_type 约束|机会|中性；impact_level 高影响|中影响|低影响；china_relevance 直接涉及中国|间接影响|暂无明显关联；verification_status verified|single_source|unverified|false_positive|merged。

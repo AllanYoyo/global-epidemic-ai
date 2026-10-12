@@ -36,7 +36,7 @@ description: 监测各国政府动植物检疫与进出口管控政策变化。�
 
 ## 步骤
 
-1. **定窗口**:确认时间窗(默认今天)。运行标识为当天日期 `YYYY-MM-DD`。
+1. **定窗口**:确认时间窗(默认今天;常规运行只收最近 24-48 小时的新发布,首次运行放宽到 7 天)。运行标识为当天日期 `YYYY-MM-DD`,并记下窗口下限「今天-N 天」(N 与入库校验一致,默认 7):只有发布时间落在窗口内的条目才算"新信息"。
 2. **按优先级组合检索**:按 `policy_watch_countries.priority_1` → `priority_2` → `state_level` 顺序扫描,每个国家至少覆盖动物、植物、进出口/措施三个主题面:
    - 第一优先级国家每日扫描;第二优先级国家分批/每周扫描;美国州级通道以州名+州农业部门/州兽医官/植物监管官检索;
    - 每个国家使用 aliases 和 source_ids 定位官方站内公告,再用 `policy_keywords` 主题词与动作词组合;
@@ -46,15 +46,16 @@ description: 监测各国政府动植物检疫与进出口管控政策变化。�
    - 用 `policy_queries.organisations` 跟踪 WOAH/FAO/GPP-TAD/ECTAD/IPPC/EPPO 的行动与呼吁;
    - 用 `policy_queries.disease_triggered` 作为疫情背景触发型补充,不让病害清单决定国家范围。
 3. **逐条存档**:
+   - **先核发布日期再存档**:从页面 meta、日期栏或文首确认发布时间;早于窗口下限的是常年挂网的旧闻,不存档不入库,在 search-log.md 该行末尾标注「跳过-旧闻」;页面完全没有日期线索时先从正文/URL/站点列表页判断,仍无法确认的按旧闻处理并标注「跳过-日期不明」;
    - 网页:`python scripts/collect.py --url "<URL>" --title "<标题>"`(存到 `data/raw/<日期>/`);
    - 搜索摘要:写入 `data/raw/<日期>/search-log.md`(每行:国家 | 主题 | 动作 | 来源 | 标题 | URL | 摘要 | 命中查询)。
-4. **抽取入库**:按 `prompts/policy-extraction.md` 抽取为 `record_type=policy` 的记录(字段见 `docs/event-schema.md`),汇总到 `data/raw/<日期>/extracted-policy.json` 后:
+4. **抽取入库**:按 `prompts/policy-extraction.md` 抽取为 `record_type=policy` 的记录(字段见 `docs/event-schema.md`),抽取时在 <<<RAW_FEED>>> 头部第一行注明「窗口下限: YYYY-MM-DD」。汇总到 `data/raw/<日期>/extracted-policy.json` 后:
 
    ```bash
-   python scripts/normalize.py --input data/raw/<日期>/extracted-policy.json --out data/events/<日期>/ --db
+   python scripts/normalize.py --input data/raw/<日期>/extracted-policy.json --out data/events/<日期>/ --db --max-age-days <N 与窗口一致, 缺省 7>
    ```
 
-   event_id 已存在时自动合并更新, 空值与默认状态不覆盖已完成的核验/研判结论。
+   event_id 已存在时自动合并更新, 空值与默认状态不覆盖已完成的核验/研判结论。normalize.py 会按 `source.publish_date`(缺省 `event_date`)把窗口外的**新增**记录判为旧闻拒收;确属新线索被误拦时,先核实页面日期,再用 `--max-age-days` 放宽重放。
 
 5. **对华影响研判**:对每条 verified 政策记录,检索对华贸易与海关现有措施背景,按 `prompts/policy-impact.md` 研判,用 risk.py 写回政策专属字段:
 
@@ -75,6 +76,7 @@ description: 监测各国政府动植物检疫与进出口管控政策变化。�
 ## 红线
 
 - 每条记录必须带 URL 与抓取时间;没有出处的动作线索不进入下一环节。
+- **旧闻不入库**:发布时间(`source.publish_date`,缺省 `event_date`)必须落在时间窗内;检索撞到的历史公告页即使 URL 从未见过也不入库,只在 search-log.md 备注。回补历史需显式放宽 `--max-age-days`,不得关掉校验当日常扫描用。
 - **动作必须有原文依据**:"疑似将暂停""市场传闻"不入库;仅重申既有措施的公告不收。
 - `action_type` 判定拿不准时保守记"调整",并在 summary_cn 说明,不臆断收紧/放松。
 - Tier 3 媒体的政策消息只作线索,必须回溯官方公告原文后才可入库。

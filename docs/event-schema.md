@@ -82,3 +82,4 @@ verified ──(政策影响研判)──→ 写入 impact_type / impact_level /
 2. **不编造**:原文没有的商品、日期、影响和建议动作填 null 或“未注明”。
 3. **政策优先**:生产入口、网页、Word、Excel、推送只处理政策变化。
 4. **幂等**:政策主键稳定,重复入库更新原记录并保留 first_seen。
+5. **时间窗(旧闻不入库)**:新增记录的发布时间(`source.publish_date`,缺省 `event_date`)不得早于 `normalize.py --max-age-days` 窗口(默认 7 天,环境变量 `POLICY_MAX_AGE_DAYS` 覆盖,0 关闭)——日报"今日新增"按 first_seen 展示,常年挂网的旧公告一旦入库就会被当成当日新政策;该拦截只针对新增 `event_id`,已入库记录的核验/研判合并更新不受影响,库重建重放镜像 JSON 时传 `--max-age-days 0`。

@@ -42,6 +42,8 @@ grep HERMES_RUN_CMD ~/.hermes/.env
 
 **normalize.py 报"缺少必填字段 / 枚举不合法"**：抽取产物违反数据合同。核对 `docs/event-schema.md`：枚举值必须用中文（收紧|放松|调整|恢复 等），`source.url` 与 `source.quote`（≤120 字）必填，缺 `event_date`/`effective_date` 也会被拒。**修上游 prompt 产物，不要放宽校验。**
 
+**normalize.py 报"[旧闻拒收]"**：这是时间窗拦截在起作用——新增记录的发布时间（`source.publish_date`，缺省 `event_date`）早于"今天-N 天"（默认 7 天，`POLICY_MAX_AGE_DAYS` 覆盖）。常年挂网的官方公告页会被检索撞到，属预期拒收。确属新线索（如官方补发）先回页面核实发布日期；历史回补/库重建重放用 `--max-age-days <N>`（`0` 为关闭）。**不要把 0 当日常扫描参数，旧闻入库会被日报当成"今日新增"。**
+
 **report.py 报 ImportError**：`from normalize import ...` 失败说明没从仓库根目录运行。统一用：
 
 ```bash
@@ -85,7 +87,7 @@ python -c "import sqlite3;con=sqlite3.connect('database/epidemic.db');print(con.
 
 - **日报日期错位/扫描时间不对**：cron 服务器时区必须是 Asia/Shanghai（`timedatectl` 核对）；cron 精简的 PATH 可能找不到 `python3`，在 crontab 顶部手工补 `PATH=` 行。
 - **生产数据目录**：生产 VPS 应设 `EPIDEMIC_DATA_DIR` / `EPIDEMIC_DB` 指到 repo 之外（如 `/opt/global-epidemic-ai`）；如果日报里没数据但数据目录里有文件，先确认进程实际读的是哪个路径（默认是 repo 内 `data/`、`database/`）。
-- **库损坏/误删需要重建**：`data/events/<日期>/*.json` 是入库镜像，用 `python scripts/normalize.py --input <json> --db` 逐个重放即可重建；日常请备份 `database/epidemic.db` 与 `data/`。
+- **库损坏/误删需要重建**：`data/events/<日期>/*.json` 是入库镜像，用 `python scripts/normalize.py --input <json> --db --max-age-days 0` 逐个重放即可重建（重放的是历史镜像，必须关掉旧闻拦截）；日常请备份 `database/epidemic.db` 与 `data/`。
 - **`.pushed` 标志文件导致不推送**：确属当天已发过的记录，删除 `data/reports/.pushed/<日期>.flag` 或直接用 `--force`（推荐后者）。
 
 ---

@@ -2,6 +2,12 @@
 # 疫见全球 · 外国政府动植物检疫政策情报源
 # 说明:
 #   - sources 为政策监测源清单, tier 越小越权威
+#   - track 决定该源是否进入 policy 档主动扫描:
+#       policy     外国政府/国际组织的政策动作源, policy 档主动扫
+#       outbreak   疫情事件源(WAHIS/Promed/行业媒体等), 本分支不扫, 仅作研判背景
+#       background 中国侧与标准名录源, 只作影响研判背景, 不进采集台账
+#     2026-10 起 policy 档只扫 track=policy 的源: 疫情源在政策分支几乎不产出政策动作,
+#     却会吃掉检索预算(实测日产量 1-2 条, 远低于检索到的通报量)。
 #   - policy_queries 是生产检索模板, 只面向外国政府/国际组织政策变化
 #   - 中国海关总署只作为影响研判背景, 不作为政策记录采集源
 #   - 所有 URL 是检索入口;站点改版后由搜索重新定位
@@ -9,7 +15,7 @@
 
 # ---- 政策监测运行档位 ----
 runs:
-  policy: {time: "07:30", desc: 外国政府政策变化扫, 产出: 政策日报+Word+Excel+推送, sources: [measures]}
+  policy: {time: "07:30", desc: 外国政府政策变化扫, 产出: 政策日报+Word+Excel+推送, track: [policy]}
 
 # ---- 政策监测国家优先级 ----
 policy_watch_countries:
@@ -42,7 +48,8 @@ policy_watch_countries:
     - {cn: 美国州级农业部门, en: US state agriculture departments, aliases: [state veterinarian, state plant regulatory official], source_ids: [us-state-agri]}
 
 # ---- 情报源分级: 1 官方(可直接支撑 verified) / 2 专业(需交叉) / 3 媒体(仅线索) ----
-# schedule 档位: am_pm=晨扫+晚扫 / am=仅晨扫 / weekly=每周一晨扫附加 / passive=不主动扫
+# schedule 档位: am_pm=晨扫+晚扫 / am=仅晨扫 / daily=每日政策档 / weekly=每周一晨扫附加 / passive=不主动扫
+# track 轨道: policy=政策动作源(policy 档主动扫) / outbreak=疫情事件源(不扫, 仅研判背景) / background=中国侧与名录(不扫, 仅背景)
 sources:
   # ========== Tier 1: 官方权威 ==========
   - id: woah-wahis
@@ -51,6 +58,7 @@ sources:
     coverage: [animal]
     tier: 1
     schedule: am_pm
+    track: outbreak
     lang: [en, fr]
     method: browse
     notes: 重点看 Immediate notifications 与 Follow-up reports; 全量历史数据需注册 WAHIS API
@@ -60,6 +68,7 @@ sources:
     coverage: [animal]
     tier: 1
     schedule: am_pm
+    track: outbreak
     lang: [en]
     method: browse
     notes: 有事件地图与导出; 与 WAHIS 通报高度重叠, 适合做交叉验证
@@ -69,6 +78,7 @@ sources:
     coverage: [human, zoonosis]
     tier: 1
     schedule: am_pm
+    track: outbreak
     lang: [en]
     method: browse
     notes: 关注人畜共患病(禽流感、裂谷热、猴痘等)对公共卫生与贸易的外溢影响
@@ -78,6 +88,7 @@ sources:
     coverage: [plant]
     tier: 1
     schedule: weekly
+    track: outbreak
     lang: [en]
     method: browse
     notes: 沙漠蝗旬报/快报, 含迁移路线预测
@@ -87,6 +98,7 @@ sources:
     coverage: [plant]
     tier: 1
     schedule: weekly
+    track: outbreak
     lang: [en]
     method: browse
     notes: Reporting Service 植物有害生物新增/扩散通报, 更新及时, 植物疫情首选交叉源
@@ -96,6 +108,7 @@ sources:
     coverage: [plant]
     tier: 1
     schedule: weekly
+    track: policy
     lang: [en]
     method: browse
     notes: 关注紧急措施通知与 Phytosanitary Resources 更新
@@ -105,6 +118,7 @@ sources:
     coverage: [plant]
     tier: 1
     schedule: weekly
+    track: outbreak
     lang: [en, es]
     method: browse
     notes: 北美植物有害生物警报
@@ -114,6 +128,7 @@ sources:
     coverage: [animal, plant, china]
     tier: 1
     schedule: am_pm
+    track: background
     lang: [zh]
     method: browse
     notes: 国内动物疫情发布、植物检疫性有害生物名单动态
@@ -123,6 +138,7 @@ sources:
     coverage: [china, measures]
     tier: 1
     schedule: am_pm
+    track: background
     lang: [zh]
     method: browse
     notes: 对外国政府政策变化的背景源; 中国海关总署公告不进入政策采集台账
@@ -134,6 +150,7 @@ sources:
     coverage: [animal, plant, human]
     tier: 2
     schedule: am
+    track: outbreak
     lang: [en]
     method: browse
     notes: 全球最早的疫病早期信号源之一, 植物疫情也有覆盖; 必须经 Tier 1 核验
@@ -143,6 +160,7 @@ sources:
     coverage: [animal, human]
     tier: 2
     schedule: am
+    track: outbreak
     lang: [en]
     method: browse
     notes: 禽流感等人畜共患病跟踪报道质量高
@@ -152,6 +170,7 @@ sources:
     coverage: [animal, plant]
     tier: 2
     schedule: am
+    track: outbreak
     lang: [en]
     method: search
     notes: 通过新闻检索发现线索; 只作线索与交叉源, 不单独支撑 verified
@@ -163,6 +182,7 @@ sources:
     coverage: [animal, plant]
     tier: 3
     schedule: passive
+    track: background
     lang: [zh]
     method: search
     notes: 仅作线索; 必须回溯到 Tier 1 / Tier 2 原始出处, 不得直接采信
@@ -175,6 +195,7 @@ sources:
     coverage: [measures]
     tier: 1
     schedule: am
+    track: background
     lang: [zh]
     method: browse
     notes: 进境动植物检疫措施与SPS通报查询; 与海关总署措施互为印证
@@ -184,6 +205,7 @@ sources:
     coverage: [animal, plant, measures]
     tier: 2
     schedule: am
+    track: background
     lang: [zh]
     method: browse
     notes: 聚合各国进出口食品/农产品检疫动态; 仅作线索, 回溯官方出处
@@ -193,6 +215,7 @@ sources:
     coverage: [animal, china]
     tier: 1
     schedule: passive
+    track: background
     lang: [zh]
     method: browse
     notes: 疫病名录/标准查询用, 非新闻源; watchlist 扩容时的权威依据
@@ -202,6 +225,7 @@ sources:
     coverage: [animal]
     tier: 3
     schedule: passive
+    track: background
     lang: [zh]
     method: browse
     notes: 水产行业展会资讯, 信噪比低; 仅水生动物疫情线索时检索
@@ -213,6 +237,7 @@ sources:
     coverage: [animal, plant]
     tier: 1
     schedule: am
+    track: policy
     lang: [ru]
     method: browse
     notes: 中俄边境动植物检疫官方源, 全部消息含动物/植物通报列表
@@ -222,6 +247,7 @@ sources:
     coverage: [animal]
     tier: 1
     schedule: am
+    track: policy
     lang: [ru]
     method: browse
     notes: 与中国接壤的远东地区兽医通报, 对传入路径评估价值高
@@ -231,6 +257,7 @@ sources:
     coverage: [animal]
     tier: 2
     schedule: am
+    track: outbreak
     lang: [ru]
     method: browse
     notes: 俄畜牧兽医行业媒体; 仅作线索
@@ -240,6 +267,7 @@ sources:
     coverage: [animal]
     tier: 2
     schedule: weekly
+    track: outbreak
     lang: [ru]
     method: browse
     notes: 俄猪业ASF跟踪; 仅作线索
@@ -249,6 +277,7 @@ sources:
     coverage: [animal]
     tier: 3
     schedule: passive
+    track: outbreak
     lang: [en]
     method: search
     notes: 国家通讯社; 仅疫情大事件线索, 必须回溯官方出处
@@ -260,6 +289,7 @@ sources:
     coverage: [animal]
     tier: 1
     schedule: am
+    track: policy
     lang: [en, de]
     method: browse
     notes: 德国联邦动物卫生研究所疫情报告系统
@@ -269,6 +299,7 @@ sources:
     coverage: [animal]
     tier: 1
     schedule: am
+    track: policy
     lang: [pl]
     method: browse
     notes: 波兰是欧洲ASF主力疫区; Excel该行缺URL, 此处按机构域名补全(首次运行时人工点验)
@@ -278,6 +309,7 @@ sources:
     coverage: [animal]
     tier: 1
     schedule: am
+    track: policy
     lang: [en]
     method: browse
     notes: "Excel注疫区: BSE/SCRAPIE/SB/HPAI"
@@ -287,6 +319,7 @@ sources:
     coverage: [animal]
     tier: 1
     schedule: weekly
+    track: policy
     lang: [en, no]
     method: browse
     notes: "Excel注疫区: BSE/SCRAPIE"
@@ -296,6 +329,7 @@ sources:
     coverage: [animal]
     tier: 1
     schedule: weekly
+    track: policy
     lang: [en, uk]
     method: browse
     notes: "Excel注疫区: HPAI/ASF"
@@ -305,6 +339,7 @@ sources:
     coverage: [animal]
     tier: 1
     schedule: weekly
+    track: policy
     lang: [sr]
     method: browse
     notes: "Excel注疫区: ASF/HPAI/LSD; Excel中 vet.minpolj.gov.rs 实为塞兽医局域名(黑山行错位, 已并入此条)"
@@ -314,6 +349,7 @@ sources:
     coverage: [animal]
     tier: 1
     schedule: weekly
+    track: outbreak
     lang: [sr]
     method: browse
     notes: "Excel注疫区: HPAI/LSD"
@@ -323,6 +359,7 @@ sources:
     coverage: [animal]
     tier: 1
     schedule: weekly
+    track: outbreak
     lang: [mk]
     method: browse
     notes: "Excel注疫区: ND; Excel『圣马力诺|政府网|vlada.mk』行URL实为北马其顿政府, 已并入此条备注"
@@ -332,6 +369,7 @@ sources:
     coverage: [animal]
     tier: 1
     schedule: weekly
+    track: outbreak
     lang: [bs]
     method: browse
     notes: "Excel注疫区: AI; 政府门户需站内检索"
@@ -341,6 +379,7 @@ sources:
     coverage: [animal]
     tier: 1
     schedule: weekly
+    track: policy
     lang: [az]
     method: browse
     notes: 里海周边ASF/HPAI观察; Excel给的是具体新闻页, 此处归一到媒体栏目首页
@@ -350,6 +389,7 @@ sources:
     coverage: [animal]
     tier: 3
     schedule: weekly
+    track: outbreak
     lang: [en]
     method: search
     notes: Excel标注ASF; belta为通讯社而非农业部, 仅作线索回溯白俄官方
@@ -359,6 +399,7 @@ sources:
     coverage: [animal]
     tier: 3
     schedule: passive
+    track: outbreak
     lang: [en]
     method: search
     notes: Excel中该行注HPAI/ASF; 新闻站, 仅线索
@@ -368,6 +409,7 @@ sources:
     coverage: [animal]
     tier: 3
     schedule: passive
+    track: outbreak
     lang: [it]
     method: browse
     notes: 微型国家, 低频观察; 检疫价值有限
@@ -377,6 +419,7 @@ sources:
     coverage: [animal]
     tier: 3
     schedule: passive
+    track: outbreak
     lang: [en]
     method: browse
     notes: 微型地区, 低频观察; 检疫价值有限
@@ -388,6 +431,7 @@ sources:
     coverage: [animal, plant]
     tier: 1
     schedule: am
+    track: policy
     lang: [ja]
     method: browse
     notes: HPAI/CSF 通报活跃; 邻国, 传入路径权重高
@@ -397,6 +441,7 @@ sources:
     coverage: [animal]
     tier: 1
     schedule: am
+    track: policy
     lang: [ko]
     method: browse
     notes: HPAI/EHD(鹿流行性出血热)近年活跃; 邻国
@@ -406,6 +451,7 @@ sources:
     coverage: [animal, plant]
     tier: 1
     schedule: am
+    track: policy
     lang: [vi]
     method: browse
     notes: 陆地边境邻国; ASF/HPAI 常年活跃
@@ -415,6 +461,7 @@ sources:
     coverage: [animal]
     tier: 1
     schedule: weekly
+    track: policy
     lang: [tr]
     method: browse
     notes: FMD/LSD 地理通道国家
@@ -424,6 +471,7 @@ sources:
     coverage: [animal, plant]
     tier: 1
     schedule: am
+    track: policy
     lang: [en]
     method: browse
     notes: 主要贸易伙伴; 无疫国动向外溢参考价值高
@@ -433,6 +481,7 @@ sources:
     coverage: [animal]
     tier: 1
     schedule: weekly
+    track: policy
     lang: [en]
     method: browse
     notes: 政府新闻总入口(非检疫专页), 站内检索疫情相关公告
@@ -444,6 +493,7 @@ sources:
     coverage: [animal]
     tier: 3
     schedule: passive
+    track: outbreak
     lang: [en]
     method: search
     notes: 地方社区新闻, 检疫价值低; 建议后续以 USDA APHIS 官方通报替换
@@ -453,6 +503,7 @@ sources:
     coverage: [animal]
     tier: 1
     schedule: weekly
+    track: policy
     lang: [es]
     method: browse
     notes: FMD 历史疫区动态观察
@@ -462,6 +513,7 @@ sources:
     coverage: [human, zoonosis]
     tier: 2
     schedule: weekly
+    track: outbreak
     lang: [pt]
     method: browse
     notes: 州级卫生部门, 人畜共患病线索; Excel给的是深层页, 归一到门户
@@ -473,6 +525,7 @@ sources:
     coverage: [measures, animal, plant]
     tier: 1
     schedule: am
+    track: policy
     lang: [en, fr]
     method: browse
     notes: 加拿大动物卫生、植物保护和进口检疫政策
@@ -482,6 +535,7 @@ sources:
     coverage: [measures, animal]
     tier: 1
     schedule: am
+    track: policy
     lang: [th, en]
     method: browse
     notes: 活动物、动物产品和兽医条件
@@ -491,6 +545,7 @@ sources:
     coverage: [measures, plant]
     tier: 1
     schedule: am
+    track: policy
     lang: [th, en]
     method: browse
     notes: 植物检疫和种苗进口要求
@@ -500,6 +555,7 @@ sources:
     coverage: [measures, animal]
     tier: 1
     schedule: am
+    track: policy
     lang: [id, en]
     method: browse
     notes: 动物及动物产品进口和疫病管控
@@ -509,6 +565,7 @@ sources:
     coverage: [measures, animal]
     tier: 1
     schedule: am
+    track: policy
     lang: [ms, en]
     method: browse
     notes: 活动物、动物产品和进口议定书
@@ -518,6 +575,7 @@ sources:
     coverage: [measures, animal]
     tier: 1
     schedule: am
+    track: policy
     lang: [en]
     method: browse
     notes: 动物进口许可和兽医条件
@@ -527,6 +585,7 @@ sources:
     coverage: [measures, plant]
     tier: 1
     schedule: am
+    track: policy
     lang: [en]
     method: browse
     notes: 植物检疫和有害生物管控
@@ -536,6 +595,7 @@ sources:
     coverage: [measures, animal]
     tier: 1
     schedule: am
+    track: policy
     lang: [en]
     method: browse
     notes: 动物卫生和进口条件
@@ -545,6 +605,7 @@ sources:
     coverage: [measures, plant]
     tier: 1
     schedule: am
+    track: policy
     lang: [en]
     method: browse
     notes: 植物检疫和有害生物措施
@@ -554,6 +615,7 @@ sources:
     coverage: [measures, animal, plant]
     tier: 1
     schedule: am
+    track: policy
     lang: [kk, ru, en]
     method: browse
     notes: 中亚通道国家政策源
@@ -563,6 +625,7 @@ sources:
     coverage: [measures, animal]
     tier: 1
     schedule: am
+    track: policy
     lang: [mn, en]
     method: browse
     notes: 中蒙边境活畜和动物产品检疫
@@ -572,6 +635,7 @@ sources:
     coverage: [measures, animal, plant]
     tier: 1
     schedule: am
+    track: policy
     lang: [en]
     method: browse
     notes: 动植物卫生和进口许可
@@ -581,6 +645,7 @@ sources:
     coverage: [measures, animal, plant]
     tier: 1
     schedule: am
+    track: policy
     lang: [pt, en]
     method: browse
     notes: 动植物产品准入与检疫法规
@@ -590,6 +655,7 @@ sources:
     coverage: [measures, animal, plant]
     tier: 1
     schedule: am
+    track: policy
     lang: [es, en]
     method: browse
     notes: 动物/植物产品和区域化措施
@@ -599,6 +665,7 @@ sources:
     coverage: [measures, animal, plant]
     tier: 1
     schedule: am
+    track: policy
     lang: [es, en]
     method: browse
     notes: 动植物检疫和进口议定书
@@ -608,6 +675,7 @@ sources:
     coverage: [measures, animal, plant]
     tier: 1
     schedule: weekly
+    track: policy
     lang: [en]
     method: browse
     notes: 英国动物与植物卫生和法规
@@ -617,6 +685,7 @@ sources:
     coverage: [measures, animal, plant]
     tier: 1
     schedule: weekly
+    track: policy
     lang: [fr, en]
     method: browse
     notes: 法国动植物卫生和欧盟政策落地
@@ -626,6 +695,7 @@ sources:
     coverage: [measures, animal, plant]
     tier: 1
     schedule: weekly
+    track: policy
     lang: [de, en]
     method: browse
     notes: 德国联邦动物卫生、植物保护和法规
@@ -635,6 +705,7 @@ sources:
     coverage: [measures, animal, plant]
     tier: 1
     schedule: weekly
+    track: policy
     lang: [it, en]
     method: browse
     notes: 动植物检疫与农产品进口政策
@@ -644,6 +715,7 @@ sources:
     coverage: [measures, animal, plant]
     tier: 1
     schedule: weekly
+    track: policy
     lang: [es, en]
     method: browse
     notes: 动物卫生、植物检疫和农产品准入
@@ -653,6 +725,7 @@ sources:
     coverage: [measures, animal, plant]
     tier: 1
     schedule: weekly
+    track: policy
     lang: [nl, en]
     method: browse
     notes: 荷兰动植物卫生和进口检疫
@@ -662,6 +735,7 @@ sources:
     coverage: [measures, animal]
     tier: 1
     schedule: weekly
+    track: policy
     lang: [ro, en]
     method: browse
     notes: 动物卫生和动物产品进口
@@ -671,6 +745,7 @@ sources:
     coverage: [measures, animal, plant]
     tier: 1
     schedule: weekly
+    track: policy
     lang: [es, en]
     method: browse
     notes: 动植物检疫和农产品准入
@@ -680,6 +755,7 @@ sources:
     coverage: [measures, animal, plant]
     tier: 1
     schedule: weekly
+    track: policy
     lang: [en]
     method: search
     notes: 以州名+state veterinarian/department of agriculture/plant regulatory official检索并回溯各州官方域名
@@ -690,16 +766,21 @@ sources:
     url: https://eping.wto.org/
     coverage: [measures]
     tier: 1
-    schedule: weekly
+    schedule: daily
+    track: policy
     lang: [en]
     method: browse
-    notes: 各成员动植物检疫措施通报官方平台; 政策变化监测核心源
+    notes: |
+      各成员动植物检疫措施通报官方平台; 政策变化监测第一高产源(日均 10+ 条)。
+      优先走 RSS 订阅确定性拉取(ePing 提供各通知类型的 RSS), 订阅不可用再回退 browse/search 现搜。
+      通报自带发布日期与 G/SPS/N 文号, 是 legal_basis / effective_date / 评议期字段最可靠的来源。
   - id: usda-aphis
     name: 美国农业部动植物卫生检验局(APHIS)
     url: https://www.aphis.usda.gov/
     coverage: [measures, animal, plant]
     tier: 1
     schedule: am
+    track: policy
     lang: [en]
     method: browse
     notes: 主要贸易伙伴的进出口管制公告与 Federal Orders; 政策变化监测重点源
@@ -709,6 +790,7 @@ sources:
     coverage: [measures, animal]
     tier: 1
     schedule: am
+    track: policy
     lang: [en]
     method: browse
     notes: 欧盟动物疫病紧急措施与贸易限制公告(SERS); 政策变化监测重点源
@@ -718,6 +800,7 @@ sources:
     coverage: [human, zoonosis]
     tier: 1
     schedule: weekly
+    track: outbreak
     lang: [en]
     method: browse
     notes: 人畜共患病欧洲侧监测, 与 WHO DON 互为印证
@@ -727,6 +810,7 @@ sources:
     coverage: [animal]
     tier: 2
     schedule: am
+    track: outbreak
     lang: [en]
     method: browse
     notes: 牛病疫情行业跟踪; 仅作线索
@@ -736,6 +820,7 @@ sources:
     coverage: [animal]
     tier: 2
     schedule: am
+    track: outbreak
     lang: [en]
     method: browse
     notes: 猪病疫情行业跟踪; 仅作线索
@@ -745,6 +830,7 @@ sources:
     coverage: [animal]
     tier: 2
     schedule: weekly
+    track: background
     lang: [zh]
     method: browse
     notes: 偏市场行情; 仅疫病相关线索时采用
@@ -754,6 +840,7 @@ sources:
     coverage: [animal]
     tier: 2
     schedule: weekly
+    track: background
     lang: [zh]
     method: browse
     notes: 国内猪业疫病动态; 仅作线索, 回溯官方出处
@@ -763,6 +850,7 @@ sources:
     coverage: [animal]
     tier: 2
     schedule: passive
+    track: outbreak
     lang: [en]
     method: search
     notes: 学术期刊, 不作事件来源; 研判时的病原背景资料用

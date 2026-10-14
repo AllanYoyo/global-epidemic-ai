@@ -14,10 +14,17 @@ description: 监测各国政府动植物检疫与进出口管控政策变化。�
 ## 输入
 
 - `config/sources.yaml`:
-  - `sources`:含 measures 覆盖的官方源清单;
+  - `sources`:源清单, 用 `track` 字段区分是否进入本档主动扫描:
+    - `track: policy` —— 外国政府/国际组织的政策动作源, **policy 档只扫这些**;
+    - `track: outbreak` —— 疫情事件源(WAHIS / EMPRES-i / ProMED / 行业媒体等), 本分支不扫, 仅在影响研判时作背景;
+    - `track: background` —— 中国侧与标准名录源(gacc / mara / tbtsps / foodmate 等), 只作背景, 不进采集台账;
   - `policy_watch_countries`:priority_1 / priority_2 / state_level 国家和官方 source_ids;
   - `policy_keywords`:政策关键词词库(组织机制/商品生物材料/活动物/植物/疫病风险/证书流程/法规标准,每条 {cn, en, aliases[]});
   - `policy_queries`:按主题分组的检索模板。
+
+> **2026-10 起 policy 档只扫 `track: policy` 的源**。疫情源在本分支几乎不产出政策动作,
+> 却会占用检索预算(实测日新增 1-2 条, 远低于 ePing 通报量)。`schedule: weekly` 的政策源按周轮转排开,
+> 避免同一天挤在少数几个国家上。
 
 ## 监测范围(什么算"政策变化")
 
@@ -38,7 +45,9 @@ description: 监测各国政府动植物检疫与进出口管控政策变化。�
 
 1. **定窗口**:确认时间窗(默认今天;常规运行只收最近 24-48 小时的新发布,首次运行放宽到 7 天)。运行标识为当天日期 `YYYY-MM-DD`,并记下窗口下限「今天-N 天」(N 与入库校验一致,默认 7):只有发布时间落在窗口内的条目才算"新信息"。
 2. **按优先级组合检索**:按 `policy_watch_countries.priority_1` → `priority_2` → `state_level` 顺序扫描,每个国家至少覆盖动物、植物、进出口/措施三个主题面:
-   - 第一优先级国家每日扫描;第二优先级国家分批/每周扫描;美国州级通道以州名+州农业部门/州兽医官/植物监管官检索;
+   - **只扫 `track: policy` 的源**;`track: outbreak` / `background` 的源不主动扫(需要背景时再按需查);
+   - 第一优先级国家每日扫描;第二优先级国家分批/每周扫描(按周轮转排开,保证每天覆盖面而不是集中在同一天);美国州级通道以州名+州农业部门/州兽医官/植物监管官检索;
+   - **WTO ePing 是第一高产源, 每日必扫**:优先走 RSS 订阅确定性拉取, 订阅不可用再回退 browse/search。通报自带发布日期与 G/SPS/N 文号, 直接映射 `legal_basis` / `effective_date` / 评议期;
    - 每个国家使用 aliases 和 source_ids 定位官方站内公告,再用 `policy_keywords` 主题词与动作词组合;
    - 用 `policy_queries.sps` 过一遍 WTO ePing 动植物 SPS 通报列表;
    - 用 `policy_queries.official` 检索国家官方检疫机构新闻页;

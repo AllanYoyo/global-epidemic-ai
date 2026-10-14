@@ -55,4 +55,5 @@ scripts/run_scan.sh policy                                  # 定时扫描入口
 - 地理编码走 OSM Nominatim，缓存于 `data/geocache.json`，`RADAR_GEO=0` 关闭；同国多点做确定性偏移。
 - cron 部署要求时区 Asia/Shanghai，且需在 crontab 手工补 PATH（见 config/crontab.example）。
 - 提交信息用 conventional commits（feat/fix/docs/chore(scope)），详见 git log 风格。
-- 敏感区改动前先读：`docs/event-schema.md`、`prompts/policy-impact.md`（研判口径）、`config/sources.yaml`（源分级 tier 与 schedule 档位）。
+- 敏感区改动前先读：`docs/event-schema.md`、`prompts/policy-impact.md`（研判口径）、`config/sources.yaml`（源分级 tier、track 轨道与 schedule 档位）。
+- **源的 `track` 决定是否进入 policy 档主动扫描**：`policy`=政策动作源（主动扫）；`outbreak`=疫情事件源（不扫，仅研判背景）；`background`=中国侧与标准名录（不扫，仅背景）。2026-10 起 policy 档只扫 `track: policy`——疫情源在本分支几乎不产出政策动作却吃检索预算。改源清单时新增源必须显式写 `track`。

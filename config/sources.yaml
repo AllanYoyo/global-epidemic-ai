@@ -17,8 +17,25 @@
 runs:
   policy: {time: "07:30", desc: 外国政府政策变化扫, 产出: 政策日报+Word+Excel+推送, track: [policy]}
 
+# ---- 周轮转分片(ISO 星期: 1=周一 .. 7=周日) ----
+# 每日只扫当天分片的档位, 保证 7 天全覆盖而单日检索量不随国别数线性膨胀。
+# priority_1 / regional / priority_2 无 shard, 每日必扫。
+weekly_shards:
+  1: {desc: 周一,       scan: [border_neighbours]}
+  2: {desc: 周二,       scan: [export_partners]}
+  3: {desc: 周三,       scan: [border_neighbours, export_partners]}
+  4: {desc: 周四,       scan: [border_neighbours]}
+  5: {desc: 周五,       scan: [export_partners]}
+  6: {desc: 周六,       scan: [border_neighbours, export_partners]}
+  7: {desc: 周日,       scan: [state_level]}
+# 周一附加: sources.yaml 中 schedule=weekly 的源(周更通报源, EPPO/NAPPO/FAO 沙漠蝗等)
+
 # ---- 政策监测国家优先级 ----
+# 检索主干: global-policy-search 按本结构逐档定位官方源, 不依赖"扫到"。
+# shard 字段(可选): 按 ISO 星期几分片(1=周一 .. 7=周日), 周轮转档每日只扫当天分片,
+#   保证 7 天全覆盖而单日检索量不随国别数线性膨胀。未写 shard 的档每日必扫。
 policy_watch_countries:
+  # 每日必扫: 对华主要农产品进口来源地 + 高频通报国家
   priority_1:
     - {cn: 加拿大, en: Canada, aliases: [CFIA], source_ids: [ca-cfia]}
     - {cn: 泰国, en: Thailand, aliases: [DLD, DOA], source_ids: [th-dld, th-doa]}
@@ -33,19 +50,43 @@ policy_watch_countries:
     - {cn: 巴西, en: Brazil, aliases: [MAPA, Vigiagro], source_ids: [br-mapa]}
     - {cn: 阿根廷, en: Argentina, aliases: [SENASA], source_ids: [ar-senasa]}
     - {cn: 智利, en: Chile, aliases: [SAG], source_ids: [cl-sag]}
-  priority_2:
+  # 每日必扫: 区域/国际机构措施(不属单一国家, 但直接改变对华准入, 近两日实测唯一稳定产出源)
+  regional:
+    - {cn: 欧盟委员会卫生与食品安全总司, en: European Commission SANTE, aliases: [SANTE, SERS, emergency measures, Implementing Regulation], source_ids: [eu-sante-sers]}
+    - {cn: WTO SPS/TBT 通报预警, en: WTO ePing, aliases: [ePing, G/SPS/N, SPS notification], source_ids: [wto-eping]}
+    - {cn: 国际植物保护公约, en: IPPC, aliases: [IPPC, ISPM, ePhyto, emergency measures], source_ids: [ippc]}
+  # 陆路边境邻国: 传入路径优先(封锁区/暂停进口动辄直指对华通道)
+  border_neighbours:
+    - {cn: 日本, en: Japan, aliases: [MAFF], source_ids: [jp-maff]}
+    - {cn: 韩国, en: South Korea, aliases: [MAFRA], source_ids: [kr-mafra]}
+    - {cn: 俄罗斯, en: Russia, aliases: [Rosselkhoznadzor, FSVS, Rosselkhoz], source_ids: [ru-fsvps, ru-rshn-khv]}
+    - {cn: 土耳其, en: Turkey, aliases: [Tarim ve Orman Bakanligi], source_ids: [tr-tarimorman]}
+    - {cn: 波兰, en: Poland, aliases: [WetGIW], source_ids: [pl-wetgiw]}
+    - {cn: 塞尔维亚, en: Serbia, aliases: [Minpolj], source_ids: [rs-minpolj]}
+    - {cn: 乌克兰, en: Ukraine, aliases: [DPSS], source_ids: [ua-dpss]}
+    - {cn: 罗马尼亚, en: Romania, aliases: [ANSVSA], source_ids: [ro-ansvsa]}
+    - {cn: 挪威, en: Norway, aliases: [Mattilsynet], source_ids: [no-mattilsynet]}
+    - {cn: 阿塞拜疆, en: Azerbaijan, aliases: [AFSA], source_ids: [az-afsa]}
+  # 对华出口大户(反向措施): 其检疫要求变动常触发对华准入摩擦
+  export_partners:
+    - {cn: 澳大利亚, en: Australia, aliases: [Department of Agriculture], source_ids: [au-agriculture]}
+    - {cn: 新西兰, en: New Zealand, aliases: [MPI, Beehive, Biosecurity], source_ids: [nz-beehive]}
     - {cn: 英国, en: United Kingdom, aliases: [DEFRA, APHA], source_ids: [uk-defra]}
     - {cn: 法国, en: France, aliases: [French Agriculture], source_ids: [fr-agri]}
-    - {cn: 德国, en: Germany, aliases: [FLI, BMEL], source_ids: [de-fli, de-bmel]}
+    - {cn: 德国, en: Germany, aliases: [BMEL], source_ids: [de-bmel]}
     - {cn: 意大利, en: Italy, aliases: [MASAF], source_ids: [it-masaf]}
     - {cn: 西班牙, en: Spain, aliases: [MAPA], source_ids: [es-mapa]}
     - {cn: 荷兰, en: Netherlands, aliases: [NVWA], source_ids: [nl-nvwa]}
-    - {cn: 波兰, en: Poland, aliases: [WetGIW], source_ids: [pl-wetgiw]}
-    - {cn: 罗马尼亚, en: Romania, aliases: [ANSVSA], source_ids: [ro-ansvsa]}
     - {cn: 墨西哥, en: Mexico, aliases: [SENASICA], source_ids: [mx-senasica]}
-    - {cn: 美国, en: United States, aliases: [USDA APHIS, state agriculture departments], source_ids: [usda-aphis, us-state-agri]}
+  # 每日必扫: 主要贸易伙伴的联邦级措施
+  priority_2:
+    - {cn: 美国, en: United States, aliases: [USDA APHIS, Federal Order, state agriculture departments], source_ids: [usda-aphis, us-state-agri]}
+  # 州级通道: 美国各州农业/兽医/植检部门, 动作量级大于联邦
   state_level:
     - {cn: 美国州级农业部门, en: US state agriculture departments, aliases: [state veterinarian, state plant regulatory official], source_ids: [us-state-agri]}
+    - {cn: 北爱尔兰农业环境与农村事务部, en: UK DAERA Northern Ireland, aliases: [DAERA], source_ids: [uk-daera]}
+    - {cn: 德国动物疾病信息系统, en: Germany FLI TSIS, aliases: [FLI, TSIS], source_ids: [de-fli]}
+    - {cn: 哥伦比亚农业部, en: Colombia MinAgricultura, aliases: [MinAgricultura, ICA], source_ids: [co-minagricultura]}
 
 # ---- 情报源分级: 1 官方(可直接支撑 verified) / 2 专业(需交叉) / 3 媒体(仅线索) ----
 # schedule 档位: am_pm=晨扫+晚扫 / am=仅晨扫 / daily=每日政策档 / weekly=每周一晨扫附加 / passive=不主动扫

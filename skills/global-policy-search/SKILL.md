@@ -18,13 +18,22 @@ description: 监测各国政府动植物检疫与进出口管控政策变化。�
     - `track: policy` —— 外国政府/国际组织的政策动作源, **policy 档只扫这些**;
     - `track: outbreak` —— 疫情事件源(WAHIS / EMPRES-i / ProMED / 行业媒体等), 本分支不扫, 仅在影响研判时作背景;
     - `track: background` —— 中国侧与标准名录源(gacc / mara / tbtsps / foodmate 等), 只作背景, 不进采集台账;
-  - `policy_watch_countries`:priority_1 / priority_2 / state_level 国家和官方 source_ids;
+  - `policy_watch_countries`:检索主干, 6 个档位——`priority_1`(对华进口来源地, 每日必扫)、
+    `regional`(区域/国际机构措施: 欧盟 SANTE、WTO ePing、IPPC, 每日必扫)、
+    `priority_2`(主要贸易伙伴联邦级措施, 每日必扫)、
+    `border_neighbours`(陆路边境邻国, 传入路径优先)、`export_partners`(对华出口大户, 反向措施)、
+    `state_level`(次国家/州级部门)。后三档按 `weekly_shards` 周轮转, 每条含 source_ids 与别名;
+  - `weekly_shards`:ISO 星期(1=周一..7=周日) → 当天要扫的档位;每日必扫档不在其中列出;
   - `policy_keywords`:政策关键词词库(组织机制/商品生物材料/活动物/植物/疫病风险/证书流程/法规标准,每条 {cn, en, aliases[]});
   - `policy_queries`:按主题分组的检索模板。
 
 > **2026-10 起 policy 档只扫 `track: policy` 的源**。疫情源在本分支几乎不产出政策动作,
-> 却会占用检索预算(实测日新增 1-2 条, 远低于 ePing 通报量)。`schedule: weekly` 的政策源按周轮转排开,
-> 避免同一天挤在少数几个国家上。
+> 却会占用检索预算(实测日新增 1-2 条, 远低于 ePing 通报量)。
+
+> **国别主干按周轮转**:`priority_1` / `regional` / `priority_2` 每日必扫;`border_neighbours` /
+> `export_partners` / `state_level` 按当天 ISO 星期对应的 `weekly_shards` 扫。
+> 这样 7 天全覆盖, 单日检索量不随国别数线性膨胀。轮转日要在 `search-log.md` 注明当天分片,
+> 便于复盘"某国这周没产出是漏扫还是真无变化"。
 
 ## 监测范围(什么算"政策变化")
 
@@ -44,16 +53,19 @@ description: 监测各国政府动植物检疫与进出口管控政策变化。�
 ## 步骤
 
 1. **定窗口**:确认时间窗(默认今天;常规运行只收最近 24-48 小时的新发布,首次运行放宽到 7 天)。运行标识为当天日期 `YYYY-MM-DD`,并记下窗口下限「今天-N 天」(N 与入库校验一致,默认 7):只有发布时间落在窗口内的条目才算"新信息"。
-2. **按优先级组合检索**:按 `policy_watch_countries.priority_1` → `priority_2` → `state_level` 顺序扫描,每个国家至少覆盖动物、植物、进出口/措施三个主题面:
+2. **按优先级组合检索**:先取当天 ISO 星期对应的 `weekly_shards.scan` 分片,再并入每日必扫档:
+   - **每日必扫**:`priority_1` → `regional` → `priority_2`;
+   - **当天轮转档**:`border_neighbours` / `export_partners` / `state_level`,按 `weekly_shards` 取;
+   - 周一附加扫 `sources.yaml` 中 `schedule: weekly` 的政策源;
    - **只扫 `track: policy` 的源**;`track: outbreak` / `background` 的源不主动扫(需要背景时再按需查);
-   - 第一优先级国家每日扫描;第二优先级国家分批/每周扫描(按周轮转排开,保证每天覆盖面而不是集中在同一天);美国州级通道以州名+州农业部门/州兽医官/植物监管官检索;
-   - **WTO ePing 是第一高产源, 每日必扫**:优先走 RSS 订阅确定性拉取, 订阅不可用再回退 browse/search。通报自带发布日期与 G/SPS/N 文号, 直接映射 `legal_basis` / `effective_date` / 评议期;
-   - 每个国家使用 aliases 和 source_ids 定位官方站内公告,再用 `policy_keywords` 主题词与动作词组合;
+   - **WTO ePing 与欧盟 SANTE SERS 是第一高产源, 每日必扫**(均已归入 `regional` 档):ePing 优先走 RSS 订阅确定性拉取,订阅不可用再回退 browse/search;通报自带发布日期与 G/SPS/N 文号,直接映射 `legal_basis` / `effective_date` / 评议期;
+   - 每个国家/机构使用 aliases 和 source_ids 定位官方站内公告,再用 `policy_keywords` 主题词与动作词组合;
    - 用 `policy_queries.sps` 过一遍 WTO ePing 动植物 SPS 通报列表;
    - 用 `policy_queries.official` 检索国家官方检疫机构新闻页;
    - 用 `policy_queries.animals / plants / biologics / certification / product_access / regulation / country_sweep` 逐主题检索;
    - 用 `policy_queries.organisations` 跟踪 WOAH/FAO/GPP-TAD/ECTAD/IPPC/EPPO 的行动与呼吁;
    - 用 `policy_queries.disease_triggered` 作为疫情背景触发型补充,不让病害清单决定国家范围。
+   - 在 `search-log.md` 头部注明当天 ISO 星期与实际扫描的档位。
 3. **逐条存档**:
    - **先核发布日期再存档**:从页面 meta、日期栏或文首确认发布时间;早于窗口下限的是常年挂网的旧闻,不存档不入库,在 search-log.md 该行末尾标注「跳过-旧闻」;页面完全没有日期线索时先从正文/URL/站点列表页判断,仍无法确认的按旧闻处理并标注「跳过-日期不明」;
    - 网页:`python scripts/collect.py --url "<URL>" --title "<标题>"`(存到 `data/raw/<日期>/`);

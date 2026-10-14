@@ -198,6 +198,48 @@ class SourceDomainTests(unittest.TestCase):
         self.assertFalse(self.n._is_third_party("dae.gov.bd"))
         self.assertFalse(self.n._is_third_party("lsd.gov.bd"))
 
+    def test_subnational_official_hosts_from_production_db(self):
+        # 2026-10 依生产库 162 条实跑数据补齐: 这些 host 曾真实入库过,
+        # 且确属官方, 但都不在 sources.yaml 的 track=policy 源清单内。
+        for url in ("https://www.info.gov.hk/gia/general/202610/13/P2026101300xxx.htm",
+                    "https://www.cfs.gov.hk/english/whatsnew/whatsnew_fa/whatsnew_fa.html",
+                    "https://www.sfa.gov.sg/newsroom/news-details",
+                    "https://www.da.gov.ph/press-releases",
+                    "https://news.maryland.gov/",
+                    "https://www.tahc.texas.gov/",
+                    "https://www.federalregister.gov/documents/2026/10/01/2026-18xxx",
+                    "https://www.whitehouse.gov/presidential-actions/2026/10/",
+                    "https://busquedas.elperuano.pe/dec_normas-legales/",
+                    "https://webstore.unbs.go.ug/",
+                    "https://zakon.rada.gov.ua/laws/show/2768#Text"):
+            self.assertTrue(self.n._is_official_domain(self.n._source_host(url)), url)
+
+    def test_us_gov_suffix_covers_federal_and_state(self):
+        # "gov" 作为美国受限顶级域后缀, 应同时覆盖联邦与州级门户
+        for host in ("www.aphis.usda.gov", "www.federalregister.gov",
+                     "www.whitehouse.gov", "news.maryland.gov",
+                     "www.tahc.texas.gov", "www.agriculture.wa.gov"):
+            self.assertTrue(self.n._is_official_domain(host), host)
+
+    def test_lookalike_non_official_hosts_flagged(self):
+        # 2026-10 生产库审计发现: 三个"像官方但不是"的域曾支撑 tier 1 记录。
+        # eurlexa.com 尤其关键——它是 EUR-Lex 的商业镜像(真身 eur-lex.europa.eu)。
+        for host in ("eurlexa.com", "www.eurlexa.com", "economy.com.na",
+                     "base.spinform.ru"):
+            self.assertTrue(self.n._is_third_party(host), host)
+            self.assertFalse(self.n._is_official_domain(host), host)
+
+    def test_eurlexa_tier1_cannot_be_verified(self):
+        # 复现生产库问题: 仿冒域曾支撑一条 verified + tier 1 的欧盟条例记录
+        e = _source_event(
+            source={"tier": 1, "name": "EUR-Lex 仿冒镜像",
+                    "url": "https://eurlexa.com/act/en/32026R2268/32026R2268/text",
+                    "quote": "Commission Implementing Regulation (EU) 2026/2268"},
+            verification_status="verified")
+        errs = self.n.validate(dict(e))
+        self.assertTrue(any("不得判 verified" in m for m in errs), errs)
+        self.assertEqual(e["source"]["tier"], 3)
+
     def test_known_third_party_hosts_flagged(self):
         for host in ("bangladeshtradeportal.gov.bd", "thebrief.com.na",
                      "agrinfo.eu", "freyrsolutions.com", "www.evs.ee"):

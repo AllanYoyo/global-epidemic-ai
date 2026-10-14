@@ -64,6 +64,20 @@ OFFICIAL_DOMAIN_SUFFIXES = (
     "rshn-khv-eao.ru",  # 俄罗斯远东区域署, 主域是 .ru 但非 .gov.ru
     # 国际组织/其他官方登记系统
     "faolex.fao.org", "ecolex.org", "sanitary.gov",
+    # ---- 次国家/区域官方门户(2026-10 依生产库 162 条实跑数据补齐) ----
+    # 这批域在现网记录里真实命中且确属官方, 但不在 sources.yaml 的 track=policy
+    # 源清单内(州级政府/单列口岸/特区政府), 检索层通用检索式会直接命中, 故必须放行。
+    # 注意: 以下每条都对应生产库里真实出现过的 host, 不是预防性铺开。
+    "gov",            # 美国受限顶级域: 一并覆盖联邦(aphis.usda.gov / federalregister.gov /
+                      # whitehouse.gov / govinfo.gov)与州级(news.maryland.gov /
+                      # www.tahc.texas.gov 等), 无需逐州罗列; 不会误伤 gov.bd / gob.mx 等
+    "gov.hk",         # 中国香港特区政府新闻公报(info.gov.hk)
+    "cfs.gov.hk",     # 香港食安中心
+    "gov.sg",         # 新加坡政府(含食品局 sfa.gov.sg)
+    "da.gov.ph",      # 菲律宾农业部
+    "elperuano.pe",   # 秘鲁官方公报 El Peruano(Editora Perú 国企), 含检索入口 busquedas.*
+    "unbs.go.ug",     # 乌干达国家标准局(东非 DEAS 通报参与方)
+    "rada.gov.ua",    # 乌克兰议会官方法令库(закон.rada.gov.ua)
 )
 
 # 明显非官方的第三方站点(黑名单, 命中即警告; 命中黑名单的 tier 1 强制降为 3)
@@ -76,6 +90,13 @@ THIRD_PARTY_HINTS = (
     "agrinfo.eu",                    # 私营农业信息站
     "freyrsolutions.com",
     "evs.ee",
+    # 2026-10 依生产库实跑数据补充: 均为"长得像官方但非官方"的域。
+    # eurlexa.com 尤其危险——它是 EUR-Lex 的商业镜像, 自称 "EU legislation at
+    # your fingertips", 真身是 eur-lex.europa.eu。生产库里曾用它支撑一条
+    # "verified + tier 1" 的欧盟条例记录, 属可溯源硬要求的直接违规。
+    "eurlexa.com",
+    "economy.com.na",    # 私营 Namibia Economist 报纸 / IPPR 经济指南
+    "base.spinform.ru",  # СПИНФОРМ 私营法律信息数据库(非俄政府门户)
     "quora.com", "wikipedia.org", "medium.com", "blogspot.com",
     "wordpress.com", "linkedin.com", "facebook.com", "twitter.com",
     "youtube.com",

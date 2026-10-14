@@ -31,6 +31,111 @@ DEFAULT_SENTINELS = {"verification_status": "unverified", "policy_status": "已�
 # 旧闻拦截默认窗口(天): 新记录发布时间早于"今天-N 天"拒收; 0 或 --max-age-days 0 关闭
 DEFAULT_MAX_AGE_DAYS = 7
 
+# ---- 官方来源域名后缀(可溯源硬要求的落地口径) ----
+# source.tier=1 只应由下列官方域名的原文支撑; 第三方站点(媒体/行业站/他国贸易门户/
+# 商业数据库)即使被检索命中也只能作线索, 不得标 tier 1 或据此判 verified。
+# 2026-10 实测 19 条入库记录 100% unverified, 其中逾半数来源是
+# freyrsolutions.com / qpests.insect-genome.com / thebrief.com.na / www.evs.ee /
+# bangladeshtradeportal.gov.bd / agrinfo.eu 这类非官方站点, 却被标成 tier 1。
+OFFICIAL_DOMAIN_SUFFIXES = (
+    # 国际组织与通报平台
+    "wto.org", "woah.org", "fao.org", "ippc.int", "eppo.int",
+    # 欧盟(EUR-Lex 为欧盟官方公报库; SANTE/DG SANTE 为措施发布主体)
+    "europa.eu", "europa.eu",
+    # 北美
+    "aphis.usda.gov", "usda.gov", "govinfo.gov", "canada.ca",
+    # 英澳新(英国已脱欧, 有自有体系; 澳新为主要对华出口方)
+    "gov.uk", "agriculture.gov.au", "mpi.govt.nz", "beehive.govt.nz",
+    "afs.govt.nz", "mpi.govt.nz",
+    # 亚洲
+    "maff.go.jp", "mafra.go.kr", "mard.gov.vn", "dld.go.th", "doa.go.th",
+    "dvs.gov.my", "pertanian.go.id", "gov.la", "gov.kz", "gov.mn",
+    "bpi.da.gov.ph", "bai.gov.ph", "dahd.nic.in", "ppqs.gov.in",
+    # 南美
+    "senasa.gov.ar", "sag.gob.cl", "gov.br", "mgap.gub.uy",
+    # 其他高价值官方域
+    "tarimorman.gov.tr", "mewa.gov.sa", "nzda.govt.nz", "food.ec.europa.eu",
+    # 国际组织/其他官方登记系统
+    "faolex.fao.org", "ecolex.org", "fao.org", "sanitary.gov",
+)
+
+# 明显非官方的第三方站点(黑名单, 命中即警告; 命中黑名单的 tier 1 强制降为 3)
+# 存根域名: 命中本身或其任意子域即判第三方
+THIRD_PARTY_HINTS = (
+    "gov.bd",            # 他国贸易门户(如 bangladeshtradeportal.gov.bd 转述他国措施)
+    "insect-genome.com", # 第三方检疫数据库(qpests.*)
+    "thebrief.com", "thebrief.com.na",  # 纳米比亚商业通讯
+    "agrinfo.eu",        # 私营农业信息站
+    "freyrsolutions.com",
+    "evs.ee",
+    "quora.com", "wikipedia.org", "medium.com", "blogspot.com",
+    "wordpress.com", "linkedin.com", "facebook.com", "twitter.com",
+    "youtube.com",
+)
+
+
+def _source_host(url):
+    """从 URL 取主机名(小写); 无法解析时返回空串。"""
+    if not isinstance(url, str) or "//" not in url:
+        return ""
+    try:
+        host = url.split("//", 1)[1].split("/", 1)[0]
+    except IndexError:
+        return ""
+    return host.split("@")[-1].split(":")[0].strip().lower()
+
+
+def _is_official_domain(host):
+    """主机是否落在官方域名后缀内(含子域)。"""
+    if not host:
+        return False
+    return any(host == s or host.endswith("." + s) for s in OFFICIAL_DOMAIN_SUFFIXES)
+
+
+def _is_third_party(host):
+    """主机是否命中第三方站点黑名单(按后缀匹配, 覆盖其子域)。"""
+    if not host:
+        return False
+    return any(host == h or host.endswith("." + h) for h in THIRD_PARTY_HINTS)
+
+
+def _host_matches(host, suffixes):
+    return any(host == s or host.endswith("." + s) for s in suffixes)
+
+
+def check_source_domain(e):
+    """校验 source 与 tier 是否自洽。
+
+    返回 (errors, normalized_event):
+    - tier=1 但主机非官方域 -> 报错拒收(除非该国确无已知官方域, 用 source.official=1 显式声明)
+    - 命中第三方黑名单 -> tier 强制降为 3, 且不得判 verified
+    """
+    errs = []
+    src = e.get("source") or {}
+    url = src.get("url")
+    host = _source_host(url)
+    tier = src.get("tier")
+
+    if host and _is_third_party(host):
+        # 第三方站点: 只能是线索。降级并禁止 verified。
+        if tier == 1:
+            src["tier"] = 3
+        if e.get("verification_status") in ("verified",):
+            errs.append("来源为第三方站点(%s), 不得判 verified(仅可线索)" % host)
+        errs.append("[线索] 来源主机 %s 非官方站点, 已将 source.tier 降为 3; "
+                    "须回溯该国官方原文后重新入库才能支撑 verified" % host)
+        e["source"] = src
+        return errs, e
+
+    if tier == 1 and host and not _is_official_domain(host):
+        if not src.get("official"):
+            errs.append(
+                "source.tier=1 但来源主机 %s 不在官方域名库内; "
+                "若该国确有本系统未收录的官方域, 在 source 里显式加 official: 1 说明" % host)
+        else:
+            e.setdefault("verification_notes", None)
+    return errs, e
+
 
 def now():
     return datetime.datetime.now().isoformat(timespec="seconds")
@@ -140,6 +245,9 @@ def validate(e):
             errs.append("source.quote 不得超过 120 字")
     if e.get("verification_status") and e["verification_status"] not in VERIF_STATUS:
         errs.append("verification_status 非法: %s" % e["verification_status"])
+    # 来源域名与 tier 自洽性: 第三方站点不得标 tier 1 / 不得判 verified
+    dom_errs, _ = check_source_domain(e)
+    errs.extend(dom_errs)
     if e.get("impact_type") and e["impact_type"] not in POLICY_IMPACT_TYPES:
         errs.append("impact_type 必须为 约束|机会|中性")
     if e.get("impact_level") and e["impact_level"] not in POLICY_IMPACT_LEVELS:

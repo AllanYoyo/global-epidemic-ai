@@ -77,21 +77,20 @@ policy_watch_countries:
     - {cn: 挪威, en: Norway, aliases: [Mattilsynet], source_ids: [no-mattilsynet], shard: "5"}
     - {cn: 阿塞拜疆, en: Azerbaijan, aliases: [AFSA], source_ids: [az-afsa], shard: "7"}
   # 对华出口大户(反向措施): 其检疫要求变动常触发对华准入摩擦
+  # 注: 欧盟成员国不在此列——欧盟动植物检疫规则为欧盟层面统一立法
+  #     (植物健康 Reg (EU) 2016/2031 / 动物健康 Reg (EU) 2019/2131),
+  #     紧急措施由 SANTE 以实施条例与 SERS 发布, 成员国执行细则空间极小。
+  #     欧盟议题统一由 regional 档的 eu-sante-sers 覆盖, 不按成员国重复扫描。
   export_partners:
     - {cn: 澳大利亚, en: Australia, aliases: [Department of Agriculture], source_ids: [au-agriculture], shard: "1 3 5"}
     - {cn: 新西兰, en: New Zealand, aliases: [MPI, Beehive, Biosecurity], source_ids: [nz-beehive], shard: "2 4 6"}
     - {cn: 乌拉圭, en: Uruguay, aliases: [MGAP, DGSG], source_ids: [uy-mgap], shard: "1 4 7"}
     - {cn: 巴西, en: Brazil, aliases: [MAPA], source_ids: [br-mapa], shard: "2 5"}
     - {cn: 沙特阿拉伯, en: Saudi Arabia, aliases: [MEWA, 兽医检疫], source_ids: [sa-mewa], shard: "3 6"}
-    - {cn: 匈牙利, en: Hungary, aliases: [农业与乡村发展部], source_ids: [hu-agri], shard: "1 5"}
-    - {cn: 英国, en: United Kingdom, aliases: [DEFRA, APHA], source_ids: [uk-defra], shard: "2 6"}
-    - {cn: 法国, en: France, aliases: [French Agriculture], source_ids: [fr-agri], shard: "3 7"}
-    - {cn: 德国, en: Germany, aliases: [BMEL], source_ids: [de-bmel], shard: "4"}
-    - {cn: 意大利, en: Italy, aliases: [MASAF], source_ids: [it-masaf], shard: "5"}
-    - {cn: 西班牙, en: Spain, aliases: [MAPA], source_ids: [es-mapa], shard: "6"}
-    - {cn: 荷兰, en: Netherlands, aliases: [NVWA], source_ids: [nl-nvwa], shard: "7"}
     - {cn: 墨西哥, en: Mexico, aliases: [SENASICA], source_ids: [mx-senasica], shard: "1"}
     - {cn: 阿根廷, en: Argentina, aliases: [SENASA], source_ids: [ar-senasa], shard: "3"}
+    # 英国已脱欧, 保留自有 IHS 与官方兽医体系, 不随欧盟规则走
+    - {cn: 英国, en: United Kingdom, aliases: [DEFRA, APHA], source_ids: [uk-defra], shard: "2 6"}
   # 每日必扫: 主要贸易伙伴的联邦级措施
   priority_2:
     - {cn: 美国, en: United States, aliases: [USDA APHIS, Federal Order, state agriculture departments], source_ids: [usda-aphis, us-state-agri]}
@@ -487,10 +486,14 @@ sources:
     coverage: [measures, animal, plant]
     tier: 1
     schedule: weekly
-    track: policy
+    track: outbreak
+
+    notes: |
+      欧盟成员国国内机构; 欧盟动植物检疫为层面统一立法(植物健康 Reg (EU) 2016/2031,
+      动物健康 Reg (EU) 2019/2131), 紧急措施由 SANTE 以实施条例/SERS 发布。
+      2026-10 起 track=outbreak, 不在 policy 档主动扫描; 仅欧盟层面措施需要落地细节时按需查。
     lang: [hu, en]
     method: browse
-    notes: |
       欧盟成员国农业国; 禽肉/乳制品对欧与对华出口均涉及其卫生条件,
       欧盟层面措施之外的国内执行细则值得跟踪。2026-10 已产出"恢复匈牙利产品进口"1 条。
   - id: ba-fbihvlada
@@ -815,50 +818,70 @@ sources:
     coverage: [measures, animal, plant]
     tier: 1
     schedule: weekly
-    track: policy
+    track: outbreak
+
+    notes: |
+      欧盟成员国国内机构; 欧盟动植物检疫为层面统一立法(植物健康 Reg (EU) 2016/2031,
+      动物健康 Reg (EU) 2019/2131), 紧急措施由 SANTE 以实施条例/SERS 发布。
+      2026-10 起 track=outbreak, 不在 policy 档主动扫描; 仅欧盟层面措施需要落地细节时按需查。
     lang: [fr, en]
     method: browse
-    notes: 法国动植物卫生和欧盟政策落地
   - id: de-bmel
     name: 德国联邦食品与农业部(BMEL)
     url: https://www.bmel.de/
     coverage: [measures, animal, plant]
     tier: 1
     schedule: weekly
-    track: policy
+    track: outbreak
+
+    notes: |
+      欧盟成员国国内机构; 欧盟动植物检疫为层面统一立法(植物健康 Reg (EU) 2016/2031,
+      动物健康 Reg (EU) 2019/2131), 紧急措施由 SANTE 以实施条例/SERS 发布。
+      2026-10 起 track=outbreak, 不在 policy 档主动扫描; 仅欧盟层面措施需要落地细节时按需查。
     lang: [de, en]
     method: browse
-    notes: 德国联邦动物卫生、植物保护和法规
   - id: it-masaf
     name: 意大利农业、粮食主权与林业部(MASAF)
     url: https://www.masaf.gov.it/
     coverage: [measures, animal, plant]
     tier: 1
     schedule: weekly
-    track: policy
+    track: outbreak
+
+    notes: |
+      欧盟成员国国内机构; 欧盟动植物检疫为层面统一立法(植物健康 Reg (EU) 2016/2031,
+      动物健康 Reg (EU) 2019/2131), 紧急措施由 SANTE 以实施条例/SERS 发布。
+      2026-10 起 track=outbreak, 不在 policy 档主动扫描; 仅欧盟层面措施需要落地细节时按需查。
     lang: [it, en]
     method: browse
-    notes: 动植物检疫与农产品进口政策
   - id: es-mapa
     name: 西班牙农业、渔业与食品部(MAPA)
     url: https://www.mapa.gob.es/
     coverage: [measures, animal, plant]
     tier: 1
     schedule: weekly
-    track: policy
+    track: outbreak
+
+    notes: |
+      欧盟成员国国内机构; 欧盟动植物检疫为层面统一立法(植物健康 Reg (EU) 2016/2031,
+      动物健康 Reg (EU) 2019/2131), 紧急措施由 SANTE 以实施条例/SERS 发布。
+      2026-10 起 track=outbreak, 不在 policy 档主动扫描; 仅欧盟层面措施需要落地细节时按需查。
     lang: [es, en]
     method: browse
-    notes: 动物卫生、植物检疫和农产品准入
   - id: nl-nvwa
     name: 荷兰食品与消费品安全局(NVWA)
     url: https://www.nvwa.nl/
     coverage: [measures, animal, plant]
     tier: 1
     schedule: weekly
-    track: policy
+    track: outbreak
+
+    notes: |
+      欧盟成员国国内机构; 欧盟动植物检疫为层面统一立法(植物健康 Reg (EU) 2016/2031,
+      动物健康 Reg (EU) 2019/2131), 紧急措施由 SANTE 以实施条例/SERS 发布。
+      2026-10 起 track=outbreak, 不在 policy 档主动扫描; 仅欧盟层面措施需要落地细节时按需查。
     lang: [nl, en]
     method: browse
-    notes: 荷兰动植物卫生和进口检疫
   - id: ro-ansvsa
     name: 罗马尼亚国家卫生兽医与食品安全局(ANSVSA)
     url: https://www.ansvsa.ro/

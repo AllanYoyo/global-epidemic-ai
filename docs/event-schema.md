@@ -26,6 +26,7 @@
 | event_date | string | ✅ | 公告/生效日期;政策优先使用 `effective_date` |
 | effective_date / effective_until | string | – | 生效日/有效期截止日 |
 | source | object | ✅ | tier/name/url/publish_date/quote; quote 不超过 120 字 |
+| source.official | number | – | 官方域名库未收录该国时, 显式声明 `1` 表示该 URL 确为该国官方站点(归一化为 1); 缺省 0 |
 | cross_sources | object[] | – | 其他独立来源 |
 | verification_status | string | 自动 | verified / single_source / unverified / false_positive / merged |
 | verification_notes | string | – | 官方核验结论 |
@@ -79,7 +80,9 @@ verified ──(政策影响研判)──→ 写入 impact_type / impact_level /
 ## 设计原则
 
 1. **可溯源**:政策必须能通过 `source.url` 回到外国政府/国际组织原文。
-2. **不编造**:原文没有的商品、日期、影响和建议动作填 null 或“未注明”。
-3. **政策优先**:生产入口、网页、Word、Excel、推送只处理政策变化。
-4. **幂等**:政策主键稳定,重复入库更新原记录并保留 first_seen。
-5. **时间窗(旧闻不入库)**:新增记录的发布时间(`source.publish_date`,缺省 `event_date`)不得早于 `normalize.py --max-age-days` 窗口(默认 7 天,环境变量 `POLICY_MAX_AGE_DAYS` 覆盖,0 关闭)——日报"今日新增"按 first_seen 展示,常年挂网的旧公告一旦入库就会被当成当日新政策;该拦截只针对新增 `event_id`,已入库记录的核验/研判合并更新不受影响,库重建重放镜像 JSON 时传 `--max-age-days 0`。
+2. **来源域名与 tier 自洽**:`source.tier=1` 只能由 `scripts/normalize.py` 的 `OFFICIAL_DOMAIN_SUFFIXES`(政府 `.gov/.gub/.go.*`、EUR-Lex、ePing 等官方域)支撑。第三方站点(行业媒体、他国贸易门户转述、商业数据库)一律降为 tier 3, 且**不得判 `verified`**。该国官方域确实未被收录时,在 `source` 里显式加 `official: 1` 说明。2026-10 实测:入库记录 100% unverified, 逾半数来源是第三方站点却标了 tier 1——此校验就是为堵这个口子。
+3. **不编造**:原文没有的商品、日期、影响和建议动作填 null 或“未注明”。
+4. **政策优先**:生产入口、网页、Word、Excel、推送只处理政策变化。
+5. **幂等**:政策主键稳定,重复入库更新原记录并保留 first_seen。
+6. **时间窗(旧闻不入库)**:新增记录的发布时间(`source.publish_date`,缺省 `event_date`)不得早于 `normalize.py --max-age-days` 窗口(默认 7 天,环境变量 `POLICY_MAX_AGE_DAYS` 覆盖,0 关闭)——日报"今日新增"按 first_seen 展示,常年挂网的旧公告一旦入库就会被当成当日新政策;该拦截只针对新增 `event_id`,已入库记录的核验/研判合并更新不受影响,库重建重放镜像 JSON 时传 `--max-age-days 0`。
+7. **event_id 关联对象**:新增记录必须给出 `policy_key` / `disease_name_en` / `products` / `target_countries` / `scope` 至少其一, 否则同国/同领域/同动作/同日的两条政策会算出相同 event_id 并被默认合并吞掉。

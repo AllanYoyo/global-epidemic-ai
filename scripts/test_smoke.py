@@ -52,7 +52,8 @@ def _source_event(**overrides):
         "effective_date": "2026-09-15",
         "products": ["新鲜牛肉"],
         "source": {
-            "tier": 1, "name": "测试源", "url": "https://example.com/p1",
+            # 默认用官方域名, 否则会命中 source tier/域名自洽性校验
+            "tier": 1, "name": "测试源", "url": "https://www.aphis.usda.gov/p1",
             "publish_date": "2026-09-15", "quote": "test quote",
         },
     }
@@ -118,6 +119,70 @@ class BaseLazyImportTests(unittest.TestCase):
         for k in list(sys.modules):
             if any(k == p or k.startswith(p + ".") for p in prefixes):
                 sys.modules.pop(k, None)
+
+
+class SourceDomainTests(unittest.TestCase):
+    """可溯源硬要求: tier=1 只能由官方域名支撑, 第三方站点只作线索。"""
+
+    def setUp(self):
+        import normalize
+        self.n = normalize
+        self.base = _source_event(
+            source={"tier": 1, "name": "src",
+                    "url": "https://www.aphis.usda.gov/rule/123", "quote": "q"},
+            verification_status="unverified")
+
+    def test_official_domain_tier1_passes(self):
+        self.assertEqual(self.n.validate(dict(self.base)), [])
+
+    def test_third_party_host_rejected(self):
+        e = _source_event(
+            source={"tier": 1, "name": "n",
+                    "url": "https://freyrsolutions.com/notice/1", "quote": "q"},
+            verification_status="unverified")
+        errs = self.n.validate(dict(e))
+        self.assertTrue(any("非官方站点" in m for m in errs), errs)
+
+    def test_third_party_tier_downgraded_to_3(self):
+        e = _source_event(
+            source={"tier": 1, "name": "n",
+                    "url": "https://www.evs.ee/news/9", "quote": "q"},
+            verification_status="unverified")
+        self.n.validate(dict(e))
+        self.assertEqual(e["source"]["tier"], 3)
+
+    def test_third_party_cannot_be_verified(self):
+        e = _source_event(
+            source={"tier": 2, "name": "n",
+                    "url": "https://qpests.insect-genome.com/x", "quote": "q"},
+            verification_status="verified")
+        errs = self.n.validate(dict(e))
+        self.assertTrue(any("不得判 verified" in m for m in errs), errs)
+
+    def test_unlisted_domain_rejected_unless_declared(self):
+        e = _source_event(
+            source={"tier": 1, "name": "n",
+                    "url": "https://somedomain.gov.example/x", "quote": "q"},
+            verification_status="unverified")
+        errs = self.n.validate(dict(e))
+        self.assertTrue(any("不在官方域名库内" in m for m in errs), errs)
+        e2 = _source_event(
+            source={"tier": 1, "name": "n", "official": 1,
+                    "url": "https://somedomain.gov.example/x", "quote": "q"},
+            verification_status="unverified")
+        self.assertEqual(self.n.validate(dict(e2)), [])
+
+    def test_known_official_hosts_recognized(self):
+        for url in ("https://eur-lex.europa.eu/eli/reg/2026/2268/oj",
+                    "https://eping.wto.org/en/SPS/Notifications",
+                    "https://www.agriculture.gov.au/biosecurity",
+                    "https://www.gov.uk/government/organisations/defra"):
+            self.assertTrue(self.n._is_official_domain(self.n._source_host(url)), url)
+
+    def test_known_third_party_hosts_flagged(self):
+        for host in ("bangladeshtradeportal.gov.bd", "thebrief.com.na",
+                     "agrinfo.eu", "freyrsolutions.com", "www.evs.ee"):
+            self.assertTrue(self.n._is_third_party(host), host)
 
 
 class NormalizeValidateTests(unittest.TestCase):
@@ -311,7 +376,7 @@ class NormalizeStaleGateTests(unittest.TestCase):
         # 3) 新 event_id + 旧发布时间(APHIS 旧闻场景) → 默认窗口拒收, 不入库
         write_input([_source_event(
             products=["马科动物"], event_date="2026-01-28", effective_date="2026-01-28",
-            source={"tier": 1, "name": "APHIS", "url": "https://example.com/old-news",
+            source={"tier": 1, "name": "APHIS", "url": "https://www.aphis.usda.gov/old-news",
                     "publish_date": "2026-01-28", "quote": "postpones implementation"})])
         self.assertEqual(self._run_main(
             ["--input", inp, "--out", out, "--db-path", db]), 1)

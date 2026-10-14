@@ -100,6 +100,11 @@ description: 监测各国政府动植物检疫与进出口管控政策变化。�
 
 ## 红线
 
+- **官方域名硬约束**（2026-10 起）:`policy_queries` 的通用检索式(`"{country}" suspends imports ...`)会命中第三方站点——行业媒体、他国贸易门户转述、商业检疫数据库。2026-10 实测 19 条入库记录 100% `unverified`,逾半数来源是 `freyrsolutions.com`/`qpests.insect-genome.com`/`thebrief.com.na`/`www.evs.ee`/`bangladeshtradeportal.gov.bd`/`agrinfo.eu` 这类站点,却被标了 `tier: 1`。因此:
+  - 某国政策**必须落回该国官方域名**(政府 `.gov`/`.gub`/`.go.*`、EUR-Lex、ePing 等),或回落到 `config/sources.yaml` 里该国 `source_ids` 对应的官方入口;
+  - 第三方站点命中**只能写进 `search-log.md` 当线索**,不 `collect.py` 存档、不入库;确认其为官方原文转载后再回溯;
+  - `normalize.py` 会按 `OFFICIAL_DOMAIN_SUFFIXES` 强校验:`tier: 1` 配非官方域名直接拒收,黑名单站点强制降 `tier: 3` 且不得判 `verified`;该国官方域确实未收录时,在 `source` 里显式加 `official: 1` 说明。
+- **欧盟议题不按成员国拆分**:欧盟动植物检疫为层面统一立法(植物健康 Reg (EU) 2016/2031、动物健康 Reg (EU) 2019/2131),紧急措施由 SANTE 以实施条例/SERS 发布。搜欧盟措施只查 `eu-sante-sers` 与 EUR-Lex,**不要**按法国/德国/意大利/西班牙/荷兰/匈牙利逐国检索——那是同一议题的重复劳动,成员国源已降为 `track: outbreak`。
 - 每条记录必须带 URL 与抓取时间;没有出处的动作线索不进入下一环节。
 - **旧闻不入库**:发布时间(`source.publish_date`,缺省 `event_date`)必须落在时间窗内;检索撞到的历史公告页即使 URL 从未见过也不入库,只在 search-log.md 备注。回补历史需显式放宽 `--max-age-days`,不得关掉校验当日常扫描用。
 - **动作必须有原文依据**:"疑似将暂停""市场传闻"不入库;仅重申既有措施的公告不收。

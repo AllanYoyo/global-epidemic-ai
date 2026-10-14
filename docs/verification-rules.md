@@ -3,6 +3,8 @@
 > 配套 `docs/event-schema.md` 的 `verification_status` 字段与 `skills/policy-verification` 技能。
 > 来源分级定义见 `config/sources.yaml`:**Tier 1** 官方(政府公报/法规库/国际组织正式发布)、
 > **Tier 2** 专业(行业机构、专业媒体转述)、**Tier 3** 一般媒体(仅线索)。
+> **Tier 不是标签,是域名事实**:`scripts/normalize.py` 按 `OFFICIAL_DOMAIN_SUFFIXES` 强校验,
+> 第三方站点无法标 Tier 1。检索命中第三方 ≠ 找到官方原文。
 
 ## 组合判定表
 
@@ -18,6 +20,7 @@
 | 线索与官方原文实质矛盾(如措施不存在) | `false_positive` | 以官方原文为准 |
 | 可疑但无官方否认(数据异常、日期错乱) | `unverified` | 不臆断误报, 留待核验 |
 | 同一政策被重复抽取(另一 event_id) | `merged` | 保留信息最全的一条, 其余并入 |
+| **来源主机命中第三方黑名单** | `unverified` + `tier` 降 3 | 入库即降级; 即使内容属实也须回溯官方原文后重入 |
 
 ## 硬性约束
 
@@ -26,6 +29,12 @@
 3. **升级路径**: `single_source` → 补 Tier1 原文 → `verified`,用 `--update`/`--replace` 写回并在 `verification_notes` 记录依据。
 4. **ePing 等 SPS 通报按 `verified` 收录**(通报本身即官方文件),但 `policy_status` 如实标注草案/未生效,研判时不得当已生效处理。
 5. `unverified` 记录不进入影响研判(`risk.py --list-pending` 只列 verified),但保留在台账待核实栏。
+6. **Tier 1 必须由官方域名支撑**(2026-10 新增): `source.tier: 1` 的主机需落在 `normalize.py`
+   的 `OFFICIAL_DOMAIN_SUFFIXES` 内(政府 `.gov`/`.gub`/`.go.*`、EUR-Lex、ePing 等);黑名单站点
+   (行业媒体、他国贸易门户转述、商业检疫数据库)强制降 `tier: 3` 且**不得判 `verified`**。
+   该国官方域确未收录时,在 `source` 里显式加 `official: 1` 说明。
+   > 依据:2026-10-12~14 共 19 条入库记录 100% `unverified`,逾半数来源为第三方站点却标了
+   > `tier: 1`;说明检索层缺"必须落回官方域名"的闸门,而非单纯漏做核验动作。
 
 ## 追溯要求
 

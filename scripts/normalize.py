@@ -41,31 +41,39 @@ OFFICIAL_DOMAIN_SUFFIXES = (
     # 国际组织与通报平台
     "wto.org", "woah.org", "fao.org", "ippc.int", "eppo.int",
     # 欧盟(EUR-Lex 为欧盟官方公报库; SANTE/DG SANTE 为措施发布主体)
-    "europa.eu", "europa.eu",
+    "europa.eu",
     # 北美
     "aphis.usda.gov", "usda.gov", "govinfo.gov", "canada.ca",
     # 英澳新(英国已脱欧, 有自有体系; 澳新为主要对华出口方)
-    "gov.uk", "agriculture.gov.au", "mpi.govt.nz", "beehive.govt.nz",
-    "afs.govt.nz", "mpi.govt.nz",
+    "gov.uk", "agriculture.gov.au",
+    # 新西兰通用 .govt.nz 后缀(覆盖 mpi/beehive/afs 之外的兄弟站, 如 biosecurity.govt.nz)
+    "govt.nz", "mpi.govt.nz", "beehive.govt.nz", "afs.govt.nz",
     # 亚洲
     "maff.go.jp", "mafra.go.kr", "mard.gov.vn", "dld.go.th", "doa.go.th",
     "dvs.gov.my", "pertanian.go.id", "gov.la", "gov.kz", "gov.mn",
     "bpi.da.gov.ph", "bai.gov.ph", "dahd.nic.in", "ppqs.gov.in",
-    # 南美
+    # 南美(注: 阿根廷/墨西哥官方门户主域是 gob.ar / gob.mx, 不是 gov.ar / gov.mx)
     "senasa.gov.ar", "sag.gob.cl", "gov.br", "mgap.gub.uy",
-    # 其他高价值官方域
+    "gob.ar", "gob.mx",
+    # 欧亚 / 邻国 / 新增对华出口大户(2026-10 扩 sources.yaml 后补齐)
+    "gov.ru", "gov.pl", "gov.ua", "gov.rs", "gov.mm", "gov.az",
+    "gov.co", "gov.za", "gov.kp",
+    # 特例 host(非标准政府域后缀, 但确实是该国官方门户)
     "tarimorman.gov.tr", "mewa.gov.sa", "nzda.govt.nz", "food.ec.europa.eu",
+    "fli.de", "mattilsynet.no", "ansvsa.ro",
+    "rshn-khv-eao.ru",  # 俄罗斯远东区域署, 主域是 .ru 但非 .gov.ru
     # 国际组织/其他官方登记系统
-    "faolex.fao.org", "ecolex.org", "fao.org", "sanitary.gov",
+    "faolex.fao.org", "ecolex.org", "sanitary.gov",
 )
 
 # 明显非官方的第三方站点(黑名单, 命中即警告; 命中黑名单的 tier 1 强制降为 3)
-# 存根域名: 命中本身或其任意子域即判第三方
+# 命中本身或其任意子域即判第三方。注意: 孟加拉只精确列 tradeportal 子域,
+# 未来引入孟加拉政府官方源(dae.gov.bd / lsd.gov.bd)时不应被这条误伤。
 THIRD_PARTY_HINTS = (
-    "gov.bd",            # 他国贸易门户(如 bangladeshtradeportal.gov.bd 转述他国措施)
-    "insect-genome.com", # 第三方检疫数据库(qpests.*)
+    "bangladeshtradeportal.gov.bd",  # 孟加拉贸易门户(转述他国措施)
+    "insect-genome.com",             # 第三方检疫数据库(qpests.*)
     "thebrief.com", "thebrief.com.na",  # 纳米比亚商业通讯
-    "agrinfo.eu",        # 私营农业信息站
+    "agrinfo.eu",                    # 私营农业信息站
     "freyrsolutions.com",
     "evs.ee",
     "quora.com", "wikipedia.org", "medium.com", "blogspot.com",

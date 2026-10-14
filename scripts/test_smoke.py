@@ -176,8 +176,27 @@ class SourceDomainTests(unittest.TestCase):
         for url in ("https://eur-lex.europa.eu/eli/reg/2026/2268/oj",
                     "https://eping.wto.org/en/SPS/Notifications",
                     "https://www.agriculture.gov.au/biosecurity",
-                    "https://www.gov.uk/government/organisations/defra"):
+                    "https://www.gov.uk/government/organisations/defra",
+                    # 2026-10 扩 sources.yaml 时补入的官方域后缀, 防回归
+                    "https://fsvps.gov.ru/ru/vse-soobshcheniya",
+                    "https://www.wetgiw.gov.pl/",
+                    "https://dpss.gov.ua/en",
+                    "https://www.minpolj.gov.rs/",
+                    "https://www.moa.gov.mm/",
+                    "https://afsa.gov.az/",
+                    "https://www.minagricultura.gov.co/paginas/default.aspx",
+                    "https://www.dlrrd.gov.za/",
+                    "https://www.argentina.gob.ar/senasa",
+                    "https://www.gob.mx/senasica",
+                    "https://www.tsis.fli.de/Reports/Info.aspx"):
             self.assertTrue(self.n._is_official_domain(self.n._source_host(url)), url)
+
+    def test_bd_tradeportal_specifically_flagged_not_whole_gov_bd(self):
+        # 2026-10 修订: 不再用 "gov.bd" 全杀孟加拉, 只精确命 tradeportal 子域,
+        # 让 dae.gov.bd / lsd.gov.bd 等真实政府源不被误伤。
+        self.assertTrue(self.n._is_third_party("bangladeshtradeportal.gov.bd"))
+        self.assertFalse(self.n._is_third_party("dae.gov.bd"))
+        self.assertFalse(self.n._is_third_party("lsd.gov.bd"))
 
     def test_known_third_party_hosts_flagged(self):
         for host in ("bangladeshtradeportal.gov.bd", "thebrief.com.na",

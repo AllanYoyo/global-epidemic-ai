@@ -18,16 +18,19 @@ runs:
   policy: {time: "07:30", desc: 外国政府政策变化扫, 产出: 政策日报+Word+Excel+推送, track: [policy]}
 
 # ---- 周轮转分片(ISO 星期: 1=周一 .. 7=周日) ----
-# 每日只扫当天分片的档位, 保证 7 天全覆盖而单日检索量不随国别数线性膨胀。
-# priority_1 / regional / priority_2 无 shard, 每日必扫。
+# 每日只扫当天分片的条目, 保证 7 天全覆盖而单日检索量不随国别数线性膨胀。
+# priority_1 / regional / priority_2 无 shard, 每日必扫(18 源)。
+# 条目级 shard 优先于档位级 scan: 条目写了 shard 就只在该日扫; 未写的按 scan 整档扫。
+# 取值范围 1-7, 同一档内用空格分隔多个星期(如 shard: "1 4" 表示周一与周四)。
+# 排期原则: 高价值(欧盟/ePing/邻国)每日或高频; 低频国别分散到 2-3 天一轮。
 weekly_shards:
-  1: {desc: 周一,       scan: [border_neighbours]}
-  2: {desc: 周二,       scan: [export_partners]}
-  3: {desc: 周三,       scan: [border_neighbours, export_partners]}
-  4: {desc: 周四,       scan: [border_neighbours]}
-  5: {desc: 周五,       scan: [export_partners]}
-  6: {desc: 周六,       scan: [border_neighbours, export_partners]}
-  7: {desc: 周日,       scan: [state_level]}
+  1: {desc: 周一, scan: []}
+  2: {desc: 周二, scan: []}
+  3: {desc: 周三, scan: []}
+  4: {desc: 周四, scan: []}
+  5: {desc: 周五, scan: []}
+  6: {desc: 周六, scan: [state_level]}
+  7: {desc: 周日, scan: []}
 # 周一附加: sources.yaml 中 schedule=weekly 的源(周更通报源, EPPO/NAPPO/FAO 沙漠蝗等)
 
 # ---- 政策监测国家优先级 ----
@@ -36,16 +39,14 @@ weekly_shards:
 #   保证 7 天全覆盖而单日检索量不随国别数线性膨胀。未写 shard 的档每日必扫。
 policy_watch_countries:
   # 每日必扫: 对华主要农产品进口来源地 + 高频通报国家
+  # 注: 哈萨克斯坦/蒙古/越南等陆路边境国已归入 border_neighbours(轮转档), 此处不重复
   priority_1:
     - {cn: 加拿大, en: Canada, aliases: [CFIA], source_ids: [ca-cfia]}
     - {cn: 泰国, en: Thailand, aliases: [DLD, DOA], source_ids: [th-dld, th-doa]}
-    - {cn: 越南, en: Vietnam, aliases: [MARD, DAH], source_ids: [vn-mard]}
     - {cn: 印度尼西亚, en: Indonesia, aliases: [DVS Indonesia], source_ids: [id-dvs]}
     - {cn: 马来西亚, en: Malaysia, aliases: [DVS Malaysia], source_ids: [my-dvs]}
     - {cn: 菲律宾, en: Philippines, aliases: [BAI, BPI], source_ids: [ph-bai, ph-bpi]}
     - {cn: 印度, en: India, aliases: [DAHD, PPQS], source_ids: [in-dahd, in-ppqs]}
-    - {cn: 哈萨克斯坦, en: Kazakhstan, aliases: [Kazakhstan Agriculture], source_ids: [kz-agri]}
-    - {cn: 蒙古, en: Mongolia, aliases: [Mongolia Veterinary], source_ids: [mn-vet]}
     - {cn: 南非, en: South Africa, aliases: [DALRRD], source_ids: [za-dalrrd]}
     - {cn: 巴西, en: Brazil, aliases: [MAPA, Vigiagro], source_ids: [br-mapa]}
     - {cn: 阿根廷, en: Argentina, aliases: [SENASA], source_ids: [ar-senasa]}
@@ -56,28 +57,41 @@ policy_watch_countries:
     - {cn: WTO SPS/TBT 通报预警, en: WTO ePing, aliases: [ePing, G/SPS/N, SPS notification], source_ids: [wto-eping]}
     - {cn: 国际植物保护公约, en: IPPC, aliases: [IPPC, ISPM, ePhyto, emergency measures], source_ids: [ippc]}
   # 陆路边境邻国: 传入路径优先(封锁区/暂停进口动辄直指对华通道)
+  # shard 排期: ASF/HPAI 常年活跃的高疫区邻国(俄/越/哈/蒙)每日必扫;
+  #             其余按 2-3 天一轮分片, 保证 7 天全覆盖。
   border_neighbours:
-    - {cn: 日本, en: Japan, aliases: [MAFF], source_ids: [jp-maff]}
-    - {cn: 韩国, en: South Korea, aliases: [MAFRA], source_ids: [kr-mafra]}
-    - {cn: 俄罗斯, en: Russia, aliases: [Rosselkhoznadzor, FSVS, Rosselkhoz], source_ids: [ru-fsvps, ru-rshn-khv]}
-    - {cn: 土耳其, en: Turkey, aliases: [Tarim ve Orman Bakanligi], source_ids: [tr-tarimorman]}
-    - {cn: 波兰, en: Poland, aliases: [WetGIW], source_ids: [pl-wetgiw]}
-    - {cn: 塞尔维亚, en: Serbia, aliases: [Minpolj], source_ids: [rs-minpolj]}
-    - {cn: 乌克兰, en: Ukraine, aliases: [DPSS], source_ids: [ua-dpss]}
-    - {cn: 罗马尼亚, en: Romania, aliases: [ANSVSA], source_ids: [ro-ansvsa]}
-    - {cn: 挪威, en: Norway, aliases: [Mattilsynet], source_ids: [no-mattilsynet]}
-    - {cn: 阿塞拜疆, en: Azerbaijan, aliases: [AFSA], source_ids: [az-afsa]}
+    - {cn: 俄罗斯, en: Russia, aliases: [Rosselkhoznadzor, FSVS, Rosselkhoz], source_ids: [ru-fsvps, ru-rshn-khv], shard: "1 2 3 4 5 6 7"}
+    - {cn: 越南, en: Vietnam, aliases: [MARD, DAH], source_ids: [vn-mard], shard: "1 2 3 4 5 6 7"}
+    - {cn: 哈萨克斯坦, en: Kazakhstan, aliases: [Kazakhstan Agriculture], source_ids: [kz-agri], shard: "1 2 3 4 5 6 7"}
+    - {cn: 蒙古, en: Mongolia, aliases: [Mongolia Veterinary], source_ids: [mn-vet], shard: "1 2 3 4 5 6 7"}
+    - {cn: 日本, en: Japan, aliases: [MAFF], source_ids: [jp-maff], shard: "1 3 5"}
+    - {cn: 韩国, en: South Korea, aliases: [MAFRA], source_ids: [kr-mafra], shard: "2 4 6"}
+    - {cn: 土耳其, en: Turkey, aliases: [Tarim ve Orman Bakanligi], source_ids: [tr-tarimorman], shard: "1 4"}
+    - {cn: 老挝, en: Laos, aliases: [MAFD, 农业与林业部], source_ids: [la-mafd], shard: "2 5"}
+    - {cn: 缅甸, en: Myanmar, aliases: [MOA, 农业与灌溉部], source_ids: [mm-myanmar], shard: "3 6"}
+    - {cn: 朝鲜, en: North Korea, aliases: [中央兽防疫指导局], source_ids: [kp-vet], shard: "4"}
+    - {cn: 波兰, en: Poland, aliases: [WetGIW], source_ids: [pl-wetgiw], shard: "1 5"}
+    - {cn: 塞尔维亚, en: Serbia, aliases: [Minpolj], source_ids: [rs-minpolj], shard: "2 6"}
+    - {cn: 乌克兰, en: Ukraine, aliases: [DPSS], source_ids: [ua-dpss], shard: "3"}
+    - {cn: 罗马尼亚, en: Romania, aliases: [ANSVSA], source_ids: [ro-ansvsa], shard: "4 7"}
+    - {cn: 挪威, en: Norway, aliases: [Mattilsynet], source_ids: [no-mattilsynet], shard: "5"}
+    - {cn: 阿塞拜疆, en: Azerbaijan, aliases: [AFSA], source_ids: [az-afsa], shard: "7"}
   # 对华出口大户(反向措施): 其检疫要求变动常触发对华准入摩擦
   export_partners:
-    - {cn: 澳大利亚, en: Australia, aliases: [Department of Agriculture], source_ids: [au-agriculture]}
-    - {cn: 新西兰, en: New Zealand, aliases: [MPI, Beehive, Biosecurity], source_ids: [nz-beehive]}
-    - {cn: 英国, en: United Kingdom, aliases: [DEFRA, APHA], source_ids: [uk-defra]}
-    - {cn: 法国, en: France, aliases: [French Agriculture], source_ids: [fr-agri]}
-    - {cn: 德国, en: Germany, aliases: [BMEL], source_ids: [de-bmel]}
-    - {cn: 意大利, en: Italy, aliases: [MASAF], source_ids: [it-masaf]}
-    - {cn: 西班牙, en: Spain, aliases: [MAPA], source_ids: [es-mapa]}
-    - {cn: 荷兰, en: Netherlands, aliases: [NVWA], source_ids: [nl-nvwa]}
-    - {cn: 墨西哥, en: Mexico, aliases: [SENASICA], source_ids: [mx-senasica]}
+    - {cn: 澳大利亚, en: Australia, aliases: [Department of Agriculture], source_ids: [au-agriculture], shard: "1 3 5"}
+    - {cn: 新西兰, en: New Zealand, aliases: [MPI, Beehive, Biosecurity], source_ids: [nz-beehive], shard: "2 4 6"}
+    - {cn: 乌拉圭, en: Uruguay, aliases: [MGAP, DGSG], source_ids: [uy-mgap], shard: "1 4 7"}
+    - {cn: 巴西, en: Brazil, aliases: [MAPA], source_ids: [br-mapa], shard: "2 5"}
+    - {cn: 沙特阿拉伯, en: Saudi Arabia, aliases: [MEWA, 兽医检疫], source_ids: [sa-mewa], shard: "3 6"}
+    - {cn: 匈牙利, en: Hungary, aliases: [农业与乡村发展部], source_ids: [hu-agri], shard: "1 5"}
+    - {cn: 英国, en: United Kingdom, aliases: [DEFRA, APHA], source_ids: [uk-defra], shard: "2 6"}
+    - {cn: 法国, en: France, aliases: [French Agriculture], source_ids: [fr-agri], shard: "3 7"}
+    - {cn: 德国, en: Germany, aliases: [BMEL], source_ids: [de-bmel], shard: "4"}
+    - {cn: 意大利, en: Italy, aliases: [MASAF], source_ids: [it-masaf], shard: "5"}
+    - {cn: 西班牙, en: Spain, aliases: [MAPA], source_ids: [es-mapa], shard: "6"}
+    - {cn: 荷兰, en: Netherlands, aliases: [NVWA], source_ids: [nl-nvwa], shard: "7"}
+    - {cn: 墨西哥, en: Mexico, aliases: [SENASICA], source_ids: [mx-senasica], shard: "1"}
+    - {cn: 阿根廷, en: Argentina, aliases: [SENASA], source_ids: [ar-senasa], shard: "3"}
   # 每日必扫: 主要贸易伙伴的联邦级措施
   priority_2:
     - {cn: 美国, en: United States, aliases: [USDA APHIS, Federal Order, state agriculture departments], source_ids: [usda-aphis, us-state-agri]}
@@ -404,6 +418,81 @@ sources:
     lang: [mk]
     method: browse
     notes: "Excel注疫区: ND; Excel『圣马力诺|政府网|vlada.mk』行URL实为北马其顿政府, 已并入此条备注"
+  # ---- 中南半岛与朝鲜半岛陆路边境(对华传入通道, 2026-10 补) ----
+  - id: la-mafd
+    name: 老挝农业与林业部(MAFD)
+    url: https://www.mafd.gov.la/
+    coverage: [measures, animal, plant]
+    tier: 1
+    schedule: weekly
+    track: policy
+    lang: [lo, en]
+    method: browse
+    notes: |
+      中老陆路边境邻国; 活畜跨境运输与检疫限制直接触发(如牛炭疽后的活牛输入管制与放松通知)。
+      政府门户英文可达性有限, 需站内检索或经 WTO ePing / 老挝官方通讯社(KPL)回溯;
+      首次运行请人工点验 URL 与公告栏目。
+  - id: mm-myanmar
+    name: 缅甸农业与灌溉部(检疫与植检)
+    url: https://www.moa.gov.mm/
+    coverage: [measures, animal, plant]
+    tier: 1
+    schedule: weekly
+    track: policy
+    lang: [my, en]
+    method: browse
+    notes: |
+      中缅陆路边境邻国; 缅甸官方站点常年不稳定, 首次运行须人工点验;
+      站点不可达时经 WTO ePing 通报与缅甸官方通讯社回溯, 不以第三方媒体单独支撑入库。
+  - id: kp-vet
+    name: 朝鲜国家兽医检疫局
+    url: https://www.kpvs.gov.kp/
+    coverage: [measures, animal]
+    tier: 1
+    schedule: weekly
+    track: policy
+    lang: [ko]
+    method: search
+    notes: |
+      中朝陆路边境邻国; 官方站点通常不可直连, 以检索定位为主。
+      低频观察, 仅在中朝边境动物疫病(如 ASF/口蹄疫)活跃时提升关注。
+  # ---- 南美与中东(对华出口大户, 2026-10 补) ----
+  - id: uy-mgap
+    name: 乌拉圭牧农渔业部(含畜牧服务总局 DGSG)
+    url: https://www.mgap.gub.uy/
+    coverage: [measures, animal]
+    tier: 1
+    schedule: weekly
+    track: policy
+    lang: [es, en]
+    method: browse
+    notes: |
+      大洋牛肉与水生动物对华输华议定书签署方(DGSG 出证); 其卫生要求调整直接触发对华准入条件变化,
+      反向亦然。对华贸易摩擦敏感度高, 优先跟踪。
+  - id: sa-mewa
+    name: 沙特环境水与农业部(MEWA)
+    url: https://www.mewa.gov.sa/en/
+    coverage: [measures, animal]
+    tier: 1
+    schedule: weekly
+    track: policy
+    lang: [ar, en]
+    method: browse
+    notes: |
+      中东进口枢纽(GCC 兽医检疫法成员); 活体动物进口许可与检疫条件平台为 Naama 电子系统,
+      须经站内检索定位 RulesLibrary / 检疫法规页; 禽肉进口暂停类通告近年多次出现(2026-10 已产出 1 条)。
+  - id: hu-agri
+    name: 匈牙利农业与乡村发展部
+    url: https://agroberuhazas.hu/
+    coverage: [measures, animal, plant]
+    tier: 1
+    schedule: weekly
+    track: policy
+    lang: [hu, en]
+    method: browse
+    notes: |
+      欧盟成员国农业国; 禽肉/乳制品对欧与对华出口均涉及其卫生条件,
+      欧盟层面措施之外的国内执行细则值得跟踪。2026-10 已产出"恢复匈牙利产品进口"1 条。
   - id: ba-fbihvlada
     name: 波黑联邦政府(动物疫情通报)
     url: http://www.fbihvlada.gov.ba/bosanski/

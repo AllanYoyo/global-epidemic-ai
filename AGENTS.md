@@ -57,4 +57,4 @@ scripts/run_scan.sh policy                                  # 定时扫描入口
 - 提交信息用 conventional commits（feat/fix/docs/chore(scope)），详见 git log 风格。
 - 敏感区改动前先读：`docs/event-schema.md`、`prompts/policy-impact.md`（研判口径）、`config/sources.yaml`（源分级 tier、track 轨道、schedule 档位与国别周轮转分片）。
 - **源的 `track` 决定是否进入 policy 档主动扫描**：`policy`=政策动作源（主动扫）；`outbreak`=疫情事件源（不扫，仅研判背景）；`background`=中国侧与标准名录（不扫，仅背景）。2026-10 起 policy 档只扫 `track: policy`——疫情源在本分支几乎不产出政策动作却吃检索预算。改源清单时新增源必须显式写 `track`。
-- **国别主干与周轮转**：`policy_watch_countries` 六档是检索主干——`priority_1`/`regional`/`priority_2` 每日必扫，`border_neighbours`/`export_partners`/`state_level` 按 `weekly_shards`（ISO 星期）轮转，保证 7 天全覆盖而单日检索量不随国别数线性膨胀。**新增 policy 源必须挂到某个国别的 `source_ids`**，否则不会被主动定位到（2026-10 修正了 16 个孤儿源，含 ru-fsvps/jp-maff/eu-sante-sers 等）。
+- **国别主干与周轮转**：`policy_watch_countries` 六档是检索主干——`priority_1`/`regional`/`priority_2` 每日必扫，`border_neighbours`/`export_partners`/`state_level` 按 `weekly_shards`（ISO 星期）轮转，保证 7 天全覆盖而单日检索量不随国别数线性膨胀。**新增 policy 源必须挂到某个国别的 `source_ids`**，否则不会被主动定位到（2026-10 修正了 16 个孤儿源，含 ru-fsvps/jp-maff/eu-sante-sers 等）。**新增轮转档国别必须给 `shard`**（ISO 星期，空格分隔多天），既无 `shard` 又不在必扫档 = 永远扫不到。

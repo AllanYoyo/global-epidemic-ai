@@ -30,10 +30,13 @@ description: 监测各国政府动植物检疫与进出口管控政策变化。�
 > **2026-10 起 policy 档只扫 `track: policy` 的源**。疫情源在本分支几乎不产出政策动作,
 > 却会占用检索预算(实测日新增 1-2 条, 远低于 ePing 通报量)。
 
-> **国别主干按周轮转**:`priority_1` / `regional` / `priority_2` 每日必扫;`border_neighbours` /
-> `export_partners` / `state_level` 按当天 ISO 星期对应的 `weekly_shards` 扫。
-> 这样 7 天全覆盖, 单日检索量不随国别数线性膨胀。轮转日要在 `search-log.md` 注明当天分片,
-> 便于复盘"某国这周没产出是漏扫还是真无变化"。
+> **国别主干按周轮转**:`priority_1` / `regional` / `priority_2` 每日必扫;
+> 其余条目按 `shard` 字段指定的 ISO 星期扫描(条目级优先于档位级 `scan`),
+> 高疫区邻国(俄/越/哈/蒙)显式写全周 `1 2 3 4 5 6 7` 即等于每日扫。
+> 这样 7 天全覆盖, 单日检索量不随国别数线性膨胀。
+> **排期变更后必须自检**:`weekly_shards` 生效日按当天 ISO 星期取当天条目,
+> 并在 `search-log.md` 头部注明当天星期与实际扫描的条目, 便于复盘"某国这周没产出是漏扫还是真无变化"。
+> 新增国别必须给 `shard`, 否则该国永远不会被扫到(仓库已有校验脚本历史教训)。
 
 ## 监测范围(什么算"政策变化")
 
@@ -53,19 +56,20 @@ description: 监测各国政府动植物检疫与进出口管控政策变化。�
 ## 步骤
 
 1. **定窗口**:确认时间窗(默认今天;常规运行只收最近 24-48 小时的新发布,首次运行放宽到 7 天)。运行标识为当天日期 `YYYY-MM-DD`,并记下窗口下限「今天-N 天」(N 与入库校验一致,默认 7):只有发布时间落在窗口内的条目才算"新信息"。
-2. **按优先级组合检索**:先取当天 ISO 星期对应的 `weekly_shards.scan` 分片,再并入每日必扫档:
-   - **每日必扫**:`priority_1` → `regional` → `priority_2`;
-   - **当天轮转档**:`border_neighbours` / `export_partners` / `state_level`,按 `weekly_shards` 取;
+2. **按优先级组合检索**:先按当天 ISO 星期取应扫条目,再并入每日必扫档:
+   - **每日必扫**:`priority_1` → `regional` → `priority_2`(含欧盟 SANTE 与 WTO ePing);
+   - **当天轮转条目**:`border_neighbours` / `export_partners` / `state_level` 中 `shard` 含当天星期的条目,
+     以及 `weekly_shards[当天].scan` 里的整档;
    - 周一附加扫 `sources.yaml` 中 `schedule: weekly` 的政策源;
    - **只扫 `track: policy` 的源**;`track: outbreak` / `background` 的源不主动扫(需要背景时再按需查);
-   - **WTO ePing 与欧盟 SANTE SERS 是第一高产源, 每日必扫**(均已归入 `regional` 档):ePing 优先走 RSS 订阅确定性拉取,订阅不可用再回退 browse/search;通报自带发布日期与 G/SPS/N 文号,直接映射 `legal_basis` / `effective_date` / 评议期;
+   - **WTO ePing 与欧盟 SANTE SERS 是第一高产源, 每日必扫**(均归 `regional` 档):ePing 优先走 RSS 订阅确定性拉取,订阅不可用再回退 browse/search;通报自带发布日期与 G/SPS/N 文号,直接映射 `legal_basis` / `effective_date` / 评议期;
    - 每个国家/机构使用 aliases 和 source_ids 定位官方站内公告,再用 `policy_keywords` 主题词与动作词组合;
    - 用 `policy_queries.sps` 过一遍 WTO ePing 动植物 SPS 通报列表;
    - 用 `policy_queries.official` 检索国家官方检疫机构新闻页;
    - 用 `policy_queries.animals / plants / biologics / certification / product_access / regulation / country_sweep` 逐主题检索;
    - 用 `policy_queries.organisations` 跟踪 WOAH/FAO/GPP-TAD/ECTAD/IPPC/EPPO 的行动与呼吁;
    - 用 `policy_queries.disease_triggered` 作为疫情背景触发型补充,不让病害清单决定国家范围。
-   - 在 `search-log.md` 头部注明当天 ISO 星期与实际扫描的档位。
+   - 在 `search-log.md` 头部注明当天 ISO 星期与实际扫描的条目列表。
 3. **逐条存档**:
    - **先核发布日期再存档**:从页面 meta、日期栏或文首确认发布时间;早于窗口下限的是常年挂网的旧闻,不存档不入库,在 search-log.md 该行末尾标注「跳过-旧闻」;页面完全没有日期线索时先从正文/URL/站点列表页判断,仍无法确认的按旧闻处理并标注「跳过-日期不明」;
    - 网页:`python scripts/collect.py --url "<URL>" --title "<标题>"`(存到 `data/raw/<日期>/`);

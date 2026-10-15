@@ -118,3 +118,9 @@ description: 监测各国政府动植物检疫与进出口管控政策变化。�
 - `data/raw/<日期>/`:policy-findings.md、search-log.md、存档文件;
 - `data/events/` + SQLite:外国政府动植物检疫政策变化记录;
 - 日报:`python scripts/report.py --date <YYYY-MM-DD> --excel`。
+
+> **日期口径**:`--date` 必须传运行当天的**东八区日期**。`scripts/run_scan.sh` 会把
+> `$SCAN_DATE` 写进 prompt 并显式传给 `report.py` / `push_report.py`;手工调用时用
+> `python -c "import sys;sys.path.insert(0,'scripts');from normalize import biz_today;print(biz_today())"`
+> 取当前业务日期, **不要**用 `date` 命令或自己算——生产 VPS 系统时区是 `Etc/UTC`,
+> 直接取 UTC 日期会让北京时间早间跑批错一天。

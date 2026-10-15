@@ -21,6 +21,15 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.environ.get("EPIDEMIC_DATA_DIR") or os.path.join(REPO, "data")
 UA = os.environ.get("HTTP_USER_AGENT") or \
     "Mozilla/5.0 (compatible; GlobalEpidemicRadar/0.1; +https://github.com/global-epidemic-ai)"
+# 业务时区固定东八区: 生产 VPS 系统时区是 Etc/UTC, 直接用 date.today() 会让
+# 北京时间早间归档落到前一天目录。与 normalize.biz_today 同口径。
+BIZ_TZ_OFFSET_HOURS = 8
+
+
+def biz_now():
+    """业务时间(东八区) ISO8601。"""
+    return (datetime.datetime.utcnow()
+            + datetime.timedelta(hours=BIZ_TZ_OFFSET_HOURS)).isoformat(timespec="seconds")
 
 
 def fetch(url):
@@ -41,7 +50,7 @@ def main():
     ap.add_argument("--url", help="来源 URL(抓取正文存档)")
     ap.add_argument("--file", help="本地正文文件(如 agent 已抓取的文本), 登记入库")
     ap.add_argument("--title", help="标题, 用于文件名与 meta")
-    ap.add_argument("--date", default=datetime.date.today().isoformat(), help="归档日期目录, 默认今天")
+    ap.add_argument("--date", default=biz_now()[:10], help="归档日期目录, 默认今天(东八区)")
     ap.add_argument("--kind", choices=["html", "txt"], help="保存扩展名(默认: 有 --file 为 txt, 否则 html)")
     args = ap.parse_args()
 
@@ -66,7 +75,7 @@ def main():
         "url": args.url,
         "file": base + "." + ext,
         "local_source_file": args.file,
-        "fetched_at": datetime.datetime.now().isoformat(timespec="seconds"),
+        "fetched_at": biz_now(),
         "tool": "collect.py",
     }
     with open(os.path.join(out_dir, base + ".meta.json"), "w", encoding="utf-8") as f:

@@ -9,6 +9,8 @@ event_id 已存在时默认合并更新: 空值与兜底默认值不覆盖已有
 新记录带旧闻拦截: 发布时间(source.publish_date, 缺省 event_date)早于
  --max-age-days 窗口(默认 7 天, POLICY_MAX_AGE_DAYS 覆盖, 0 关闭)判为旧闻拒收;
  已入库 event_id 的合并更新不受影响, 防止常年挂网的旧公告被当"今日新增"入日报。
+日期口径: 一律用本模块的 biz_today()/biz_now()(东八区), 不用宿主机 date.today()
+ —— 生产 VPS 系统时区是 Etc/UTC, 直接取 UTC 日期会让北京时间早间跑批整体错一天。
 """
 import argparse
 import datetime
@@ -16,6 +18,7 @@ import hashlib
 import json
 import os
 import sqlite3
+from datetime import date as _date
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.environ.get("EPIDEMIC_DATA_DIR") or os.path.join(REPO, "data")
@@ -30,6 +33,25 @@ POLICY_CHINA_RELEVANCE = {"直接涉及中国", "间接影响", "暂无明显关
 DEFAULT_SENTINELS = {"verification_status": "unverified", "policy_status": "已生效"}
 # 旧闻拦截默认窗口(天): 新记录发布时间早于"今天-N 天"拒收; 0 或 --max-age-days 0 关闭
 DEFAULT_MAX_AGE_DAYS = 7
+
+# ---- 业务时区(东八区) ----
+# 生产 VPS 系统时区是 Etc/UTC, 而 cron 按 Asia/Shanghai 触发。若各脚本直接用
+# date.today(), 北京时间早上 07:30 跑批时 UTC 仍是前一天, 日报文件名 / 旧闻窗口
+# / first_seen 会整体错一天(2026-10 实测: 10-15 扫描产出 2026-10-14-* 报告)。
+# 统一走这里取业务日期, 不依赖宿主机 TZ。
+TZ_OFFSET_HOURS = 8
+
+
+def biz_today():
+    """业务日期(东八区) YYYY-MM-DD。日报命名、旧闻窗口、归档目录都以此为准。"""
+    return (datetime.datetime.utcnow()
+            + datetime.timedelta(hours=TZ_OFFSET_HOURS)).date().isoformat()
+
+
+def biz_now():
+    """业务时间(东八区) ISO8601, 用于 first_seen / updated_at 等时间戳。"""
+    return (datetime.datetime.utcnow()
+            + datetime.timedelta(hours=TZ_OFFSET_HOURS)).isoformat(timespec="seconds")
 
 # ---- 官方来源域名后缀(可溯源硬要求的落地口径) ----
 # source.tier=1 只应由下列官方域名的原文支撑; 第三方站点(媒体/行业站/他国贸易门户/
@@ -167,7 +189,7 @@ def check_source_domain(e):
 
 
 def now():
-    return datetime.datetime.now().isoformat(timespec="seconds")
+    return biz_now()
 
 
 def _subject_components(e):
@@ -432,8 +454,9 @@ def main():
             max_age = DEFAULT_MAX_AGE_DAYS
     cutoff = None
     if max_age > 0:
-        cutoff = (datetime.date.today() - datetime.timedelta(days=max_age)).isoformat()
-    out_dir = args.out or os.path.join(DATA_DIR, "events", datetime.date.today().isoformat())
+        cutoff = (_date.fromisoformat(biz_today())
+                  - datetime.timedelta(days=max_age)).isoformat()
+    out_dir = args.out or os.path.join(DATA_DIR, "events", biz_today())
     con = open_db(args.db_path) if (args.db or args.db_path) else None
     # 旧闻拦截只针对新增 event_id: 已入库记录的核验/研判回写走合并更新, 不受窗口限制
     stale, written = [], 0

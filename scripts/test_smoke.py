@@ -335,7 +335,12 @@ class NormalizeMergeTests(unittest.TestCase):
 
 
 class _FixedClock:
-    """替 normalize.datetime: 固定 today/now, 让时间窗测试与真实时钟解耦。"""
+    """替 normalize.datetime: 固定 today/now, 让时间窗测试与真实时钟解耦。
+
+    utcnow 固定为 2026-10-11 16:00 UTC —— 换算到东八区(UTC+8)正好是
+    2026-10-12 00:00, 即业务日期 2026-10-12。这样 biz_today()/biz_now()
+    走 utcnow + 8h 的路径也能被固定住, 不会意外用到真实时钟。
+    """
 
     timedelta = datetime.timedelta
 
@@ -344,10 +349,50 @@ class _FixedClock:
         def today():
             return datetime.date(2026, 10, 12)
 
+        @staticmethod
+        def fromisoformat(value):
+            return datetime.date.fromisoformat(value)
+
     class datetime:
         @staticmethod
         def now():
             return datetime.datetime(2026, 10, 12, 8, 0, 0)
+
+        @staticmethod
+        def utcnow():
+            return datetime.datetime(2026, 10, 11, 16, 0, 0)
+
+
+class BizClockTests(unittest.TestCase):
+    """业务时区(东八区): 生产 VPS 系统时区是 Etc/UTC, 直接用 date.today()
+    会让北京时间早间跑批整体错一天(2026-10 实测 10-15 扫描产出 2026-10-14 报告)。"""
+
+    def setUp(self):
+        import normalize
+        self.normalize = normalize
+
+    def test_biz_today_is_utc_plus_8(self):
+        # 用真实时钟验证换算方向: 东八区日期应 >= UTC 日期, 差值不超过 1 天
+        utc_day = datetime.datetime.utcnow().date()
+        biz = self.normalize.biz_today()
+        delta = (datetime.date.fromisoformat(biz) - utc_day).days
+        self.assertIn(delta, (0, 1), (utc_day, biz))
+
+    def test_biz_now_offset_is_8_hours(self):
+        delta = datetime.datetime.fromisoformat(self.normalize.biz_now()) \
+            - datetime.datetime.utcnow()
+        self.assertGreater(delta.total_seconds(), 7.5 * 3600)
+        self.assertLess(delta.total_seconds(), 8.5 * 3600)
+
+    def test_biz_today_returns_iso_string(self):
+        self.assertRegex(self.normalize.biz_today(), r"^\d{4}-\d{2}-\d{2}$")
+
+    def test_now_uses_biz_timezone(self):
+        # now() 应与 biz_now 同源, 不能退回宿主机本地时区
+        self.assertEqual(self.normalize.now(),
+                         (datetime.datetime.utcnow()
+                          + datetime.timedelta(hours=8)).isoformat(timespec="seconds")[:19]
+                         + self.normalize.now()[19:])
 
 
 class NormalizeStaleGateTests(unittest.TestCase):

@@ -37,7 +37,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
 import report
-from normalize import DATA_DIR
+from normalize import DATA_DIR, biz_now, biz_today
 
 PUSH_FLAG_DIR = os.path.join(DATA_DIR, "reports", ".pushed")
 
@@ -163,7 +163,7 @@ def send_mail(subject, text, docx_path):
 def main():
     ap = argparse.ArgumentParser(
         description="日报推送: 企业微信 / 钉钉 / 邮箱(渠道环境变量见模块 docstring 与 .env.example)")
-    ap.add_argument("--date", default=datetime.date.today().isoformat())
+    ap.add_argument("--date", default=biz_today())
     ap.add_argument("--days-back", type=int, default=14)
     ap.add_argument("--db-path", help="SQLite 路径覆盖")
     ap.add_argument("--message", help="发送自定义提醒文本(跳过日报汇总, 供 run_scan.sh 等调用)")
@@ -218,7 +218,7 @@ def main():
     if not args.message and ok == len(channels) and channels:
         os.makedirs(PUSH_FLAG_DIR, exist_ok=True)
         with open(flag_path, "w", encoding="utf-8") as f:
-            f.write("%s 已推送: %s\n" % (datetime.datetime.now().isoformat(timespec="seconds"),
+            f.write("%s 已推送: %s\n" % (biz_now(),
                                          "、".join(c[0] for c in channels)))
     return 0 if ok else 1
 

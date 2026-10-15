@@ -10,7 +10,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "templates"))
 from base import auto_fit_columns, auto_fit_row_heights, style_data_row, style_header_row
-from normalize import DATA_DIR, REPO, load_events, now, open_db
+from normalize import DATA_DIR, REPO, biz_today, load_events, now, open_db
 
 POLICY_TEMPLATE = os.path.join(REPO, "templates", "policy_report.md")
 ACTION_ICON = {"收紧": "🔴", "放松": "🟢", "调整": "🟡", "恢复": "🔵"}
@@ -263,7 +263,7 @@ def export_table(base_path, events):
 
 def main():
     ap = argparse.ArgumentParser(description="生成政策监测日报")
-    ap.add_argument("--date", default=datetime.date.today().isoformat()); ap.add_argument("--days-back", type=int, default=14)
+    ap.add_argument("--date", default=biz_today()); ap.add_argument("--days-back", type=int, default=14)
     ap.add_argument("--policy", action="store_true", help="(已废弃, 无效果) 政策为唯一模式, 兼容旧定时/面板命令")
     ap.add_argument("--excel", action="store_true"); ap.add_argument("--docx", action="store_true"); ap.add_argument("--db-path")
     args = ap.parse_args(); data = collect(args.date, args.days_back, args.db_path)

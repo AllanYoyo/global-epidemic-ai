@@ -18,7 +18,7 @@ from docx.oxml.ns import qn
 from docx.shared import Pt, RGBColor
 
 import report
-from normalize import DATA_DIR
+from normalize import DATA_DIR, biz_now
 
 RISK_FILL = {"high": "FDE9E7", "medium": "FFF4DE", "low": "E6F4EA"}
 RISK_TEXT = {"high": "高", "medium": "中", "low": "低"}
@@ -143,7 +143,7 @@ def _build_policy(date, data=None, out_dir=None, db_path=None):
     _para(doc, "全球动植物检疫政策监测日报", size=18, bold=True,
           align=WD_ALIGN_PARAGRAPH.CENTER, space_after=2)
     _para(doc, "疫见全球 · Government Phytosanitary & Animal Health Policy Monitor   |   %s   |   生成于 %s" % (
-        date, datetime.datetime.now().strftime("%Y-%m-%d %H:%M")),
+        date, biz_now().replace("T", " ")[:16]),
         size=9, color=GRAY, align=WD_ALIGN_PARAGRAPH.CENTER, space_after=10)
 
     sec = 0
@@ -242,7 +242,7 @@ def build(date, data=None, out_dir=None, db_path=None):
 
 def main():
     ap = argparse.ArgumentParser(description="生成 Word 情报简报(数据与 Markdown 日报同源)")
-    ap.add_argument("--date", default=datetime.date.today().isoformat())
+    ap.add_argument("--date", default=report.biz_today())
     ap.add_argument("--days-back", type=int, default=14)
     ap.add_argument("--db-path", help="SQLite 路径覆盖")
     ap.add_argument("--out-dir", help="输出目录(默认 data/reports)")

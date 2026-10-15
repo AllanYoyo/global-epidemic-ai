@@ -62,8 +62,40 @@ def biz_now():
 OFFICIAL_DOMAIN_SUFFIXES = (
     # 国际组织与通报平台
     "wto.org", "woah.org", "fao.org", "ippc.int", "eppo.int",
+    # ePing 预警平台(WTO 官方, 独立域非 wto.org 子域)。
+    # 2026-10 实测发现: sources.yaml 里写的是 eping.wto.org(属 wto.org 子域, 可放行),
+    # 但平台实际主域已为 epingalert.org —— 白名单漏收导致本项目第一高产源的
+    # tier=1 记录会被 check_source_domain 拒收(报"不在官方域名库内")。
+    "epingalert.org",
     # 欧盟(EUR-Lex 为欧盟官方公报库; SANTE/DG SANTE 为措施发布主体)
     "europa.eu",
+    # 欧亚经济委员会/联盟(2026-10 按样例补; 与欧盟同构的区域统一立法主体)
+    # regulation.eaeunion.org 为 EEC 官方法规库; eecommission.org 为委员会官网。
+    # 该主体常由成员国代为向 WTO 通报(文号前缀 KGZ/ARM 等), 措施仍出自 EEC。
+    "eaeunion.org", "eecommission.org",
+    # ---- 中国官方 WTO/TBT-SPS 通报平台(2026-10-15 经用户确认放宽) ----
+    # 性质核实: 这些是中国官方通报咨询体系(海关总署标法中心即 WTO/TBT-SPS 国家通报咨询中心、
+    # 商务部、各省 TBT 通报咨询中心)对 WTO 原始通报的**中文权威转述**, 逐条附 G/SPS/N 文号、
+    # 负责机构、生效日期与 members.wto.org 原文链接。此前按"第三方转述"处理过严,
+    # 导致日产量最高的发现通道无法支撑 verified, 白白浪费检索成果。
+    # 注意分级: 仅收录可核实的主办单位; .com/.org 商业聚合站一律不放行。
+    "tbtsps.cn",        # 中国技术性贸易措施网(海关总署标法中心主办)
+    "gdtbt.org.cn",     # 广东省 WTO/TBT 通报咨询研究中心
+    "hntbt.org.cn",     # 湖南省 技术性贸易措施信息网
+    "gxzl.org.cn",      # 广西壮族自治区标准技术研究院 东盟 WTO/TBT 专栏
+    "wzisps.org.cn",    # 温州市标准化科学研究院
+    "chinawto.mofcom.gov.cn",  # 商务部 WTO/FTA 咨询网
+    # 省级政府/海关转载 WTO 通报的专栏(精确主机, 不用 .gov.cn 通配)。
+    # 为什么不放行整个 gov.cn: AGENTS.md 约定中国侧措施仅作研判背景、不入政策台账,
+    # 通配放行会让任何中国官方页面都能支撑 tier:1, 边界失控。
+    # 这里只列**确实转载 WTO/SPS 通报原文**的通报类专栏主机(与 cn-sps-aggregator 同性质)。
+    # 注意: _is_official_domain 不支持通配符, 必须逐主机精确列出。
+    "amr.hainan.gov.cn",   # 海南省市场监督管理局(转载 SPS 通报中文译文)
+    "gdfs.customs.gov.cn", # 海关总署(含各直属海关技贸措施风险信息提示)
+    "commerce.ah.gov.cn",  # 安徽省商务厅(技贸措施通报转载)
+    "commerce.shandong.gov.cn",  # 山东省商务厅(技贸措施通报转载)
+    "swj.gd.gov.cn",       # 广东省商务厅
+    "boc.dl.gov.cn",       # 大连市商务局(贸易环境专刊)
     # 北美
     "aphis.usda.gov", "usda.gov", "govinfo.gov", "canada.ca",
     # 英澳新(英国已脱欧, 有自有体系; 澳新为主要对华出口方)

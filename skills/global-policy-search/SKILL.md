@@ -24,11 +24,23 @@ description: 监测各国政府动植物检疫与进出口管控政策变化。�
     `border_neighbours`(陆路边境邻国, 传入路径优先)、`export_partners`(对华出口大户, 反向措施)、
     `state_level`(次国家/州级部门)。后三档按 `weekly_shards` 周轮转, 每条含 source_ids 与别名;
   - `weekly_shards`:ISO 星期(1=周一..7=周日) → 当天要扫的档位;每日必扫档不在其中列出;
-  - `policy_keywords`:政策关键词词库(组织机制/商品生物材料/活动物/植物/疫病风险/证书流程/法规标准,每条 {cn, en, aliases[]});
+  - `policy_keywords`:政策关键词词库(组织机制/商品生物材料/活动物/植物/疫病风险/证书流程/法规标准/输华议定书/文书类型,每条 {cn, en, aliases[]});
   - `policy_queries`:按主题分组的检索模板。
 
 > **2026-10 起 policy 档只扫 `track: policy` 的源**。疫情源在本分支几乎不产出政策动作,
 > 却会占用检索预算(实测日新增 1-2 条, 远低于 ePing 通报量)。
+
+> **检索通道实测排序(2026-10-15 依样例回溯, 按单次命中率)**:
+> 1. **中文 SPS/TBT 通报平台**(海关总署标法中心/商务部/省级 TBT 咨询中心)
+>    —— 日产量最高, 单次可返回 8 条带**通报号 + 生效日期 + 评议期**的记录, 标题已是可直接
+>    入库的中文规范表述。同等问题: 同期英文 `site:` + 长自然语言检索 0 命中。
+>    经 2026-10-15 确认, 它们是中国官方通报体系的中文权威转述, **可直接支撑 verified**
+>    (见下方红线), 无需逐条回溯 WTO 原文; 但只认官方主办站, `.com` 商业站仍按第三方处理。
+> 2. **WTO ePing** —— 第一权威通道, 通报自带文号与日期, 但需按成员/产品过滤。
+> 3. **中文输华议定书检索** —— 外国输华议定书**不进 ePing**, 必须用
+>    `"输华" + 检疫 + 卫生要求 + 议定书` 单独扫; 这类是对华影响最直接的动作, 样例中占比很高。
+> 4. **官方域直击**(`site:{official_domain}`) —— 必须用**短英文术语**
+>    (`import requirements` / `quarantine` / `resolution`), 不要拼长自然语言句子。
 
 > **国别主干按周轮转**:`priority_1` / `regional` / `priority_2` 每日必扫;
 > 其余条目按 `shard` 字段指定的 ISO 星期扫描(条目级优先于档位级 `scan`),
@@ -50,6 +62,8 @@ description: 监测各国政府动植物检疫与进出口管控政策变化。�
 - **兽药与违禁物质**:兽药注册与残留限量、克伦特罗/氯霉素等违禁物质管控措施;
 - **植物检疫**:种子、种苗、组培苗、水果、木材、花卉的检疫要求;有害生物与转基因/新生物体名录变化;
 - **国际组织行动**:WOAH/FAO 的行动呼吁、GPP-TAD/ECTAD 项目动态(预警信号,提示后续政策风险);
+- **输华双边准入**:外国与我国签署的输华检疫议定书及其修订/生效(西班牙饲用水生动物蛋白、乌拉圭牛黄、泰国食用水生动物、巴基斯坦干坚果、中俄活体驯鹿等)。这类**通常不进 WTO ePing**, 且常挂在对方商务部/外交部而非检疫机构, 必须用中文专扫; 它是对华影响最直接的一类动作;
+- **区域统一立法主体**:除欧盟(SANTE/EUR-Lex)外, **欧亚经济委员会(EEC/EAEU)** 同构——措施由 EEC 理事会/委员会以决定草案发布,由成员国(常为吉尔吉斯斯坦/亚美尼亚)代为向 WTO 通报,**按通报成员找会漏**, 须按措施主体找; 正文在 `regulation.eaeunion.org`;
 - **国内防疫管制**:封锁区/保护区划定,扑杀与疫苗接种政策,运输限制;
 - **涉华间接影响**:他国对中国产品的准入变化(反向措施),以及他国措施可能引发的贸易转移。
 
@@ -62,12 +76,23 @@ description: 监测各国政府动植物检疫与进出口管控政策变化。�
      以及 `weekly_shards[当天].scan` 里的整档;
    - 周一附加扫 `sources.yaml` 中 `schedule: weekly` 的政策源;
    - **只扫 `track: policy` 的源**;`track: outbreak` / `background` 的源不主动扫(需要背景时再按需查);
-   - **WTO ePing 与欧盟 SANTE SERS 是第一高产源, 每日必扫**(均归 `regional` 档):ePing 优先走 RSS 订阅确定性拉取,订阅不可用再回退 browse/search;通报自带发布日期与 G/SPS/N 文号,直接映射 `legal_basis` / `effective_date` / 评议期;
+   - **WTO ePing 与欧盟 SANTE SERS 是第一高产源, 每日必扫**(均归 `regional` 档):ePing 平台主域为
+     `epingalert.org`(旧 `eping.wto.org` 会跳转), 通报自带发布日期与 G/SPS/N 文号,直接映射
+     `legal_basis` / `effective_date` / 评议期。**2026-10 实测提醒**:ePing 前端 API 基址虽为
+     `https://epingalert.org/api`, 但 `/api/v1/notifications` 等常见 REST 端点直连返回 404
+     (前端走 POST + 命名空间路径), **不要依赖未验证的端点**; 走 browse 检索页, 或经中文聚合站
+     回溯 `members.wto.org` 原始通报 PDF(后者更稳, 且是 tier:1 可存档的官方域);
    - 每个国家/机构使用 aliases 和 source_ids 定位官方站内公告,再用 `policy_keywords` 主题词与动作词组合;
+   - **先跑中文聚合站与输华议定书两条通道**(实测高产, 见上"检索通道实测排序"), 再回到官方域核验;
+   - **按文书类型横切**(`policy_queries.instruments`): 样例标题几乎全部是"某国发布/修订/批准某类文书",
+     只按"国别 × 商品"纵切会漏掉不知道近期有无动作的国家——横切覆盖面更广;
    - 用 `policy_queries.sps` 过一遍 WTO ePing 动植物 SPS 通报列表;
    - 用 `policy_queries.official` 检索国家官方检疫机构新闻页;
    - 用 `policy_queries.animals / plants / biologics / certification / product_access / regulation / country_sweep` 逐主题检索;
    - 用 `policy_queries.organisations` 跟踪 WOAH/FAO/GPP-TAD/ECTAD/IPPC/EPPO 的行动与呼吁;
+   - 用 `policy_queries.cn_sps_aggregator` 过中文通报聚合站; 用 `policy_queries.cn_protocol` 专扫输华议定书;
+   - 用 `policy_queries.official_domain` 做官方域直击时, **术语要短**(`import requirements` / `resolution`),
+     长自然语言句在该通道实测 0 命中;
    - 用 `policy_queries.disease_triggered` 作为疫情背景触发型补充,不让病害清单决定国家范围。
    - 在 `search-log.md` 头部注明当天 ISO 星期与实际扫描的条目列表。
 3. **逐条存档**:
@@ -104,6 +129,19 @@ description: 监测各国政府动植物检疫与进出口管控政策变化。�
   - 某国政策**必须落回该国官方域名**(政府 `.gov`/`.gub`/`.go.*`、EUR-Lex、ePing 等),或回落到 `config/sources.yaml` 里该国 `source_ids` 对应的官方入口;
   - 第三方站点命中**只能写进 `search-log.md` 当线索**,不 `collect.py` 存档、不入库;确认其为官方原文转载后再回溯;
   - `normalize.py` 会按 `OFFICIAL_DOMAIN_SUFFIXES` 强校验:`tier: 1` 配非官方域名直接拒收,黑名单站点强制降 `tier: 3` 且不得判 `verified`;该国官方域确实未收录时,在 `source` 里显式加 `official: 1` 说明。
+- **中文 SPS/TBT 通报平台可作 tier 1 官方源**(2026-10-15 实测确认放宽):主办方为海关总署标法中心
+  (WTO/TBT-SPS 国家通报咨询中心)、商务部及省级 TBT 通报咨询中心, 属中国官方通报体系对 WTO
+  原始通报的**中文权威转述**, 逐条附 G/SPS/N 文号、负责机构、生效日期与 members.wto.org 原文链接,
+  **可直接支撑 verified**, 无需逐条回溯。放宽理由: 它是当前日产量最高的通道(实测单次 8 条),
+  按第三方处理会白白浪费检索成果。使用时仍须守三条:
+  - **只认官方主办站**(`tbtsps.cn` / `gdtbt.org.cn` / `hntbt.org.cn` / `gxzl.org.cn` / `wzisps.org.cn` /
+    `chinawto.mofcom.gov.cn`); `.com` / `.org` 商业聚合站(如 `tbtguide.com`)仍按第三方处理,
+    强制降 `tier: 3` 且不得判 `verified`;
+  - **字段取原文**:`source.title` 填 G/SPS/N 文号、`publish_date` 填**通报发布日**(非转载日)、
+    `quote` 取通报原文关键段(≤120 字); **不得用平台自加的"分析提醒/企业提示"段落当引文**——
+    那是平台编辑加工, 不是原文, 拿来会污染可溯源链;
+  - **中国自身措施不入台账**:平台转载的中华人民共和国海关总署公告、商务部贸易环境专刊等
+    涉及我国自身措施的内容, 按 AGENTS.md 约定仅作影响研判背景, 不采为政策记录。
 - **欧盟议题不按成员国拆分**:欧盟动植物检疫为层面统一立法(植物健康 Reg (EU) 2016/2031、动物健康 Reg (EU) 2019/2131),紧急措施由 SANTE 以实施条例/SERS 发布。搜欧盟措施只查 `eu-sante-sers` 与 EUR-Lex,**不要**按法国/德国/意大利/西班牙/荷兰/匈牙利逐国检索——那是同一议题的重复劳动,成员国源已降为 `track: outbreak`。
 - 每条记录必须带 URL 与抓取时间;没有出处的动作线索不进入下一环节。
 - **旧闻不入库**:发布时间(`source.publish_date`,缺省 `event_date`)必须落在时间窗内;检索撞到的历史公告页即使 URL 从未见过也不入库,只在 search-log.md 备注。回补历史需显式放宽 `--max-age-days`,不得关掉校验当日常扫描用。

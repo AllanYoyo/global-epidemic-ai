@@ -56,6 +56,10 @@ policy_watch_countries:
     - {cn: 欧盟委员会卫生与食品安全总司, en: European Commission SANTE, aliases: [SANTE, SERS, emergency measures, Implementing Regulation], source_ids: [eu-sante-sers]}
     - {cn: WTO SPS/TBT 通报预警, en: WTO ePing, aliases: [ePing, G/SPS/N, SPS notification], source_ids: [wto-eping]}
     - {cn: 国际植物保护公约, en: IPPC, aliases: [IPPC, ISPM, ePhyto, emergency measures], source_ids: [ippc]}
+    # 欧亚经济委员会: 与欧盟同构的区域统一立法主体, 样例高频命中
+    - {cn: 欧亚经济委员会(欧亚经济联盟), en: Eurasian Economic Commission, aliases: [EEC, EAEU, Eurasian Economic Union, 关税同盟], source_ids: [eaeu-eec, eaeu-eec-sps-news]}
+    # 中文 SPS/TBT 通报平台: 中国官方通报体系的中文权威转述, 日产量最高(2026-10-15 确认放宽)
+    - {cn: 中文SPS/TBT通报平台, en: China WTO/TBT-SPS notification portals, aliases: [技术性贸易措施网, 通报咨询中心, TBT通报, SPS通报], source_ids: [cn-sps-aggregator]}
   # 陆路边境邻国: 传入路径优先(封锁区/暂停进口动辄直指对华通道)
   # shard 排期: ASF/HPAI 常年活跃的高疫区邻国(俄/越/哈/蒙)每日必扫;
   #             其余按 2-3 天一轮分片, 保证 7 天全覆盖。
@@ -283,6 +287,47 @@ sources:
     lang: [zh]
     method: browse
     notes: 水产行业展会资讯, 信噪比低; 仅水生动物疫情线索时检索
+  # ---- 中文 SPS/TBT 通报平台(2026-10 按样例补; 2026-10-15 经确认放宽为 tier 1) ----
+  # 实测(2026-10-15): 单次检索可返回 8 条带完整通报号/生效日期/评议期的记录,
+  # 且标题已是可直接入库的中文规范表述; 同期英文 `site:` + 长自然语言 0 命中。
+  # 性质核实: 主办方为海关总署标法中心(WTO/TBT-SPS 国家通报咨询中心)、商务部及
+  # 省级 TBT 通报咨询中心, 属中国官方通报体系对 WTO 原始通报的中文权威转述,
+  # 不是商业聚合站 → 放宽为 tier: 1 + track: policy, 可直接支撑 verified。
+  - id: cn-sps-aggregator
+    name: 中文 SPS/TBT 通报平台(海关总署标法中心/商务部/省级 TBT 咨询中心)
+    url: https://www.gdtbt.org.cn/sps.aspx
+    coverage: [measures]
+    tier: 1
+    schedule: daily
+    track: policy
+    lang: [zh]
+    method: search
+    notes: |
+      日产量最高的通道(实测单次 8 条), 且是唯一能稳定产出"中文规范标题 + 通报号 +
+      生效日期 + 评议期"四件套的来源。经确认放宽为 tier 1 官方源, 可直接支撑 verified。
+      使用要求:
+        - 只认官方主办站(tbtsps.cn / gdtbt.org.cn / hntbt.org.cn / gxzl.org.cn /
+          wzisps.org.cn / chinawto.mofcom.gov.cn); .com/.org 商业聚合站仍按第三方处理,
+          强制降 tier 3 且不得判 verified;
+        - source.title 填 G/SPS/N 文号, publish_date 填通报发布日(非转载日),
+          quote 取通报原文关键段(≤120 字), 不得用平台自加的"分析提醒/企业提示"当引文;
+        - 涉及中国自身措施的内容(海关总署公告、商务部贸易环境专刊)不入政策台账,
+          按 AGENTS.md 约定仅作影响研判背景。
+      省级平台首页常对直连返回 403, 以 web_search 检索式命中为主, browse 为辅。
+  - id: cn-protocol
+    name: 中国海关双边检疫议定书公告(输华准入背景源)
+    url: http://www.customs.gov.cn/
+    coverage: [china, measures]
+    tier: 1
+    schedule: weekly
+    track: background
+    lang: [zh]
+    method: search
+    notes: |
+      外国输华检疫议定书由我国海关总署以公告形式发布(西班牙饲用水生动物蛋白/乌拉圭牛黄/
+      泰国食用水生动物/巴基斯坦干坚果等), 是识别"哪些国家哪些产品刚拿到输华准入"的
+      最快反向索引。按 AGENTS.md 约定, 中国侧措施本身不入政策台账, 本源仅作影响研判背景;
+      但据此可反推对应外国侧的议定书动作, 再回该国官方域定位原始文件。
 
   # ---- 俄罗斯(陆地边境邻国, ASF/HPAI 前线) ----
   - id: ru-fsvps
@@ -915,7 +960,7 @@ sources:
   # ---- 全球组织与行业媒体 ----
   - id: wto-eping
     name: WTO ePing(SPS/TBT 通报预警)
-    url: https://eping.wto.org/
+    url: https://epingalert.org/
     coverage: [measures]
     tier: 1
     schedule: daily
@@ -924,7 +969,10 @@ sources:
     method: browse
     notes: |
       各成员动植物检疫措施通报官方平台; 政策变化监测第一高产源(日均 10+ 条)。
-      优先走 RSS 订阅确定性拉取(ePing 提供各通知类型的 RSS), 订阅不可用再回退 browse/search 现搜。
+      2026-10 实测: 平台主域为 epingalert.org(旧 eping.wto.org 仍在跳转);
+      前端 API 基址为 https://epingalert.org/api, 但 /api/v1/notifications 等
+      直连端点实测 404(前端走 POST + 命名空间路径), 勿依赖未验证的 REST 端点——
+      优先 browse 检索页或经中文聚合站回溯 members.wto.org 原始通报 PDF。
       通报自带发布日期与 G/SPS/N 文号, 是 legal_basis / effective_date / 评议期字段最可靠的来源。
   - id: usda-aphis
     name: 美国农业部动植物卫生检验局(APHIS)
@@ -946,6 +994,34 @@ sources:
     lang: [en]
     method: browse
     notes: 欧盟动物疫病紧急措施与贸易限制公告(SERS); 政策变化监测重点源
+  # ---- 欧亚经济委员会/联盟(2026-10 按样例补; 与欧盟同构的区域统一立法主体) ----
+  - id: eaeu-eec
+    name: 欧亚经济委员会/欧亚经济联盟(EEC/EAEU)
+    url: https://regulation.eaeunion.org/
+    coverage: [measures, animal, plant]
+    tier: 1
+    schedule: am
+    track: policy
+    lang: [ru, en]
+    method: browse
+    notes: |
+      亚美尼亚/白俄/哈萨克/吉尔吉斯/俄罗斯关税同盟的统一兽医与植检立法主体, 与欧盟同构:
+      措施由 EEC 理事会/委员会以决定草案发布, 由成员国(常为吉尔吉斯斯坦/亚美尼亚)代为向 WTO 通报。
+      样例高频命中(共同兽医要求条例修正、兽药制剂流通过渡期、兽药残留限量)。
+      条例正文在 regulation.eaeunion.org; 通报文号形如 G/SPS/N/KGZ/*、G/TBT/N/ARM/*。
+      注意: 俄罗斯以本国名义通报时文号前缀为 RUS, 措施主体仍是 EEC——按通报成员找会漏, 须按措施主体找。
+  - id: eaeu-eec-sps-news
+    name: 欧亚经济委员会 SPS 通报(经成员国代报)
+    url: https://epingalert.org/en/
+    coverage: [measures]
+    tier: 1
+    schedule: daily
+    track: policy
+    lang: [en]
+    method: search
+    notes: |
+      EEC 措施不进该国本国检疫机构站点, 只能经 WTO ePing 代通报发现;
+      检索时按 "EEC"/"Eurasian Economic Union"/"EAEU" 而非按通报成员名定位。
   - id: ecdc
     name: 欧洲疾病预防控制中心(ECDC)
     url: https://www.ecdc.europa.eu/en
@@ -1124,6 +1200,37 @@ policy_keywords:
     - {cn: 进口前通报制度, en: advance notification requirement, aliases: ["prior notification", "pre-import notification"]}
     - {cn: 病原微生物目录, en: pathogenic microorganism catalogue, aliases: ["microorganism catalogue", "pathogen list"]}
 
+  # -- 输华双边安排(2026-10 按样例补; 对华影响最直接的一类) --
+  # 样例实测: 马来西亚观赏鱼进口议定书、中俄活体驯鹿输华要求、西班牙饲用水生动物蛋白、
+  # 乌拉圭牛黄、巴基斯坦干坚果——这类"输华议定书"是外国准入侧对我国最直接的抓手,
+  # 但既不进 WTO ePing(未被通报为 SPS 措施), 也常挂在对方商务部/外交部而非检疫机构站点,
+  # 英文通用检索式基本捞不到, 必须用中文"输华/议定书/检疫和卫生要求"专门扫。
+  protocols:
+    - {cn: 输华检疫议定书, en: protocol on inspection quarantine and sanitary requirements, aliases: ["输华议定书", "输华检验检疫和卫生要求", "输华检疫和卫生要求", "双边议定书"]}
+    - {cn: 输华议定书(签署), en: protocol signed, aliases: ["关于…输华检疫", "signed on", "议定书签署", "在…签署"]}
+    - {cn: 允许进口产品范围, en: scope of products permitted for import, aliases: ["允许进口产品范围", "允许进口产品", "即日起允许符合以下要求的产品进口"]}
+    - {cn: 境外生产企业注册登记, en: overseas establishment registration, aliases: ["注册登记", "获得在华注册", "境外生产企业注册", "GACC 注册"]}
+    - {cn: 证书附加声明(输华), en: additional declaration for export to China, aliases: ["证书附加声明栏", "additional declaration", "附加声明"]}
+    - {cn: 中俄(中欧亚)输华检疫安排, en: China-Russia bilateral quarantine arrangement, aliases: ["输华活体驯鹿", "双边协商", "一致意见"]}
+
+  # -- 文书类型(2026-10 按样例补: 样例标题几乎全部是"某国发布/修订/批准某类文书")
+  # 意义: 政策动作的检索面不是"国 × 商品", 而是"文书类型 × 主题"。
+  # 按国别扫易漏(不知道某国近期有无动作), 按文书类型扫可横切全库, 是样例的高产规律。
+  instruments:
+    - {cn: 决议, en: resolution, aliases: ["Resolution", "决议草案", "第…号决议", "决议修订"]}
+    - {cn: 条例, en: ordinance / regulation, aliases: ["Ordinance", "条例修订", "条例生效", "生物安全条例"]}
+    - {cn: 授权条例(欧盟), en: delegated regulation, aliases: ["授权条例", "Delegated Regulation", "授权法规", "Delegated Act"]}
+    - {cn: 实施条例(欧盟), en: implementing regulation, aliases: ["实施条例", "Implementing Regulation", "实施规则"]}
+    - {cn: 紧急措施通报, en: emergency measure notification, aliases: ["紧急措施", "紧急卫生措施", "紧急通告", "Emergency Measure"]}
+    - {cn: 修订案, en: amendment, aliases: ["修正案", "修订并补充", "Amending Act", "Decree on amendment"]}
+    - {cn: 征求意见稿, en: draft for consultation, aliases: ["征求意见", "草案", "公开征询", "draft amendment", "征求意见稿"]}
+    - {cn: 通告, en: memorandum order, aliases: ["通告", "第…号通告", "Memorandum Order"]}
+    - {cn: 命令, en: order / command, aliases: ["命令", "第…号命令", "Order", "暂时停止进口的命令"]}
+    - {cn: 批准与生效, en: approval and commencement, aliases: ["将于…生效", "生效日期", "自…起施行", "commencement", "comes into force", "effective date"]}
+    - {cn: 废止, en: repeal, aliases: ["废止", "废除", "取代", "repeal", "supersede", "取代…号决议"]}
+    - {cn: 名录/清单修订, en: list amendment, aliases: ["清单修订", "名录修订", "易感物种清单", "准许品种", "标准许可证"]}
+    - {cn: 通报号, en: notification symbol, aliases: ["G/SPS/N/", "G/TBT/N/", "补遗通报", "Add.", "Corrigendum"]}
+
 # ---- 政策变化监测检索模板(global-policy-search Skill) ----
 # 范围: 仅外国政府的动植物检疫管控政策变化。
 # 中国海关总署公告不作为政策记录采集; 仅作为影响研判的背景资料。
@@ -1190,3 +1297,31 @@ policy_queries:
     - '"{state}" state veterinarian (order OR quarantine OR disease control) {year}'
     - '"{state}" plant regulatory official (phytosanitary OR quarantine pest OR nursery stock) {year}'
     - 'site:gov "{state}" "animal health" "import requirements" {year}'
+
+  # ========== 2026-10 新增: 按样例实测的四个高产通道 ==========
+  # 样例回溯结论(2026-10-15 实测, 详见 policy_queries 顶部说明):
+  #   1) 中文 SPS/TBT 聚合站(gdtbt/tbtguide/hntbt/gxzl/wzisps 等)单次可返回 8 条带完整
+  #      通报号与生效日期的记录, 且标题已是可直接入库的中文规范表述——是当前日产量最高的通道;
+  #   2) 英文 `site:官方域 + 长自然语言` 命中率极低(sag.gob.cl 西语检索 0 命中),
+  #      但 `site:官方域 + 英文术语` 可命中(agriculture.gov.au 6 命中);
+  #   3) 输华议定书类几乎不进 ePing, 必须中文专门扫;
+  #   4) 按"文书类型"横切比按"国别 × 商品"纵切覆盖面更广。
+  cn_sps_aggregator:  # 中文 SPS 通报聚合站(日产量最高; 强制回溯 ePing/WTO 原文后才可 verified)
+    - '通报 "G/SPS/N/" 动物 检疫 进口 卫生要求 {month_en_year}'
+    - '通报 植物检疫要求 修订 OR 废止 决议 {month_en_year}'
+    - 'WTO/SPS通报 紧急措施 暂停进口 OR 禁止进口 {month_en_year}'
+    - '通报 补遗 OR Add. 生效日期 公告 {month_en_year}'
+  cn_protocol:      # 输华双边议定书/检疫和卫生要求(不进 ePing, 必须中文扫)
+    - '输华 检疫 卫生要求 议定书 签署 {year}'
+    - '"关于" 输华 检疫和卫生要求 议定书 即日起允许 进口'
+    - '输华 议定书 修订 OR 生效 OR 更新 {month_en_year}'
+    - '注册登记 境外生产企业 输华 检疫 议定书 公告 {year}'
+  instruments:     # 文书类型横切(按样例: 标题几乎都是"某国发布/修订/批准某类文书")
+    - '"{instrument}" quarantine OR "animal health" OR phytosanitary {month_en_year}'
+    - '"{instrument}" import requirements animals OR plants {month_en_year}'
+    - '通报 OR 条例 OR 决议 OR 命令 修订 检疫 卫生要求 {month_en_year}'
+  official_domain: # 官方域直击(短术语优先, 不要拼长自然语言——实测长句 0 命中)
+    - 'site:{official_domain} import requirements'
+    - 'site:{official_domain} quarantine OR biosecurity OR phytosanitary'
+    - 'site:{official_domain} resolution OR ordinance OR decree'
+    - 'site:{official_domain} notification OR circular OR amendment'

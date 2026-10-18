@@ -173,7 +173,10 @@ def main():
 
     flag_path = os.path.join(PUSH_FLAG_DIR, "%s.flag" % args.date)
     if not args.message and not args.dry_run and not args.force and os.path.isfile(flag_path):
-        print("[跳过] %s 日报已推送过(标记: %s), 需重发请加 --force" % (args.date, flag_path))
+        # [WARN] 而非 [跳过]: 走的是正常幂等分支, 但外部监控只盯 exit code 会看不出
+        # "今天没推", 与"推送成功"无法区分。WARN 前缀便于告警脚本 grep。
+        print("[WARN] %s 日报已推送过(标记: %s), 本次未推送; 需重发请加 --force"
+              % (args.date, flag_path))
         return 0
 
     if args.message:
@@ -203,6 +206,11 @@ def main():
             print("[提示] 未配置任何推送渠道(WECHAT_WEBHOOK / DINGTALK_WEBHOOK / SMTP_*), "
                   "详见 .env.example")
             return 1
+        # dry-run 命中幂等 flag 时显式提示: 不然 Agent 看到 "[dry-run] 将发送到 X" 容易
+        # 误以为今天没推过, 错过 --force 补发时机。
+        if not args.message and os.path.isfile(flag_path):
+            print("[提示] 今日日报已推送过(标记: %s), --dry-run 仅预览不会重发; "
+                  "要重发请加 --force" % flag_path)
         print("[dry-run] 将发送到: %s(未实际发送)" % "、".join(c[0] for c in channels))
         return 0
 

@@ -18,7 +18,6 @@ Agent 全流程(搜索→抽取→核验→研判)仍由 Hermes 执行,可用 RA
 事件坐标: 优先用事件自带经纬度, 缺失时按国名查询 OpenStreetMap Nominatim 并缓存
 (RADAR_GEO=0 关闭; 同国多点做确定性偏移避免重叠)。
 """
-import datetime
 import json
 import os
 import subprocess
@@ -34,7 +33,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "scripts"))
 
 import report  # noqa: E402
-from normalize import DATA_DIR, REPO  # noqa: E402
+from normalize import DATA_DIR, REPO, biz_today  # noqa: E402
 
 REPORTS_DIR = os.path.join(DATA_DIR, "reports")
 GEO_CACHE = os.path.join(DATA_DIR, "geocache.json")
@@ -148,13 +147,13 @@ def index():
 
 @app.get("/api/summary")
 def api_summary():
-    events = report.collect(datetime.date.today().isoformat(), 3650)
+    events = report.collect(biz_today(), 3650)
     if events is None:
         return jsonify({"record_type": "policy", "total": 0, "today_new": 0,
                         "focus_now": 0, "high": 0, "unverified": 0,
                         "tighten": 0, "relax": 0, "countries": 0,
                         "constraints": 0, "opportunities": 0, "neutral": 0})
-    today = datetime.date.today().isoformat()
+    today = biz_today()
     all_e = [e for e in events["all"] if e.get("verification_status") != "merged"]
     covered = [e for e in all_e if str(e.get("first_seen", ""))[:10] == today]
     countries = {e.get("country_cn") for e in all_e if e.get("country_cn")}
@@ -226,7 +225,7 @@ def api_report_file(name):
 
 @app.post("/api/generate")
 def api_generate():
-    date = datetime.date.today().isoformat()
+    date = biz_today()
     # 政策监测是默认产品:旧 RADAR_GENERATE_CMD 不再覆盖政策命令,避免服务器旧配置导致返回码 1。
     # 如确需自定义政策生成流程,请显式设置 RADAR_POLICY_GENERATE_CMD。
     cmd = os.environ.get("RADAR_POLICY_GENERATE_CMD")

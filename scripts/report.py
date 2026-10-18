@@ -26,7 +26,11 @@ POLICY_TABLE_HEADER = (
 
 
 def _date(value):
-    return datetime.date.fromisoformat(str(value)[:10])
+    """从 ISO 字符串解析日期; 失败返回 None, 不让单条脏数据拖垮整个 report。"""
+    try:
+        return datetime.date.fromisoformat(str(value)[:10])
+    except (ValueError, TypeError):
+        return None
 
 
 def policy_title(policy):
@@ -71,9 +75,20 @@ def collect(date, days_back, db_path=None):
            and str(e.get("first_seen", ""))[:10] == date]
     lo, hi = _date(date) - datetime.timedelta(days=days_back), _date(date)
     new_ids = {e["event_id"] for e in new}
-    active = [e for e in all_events if e.get("verification_status") != "merged"
-              and e["event_id"] not in new_ids and e.get("event_date")
-              and lo <= _date(e["event_date"]) <= hi]
+    active = []
+    for e in all_events:
+        if e.get("verification_status") == "merged" or e["event_id"] in new_ids or not e.get("event_date"):
+            continue
+        d = _date(e["event_date"])
+        if d is None:
+            # 已知风险见 known-issues.md A3: 单条脏数据不应让整个 report 崩
+            print("[WARN] 跳过 event_date 无法解析的记录: %s @ %s (event_date=%r)"
+                  % (e.get("title_cn") or e.get("title_en") or "（无标题）",
+                     e.get("country_en") or "?", e.get("event_date")))
+            continue
+        if not (lo <= d <= hi):
+            continue
+        active.append(e)
     new.sort(key=sort_key)
     active.sort(key=sort_key)
     return {"all": all_events, "new": new, "active": active,

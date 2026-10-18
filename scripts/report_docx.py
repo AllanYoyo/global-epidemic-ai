@@ -167,7 +167,7 @@ def _build_policy(date, data=None, out_dir=None, db_path=None):
     if not focus:
         _para(doc, "本期无收紧、调整或高影响类政策变化。", color=GRAY)
     for i, e in enumerate(focus, 1):
-        title = e.get("title_cn") or e.get("title_en") or "（无标题）"
+        title = e.get("title_cn") or e.get("title_en") or e.get("summary_cn") or "（无标题）"
         _para(doc, "%d. %s · %s(%s)" % (i, e.get("country_cn") or "-", title, e["event_id"]),
               bold=True, size=11, space_after=2)
         _bullet(doc, "动作: ", "%s → %s" % (e.get("prev_action") or "此前未注明", e.get("action_type") or "-"))
@@ -200,7 +200,7 @@ def _build_policy(date, data=None, out_dir=None, db_path=None):
     if not judged:
         _para(doc, "本期暂无已完成对华影响研判的政策变化。", color=GRAY)
     for e in judged:
-        _bullet(doc, "%s(%s): " % (e.get("title_cn") or e.get("title_en") or "（无标题）", e.get("country_cn") or "-"),
+        _bullet(doc, "%s(%s): " % (e.get("title_cn") or e.get("title_en") or e.get("summary_cn") or "（无标题）", e.get("country_cn") or "-"),
                 "%s·%s·%s — %s" % (e.get("impact_type") or "未分类", e.get("impact_level"),
                                    e.get("china_relevance") or "未研判",
                                    e.get("impact_rationale") or e.get("recommended_action") or ""))
@@ -214,7 +214,7 @@ def _build_policy(date, data=None, out_dir=None, db_path=None):
         st = e.get("verification_status")
         tag = {"unverified": "未核验", "false_positive": "存疑"}.get(st, "待研判")
         _bullet(doc, "[%s] " % tag,
-                "%s @ %s(%s): %s" % (e.get("title_cn") or e.get("title_en") or "（无标题）",
+                "%s @ %s(%s): %s" % (e.get("title_cn") or e.get("title_en") or e.get("summary_cn") or "（无标题）",
                                      e.get("country_cn") or "-", e["event_id"], e.get("summary_cn") or "见来源"),
                 color=RED if st == "false_positive" else None)
 

@@ -59,7 +59,10 @@ policy_watch_countries:
     # 欧亚经济委员会: 与欧盟同构的区域统一立法主体, 样例高频命中
     - {cn: 欧亚经济委员会(欧亚经济联盟), en: Eurasian Economic Commission, aliases: [EEC, EAEU, Eurasian Economic Union, 关税同盟], source_ids: [eaeu-eec, eaeu-eec-sps-news]}
     # 中文 SPS/TBT 通报平台: 中国官方通报体系的中文权威转述, 日产量最高(2026-10-15 确认放宽)
-    - {cn: 中文SPS/TBT通报平台, en: China WTO/TBT-SPS notification portals, aliases: [技术性贸易措施网, 通报咨询中心, TBT通报, SPS通报], source_ids: [cn-sps-aggregator]}
+    # 2026-10-18 调整: aliases 去掉"技术性贸易措施网"——该 alias 强绑 tbtsps.cn,
+    # 而 tbtsps.cn 已撤除(见 cn-sps-aggregator 红线段); 保留"通报咨询中心/TBT通报/SPS通报"
+    # 这些省级/商务部站仍用的描述。
+    - {cn: 中文SPS/TBT通报平台, en: China WTO/TBT-SPS notification portals, aliases: [通报咨询中心, TBT通报, SPS通报], source_ids: [cn-sps-aggregator]}
   # 陆路边境邻国: 传入路径优先(封锁区/暂停进口动辄直指对华通道)
   # shard 排期: ASF/HPAI 常年活跃的高疫区邻国(俄/越/哈/蒙)每日必扫;
   #             其余按 2-3 天一轮分片, 保证 7 天全覆盖。
@@ -306,9 +309,11 @@ sources:
       日产量最高的通道(实测单次 8 条), 且是唯一能稳定产出"中文规范标题 + 通报号 +
       生效日期 + 评议期"四件套的来源。经确认放宽为 tier 1 官方源, 可直接支撑 verified。
       使用要求:
-        - 只认官方主办站(tbtsps.cn / gdtbt.org.cn / hntbt.org.cn / gxzl.org.cn /
-          wzisps.org.cn / chinawto.mofcom.gov.cn); .com/.org 商业聚合站仍按第三方处理,
-          强制降 tier 3 且不得判 verified;
+        - 只认官方主办站(gdtbt.org.cn / hntbt.org.cn / gxzl.org.cn / wzisps.org.cn /
+          chinawto.mofcom.gov.cn, 共 5 个省级/商务部站);
+          2026-10-18 撤除 tbtsps.cn(海关总署标法中心), 该源 URL 不可再作 tier 1,
+          命中即被 normalize 强制降 tier 3;
+        - .com/.org 商业聚合站仍按第三方处理, 强制降 tier 3 且不得判 verified;
         - source.title 填 G/SPS/N 文号, publish_date 填通报发布日(非转载日),
           quote 取通报原文关键段(≤120 字), 不得用平台自加的"分析提醒/企业提示"当引文;
         - 涉及中国自身措施的内容(海关总署公告、商务部贸易环境专刊)不入政策台账,

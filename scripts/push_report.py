@@ -58,7 +58,10 @@ def _cut_sentence(text, limit=60):
 
 
 def _title(e):
-    return e.get("title_cn") or e.get("title_en") or "（无标题）"
+    # 显示层兜底链: title_cn → title_en → summary_cn → "（无标题）"
+    # 校验只要求三选一, 显示层必须把三种都试一遍, 否则会出现"入库合法但
+    # 推送时显示无标题"的鬼影记录(report.py / report_docx.py 同样的兜底链)。
+    return e.get("title_cn") or e.get("title_en") or e.get("summary_cn") or "（无标题）"
 
 
 def brief_text(date, data):

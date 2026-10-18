@@ -387,7 +387,7 @@ function initMap(){
 }
 
 function popupHtml(e){
-  const title=e.title_cn||e.title_en||'（无标题）';
+  const title=e.title_cn||e.title_en||e.summary_cn||'（无标题）';
   const sub='🛃政策'+(e.action_type?' · '+e.action_type:'');
   return '<div style="min-width:260px">'+
    '<b style="font-size:14px">'+esc(title)+'</b> <span style="color:#8493ab">'+esc(sub)+'</span><br>'+
@@ -442,7 +442,7 @@ function renderTable(){
                    ((impactOrder[a.impact_level]??3)-(impactOrder[b.impact_level]??3)));
   $('#rowCount').textContent=rows.length+' 条';
   $('#tbody').innerHTML=rows.map(e=>{
-    const name=e.title_cn||e.title_en||'（无标题）';
+    const name=e.title_cn||e.title_en||e.summary_cn||'（无标题）';
     const products=(e.products||[]).join('、')||e.disease_name_cn||'-';
     const effective=e.effective_date||e.event_date||'-';
     return '<tr>'+

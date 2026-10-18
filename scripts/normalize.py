@@ -73,18 +73,20 @@ OFFICIAL_DOMAIN_SUFFIXES = (
     # regulation.eaeunion.org 为 EEC 官方法规库; eecommission.org 为委员会官网。
     # 该主体常由成员国代为向 WTO 通报(文号前缀 KGZ/ARM 等), 措施仍出自 EEC。
     "eaeunion.org", "eecommission.org",
-    # ---- 中国官方 WTO/TBT-SPS 通报平台(2026-10-15 经用户确认放宽) ----
-    # 性质核实: 这些是中国官方通报咨询体系(海关总署标法中心即 WTO/TBT-SPS 国家通报咨询中心、
-    # 商务部、各省 TBT 通报咨询中心)对 WTO 原始通报的**中文权威转述**, 逐条附 G/SPS/N 文号、
-    # 负责机构、生效日期与 members.wto.org 原文链接。此前按"第三方转述"处理过严,
-    # 导致日产量最高的发现通道无法支撑 verified, 白白浪费检索成果。
+    # ---- 中国官方 WTO/TBT-SPS 通报平台(2026-10-15 放宽, 2026-10-18 改: 仅留省级 TBT + 商务部) ----
+    # 2026-10-15 放宽是把它当"中文权威转述", 但 tbtsps.cn(海关总署标法中心)同时大量转载
+    # 中国海关总署公告与商务部贸易环境专刊——AGENTS.md 明确"中国自身措施不入台账",
+    # 把它当 tier 1 信源会让"中国自身措施"绕道入政策台账。2026-10-18 决定撤除 tbtsps.cn
+    # (同时进 THIRD_PARTY_HINTS), 留 5 个省级/商务部站作为 tier 1: 它们转载以 WTO 通报
+    # 译文为主, "中国自身措施"占比小, 信源相对纯。
     # 注意分级: 仅收录可核实的主办单位; .com/.org 商业聚合站一律不放行。
-    "tbtsps.cn",        # 中国技术性贸易措施网(海关总署标法中心主办)
     "gdtbt.org.cn",     # 广东省 WTO/TBT 通报咨询研究中心
     "hntbt.org.cn",     # 湖南省 技术性贸易措施信息网
     "gxzl.org.cn",      # 广西壮族自治区标准技术研究院 东盟 WTO/TBT 专栏
     "wzisps.org.cn",    # 温州市标准化科学研究院
     "chinawto.mofcom.gov.cn",  # 商务部 WTO/FTA 咨询网
+    # 注: tbtsps.cn(海关总署标法中心)2026-10-18 撤除, 同时进 THIRD_PARTY_HINTS 黑名单
+    # —— 原因见本文件同段"中国官方 WTO/TBT-SPS 通报平台"上方注释
     # 省级政府/海关转载 WTO 通报的专栏(精确主机, 不用 .gov.cn 通配)。
     # 为什么不放行整个 gov.cn: AGENTS.md 约定中国侧措施仅作研判背景、不入政策台账,
     # 通配放行会让任何中国官方页面都能支撑 tier:1, 边界失控。
@@ -149,6 +151,10 @@ THIRD_PARTY_HINTS = (
     # your fingertips", 真身是 eur-lex.europa.eu。生产库里曾用它支撑一条
     # "verified + tier 1" 的欧盟条例记录, 属可溯源硬要求的直接违规。
     "eurlexa.com",
+    "c1f.com",           # 商业 .com 中文 SPS/TBT 通报聚合站, 同类见 SKILL.md:138(tbtguide.com);
+                         # 不可作官方源, 命中即降 tier 3, 不可判 verified
+    "tbtsps.cn",         # 2026-10-18 撤出 OFFICIAL: 信源同质化(转载中文官方材料回流自身),
+                         # 且转载中国自身措施混入风险; 进黑名单双重保险, 命中即降 tier 3
     "economy.com.na",    # 私营 Namibia Economist 报纸 / IPPR 经济指南
     "base.spinform.ru",  # СПИНФОРМ 私营法律信息数据库(非俄政府门户)
     "quora.com", "wikipedia.org", "medium.com", "blogspot.com",
@@ -497,7 +503,7 @@ def main():
         if reason and not (con and _event_exists(con, e["event_id"])):
             stale.append((i, reason))
             print("[旧闻拒收] 第%d条: %s  %s @ %s" % (
-                i, reason, e.get("title_cn") or e.get("title_en") or "（无标题）",
+                i, reason, e.get("title_cn") or e.get("title_en") or e.get("summary_cn") or "（无标题）",
                 e.get("country_en")))
             continue
         if con:
@@ -505,7 +511,7 @@ def main():
         write_event_file(e, out_dir)
         written += 1
         print("[OK] %s  政策  %s @ %s  %s  [%s] 影响:%s" % (
-            e["event_id"], e.get("title_cn") or e.get("title_en") or "（无标题）",
+            e["event_id"], e.get("title_cn") or e.get("title_en") or e.get("summary_cn") or "（无标题）",
             e.get("country_en"), e.get("event_date"), e.get("verification_status"),
             e.get("impact_level") or "未研判"))
     print("\n入库 %d 条(校验失败 %d 条, 旧闻拒收 %d 条) -> %s%s" % (

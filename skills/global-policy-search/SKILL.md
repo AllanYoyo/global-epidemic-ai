@@ -136,7 +136,7 @@ description: 监测各国政府动植物检疫与进出口管控政策变化。�
 - **官方域名硬约束**（2026-10 起）:`policy_queries` 的通用检索式(`"{country}" suspends imports ...`)会命中第三方站点——行业媒体、他国贸易门户转述、商业检疫数据库。2026-10 实测 19 条入库记录 100% `unverified`,逾半数来源是 `freyrsolutions.com`/`qpests.insect-genome.com`/`thebrief.com.na`/`www.evs.ee`/`bangladeshtradeportal.gov.bd`/`agrinfo.eu` 这类站点,却被标了 `tier: 1`。因此:
   - 某国政策**必须落回该国官方域名**(政府 `.gov`/`.gub`/`.go.*`、EUR-Lex、ePing 等),或回落到 `config/sources.yaml` 里该国 `source_ids` 对应的官方入口;
   - 第三方站点命中**只能写进 `search-log.md` 当线索**,不 `collect.py` 存档、不入库;确认其为官方原文转载后再回溯;
-  - `normalize.py` 会按 `OFFICIAL_DOMAIN_SUFFIXES` 强校验:`tier: 1` 配非官方域名直接拒收,黑名单站点强制降 `tier: 3` 且不得判 `verified`;该国官方域确实未收录时,在 `source` 里显式加 `official: 1` 说明。
+  - `normalize.py` 会按 `OFFICIAL_DOMAIN_SUFFIXES` 强校验:`tier: 1` 配非官方域名直接拒收;命中第三方黑名单的记录**整条拒收不入库**(tier 强制降为 3 且不得判 `verified`);该国官方域确实未收录时,在 `source` 里显式加 `official: 1` 说明(入库端会自动写 `source.official_note` 留痕, 待人工复核)。
 - **中文 SPS/TBT 通报平台 tier 1 准入(2026-10-15 放宽, 2026-10-18 改: 仅省级 TBT + 商务部)**:
   仅省级 TBT 通报咨询中心(`gdtbt.org.cn` / `hntbt.org.cn` / `gxzl.org.cn` / `wzisps.org.cn`)
   与商务部 WTO/FTA 咨询网(`chinawto.mofcom.gov.cn`)作 tier 1, 可直接支撑 verified。
@@ -189,6 +189,8 @@ description: 监测各国政府动植物检疫与进出口管控政策变化。�
   `REVIEW_CHANNEL=wechat`, 首跑只发微信, 写 `data/reports/.review-pending/<日期>.flag`。
   用户在微信端确认后, 再调 `push_report.py --date X --review-approved` 把钉钉/邮箱发完。
 - 同理 `REVIEW_CHANNEL=dingtalk` / `REVIEW_CHANNEL=mail`。
+- 阶段 2 的审阅渠道**以 `.review-pending` 标记里记录的渠道为准**, `REVIEW_CHANNEL` 只作兜底:
+  换会话/换机器执行忘了带环境变量也不会让审阅渠道重复收报(2026-10-19 修复)。
 - 不设 `REVIEW_CHANNEL` 时所有渠道一次性发, 行为与之前一致, 适用于 cron 全量推送。
 - `--message` 自定义文本不走闸门(避免 cron fallback 的"待执行提醒"被卡)。
 

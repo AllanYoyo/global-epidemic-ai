@@ -29,6 +29,13 @@ description: 生成每日动植物检疫政策监测日报(Markdown + Word 简�
    python scripts/push_report.py --date <YYYY-MM-DD>   # 企业微信/钉钉/邮箱(SMTP), 未配置自动跳过; --dry-run 预览
    ```
 
+   - 日报当天已推送过(有 `data/reports/.pushed/<日期>.flag`)会被幂等跳过, 补发加 `--force`:
+     `python scripts/push_report.py --date <YYYY-MM-DD> --force`。
+   - `run_scan.sh` 未配 `HERMES_RUN_CMD` 时的 fallback 走 `--message` 路径
+     (自定义提醒文本, 不走日报汇总, 不参与评审核闸门, 也不写 `.pushed`)。
+   - 用户在某个渠道要求"先在原渠道给我看"时: `REVIEW_CHANNEL=wechat python scripts/push_report.py --date <YYYY-MM-DD>`
+     只发微信, 用户确认后 `python scripts/push_report.py --date <YYYY-MM-DD> --review-approved` 发完其余渠道。
+
    用户要求"发邮件给…"/"邮件通知"时, 不走本脚本: 直接调用 Hermes 的 `tuta-webmail` 技能发送
    (主题纯中文无 emoji, 正文用日报"五问"要点转纯文本; Tuta 免费版无附件, 需附件改用 SMTP 渠道)。
 

@@ -40,6 +40,9 @@
 - `impact_score` = 四项加权:trade×0.35 + biosecurity×0.30 + response×0.25 + alignment×0.10
 - `impact_level`:score ≥ 3.5 → 高影响;2.0 ~ 3.5 → 中影响;< 2.0 → 低影响
 - `impact_focus`:高影响 → 立即关注;中影响 → 持续观察;低影响 → 常规记录
+- **四维齐全时不要手写 `impact_score` / `impact_level` / `impact_focus`**:留空即可,
+  `scripts/risk.py` 按上面的加权合同自动推导(AGENTS.md 硬要求: 不得手写与四维冲突的值)。
+  手写值与四维加权结果相差超过 0.05 分即被拒绝写回, 整条结论会白跑。
 - **方向特例**:放松/恢复类动作默认不判高影响,除非背景显示其直接改变对华贸易格局。
 - **特例**:已有我方措施覆盖的政策,影响等级需结合新变化重新判断,不得直接套用旧结论。
 - 四维分数按主题灵活判断:流程类政策 biosecurity 可给低分;病原微生物类 trade 可给低分但 biosecurity 必须单独评估。

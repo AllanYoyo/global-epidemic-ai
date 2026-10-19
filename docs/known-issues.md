@@ -2,19 +2,11 @@
 
 > 体检沉淀与工单跟踪。本文件登记代码库**已识别但未修复**的问题,按"高/中/低"分档。
 > 修复后从"未修复"移入"已修复"区,保留作为历史与回归参考。
-> 上次体检: **2026-10-18** (基于 commit f7ae1c4)。
+> 上次体检: **2026-10-19** (基于 commit 0459442 之后的专项复审)。
 
 ---
 
 ## 未修复
-
-### 高 (建议本批处理)
-
-#### A3 · `report.py` 用裸 `datetime.date.fromisoformat()` 解析 `event_date`,无 try/except
-- 位置: `scripts/report.py:28-29`、`scripts/report.py:75-76`
-- 现象: 任何入库记录的 `event_date` 被污染成 `2026-13-45` / `2026-10-XX` / `TBD` 时, `_date()` 抛 `ValueError`,`active` 列表构建中途崩; 进程退出码非零; `push_report.py` 拿不到 `data` → 返回 `[提示] 政策库为空`。生产上最难复现——单条脏数据足以让 `report.py` 当天空跑、推送缺位, 且和今天的"群里没消息"现象重合。
-- 建议处理: `_date()` 包 try/except, 解析失败 skip 并打 `[WARN]`, 不要让单条坏数据拖垮整个 report。
-- 复现命令: 手工往库里塞一条 `event_date="2026-99-99"`, 再 `python scripts/report.py --date 2026-10-18 --excel`。
 
 ### 中 (建议排期修)
 
@@ -38,17 +30,17 @@
 - 现象: Python 复用模块缓存所以不是真性能问题, 但同进程内 `_geo_cache` 是 module-level 全局, DB 连接每次新建——并发稍微大一点, "一边写一边读" 窗口被 B1 放大。
 - 建议处理: `from normalize import load_events, open_db` 提到模块顶部; 长期用 gunicorn worker 模型替换 Flask dev server。
 
+#### B6 · `normalize.py` 退出码: 部分旧闻拒收即返回 1(语义待定)
+- 位置: `scripts/normalize.py` `main()` 末尾 `return 1 if (failed or stale) else 0`
+- 现象: **旧闻拒收是检索撞到常年挂网旧公告的正常预期行为**, 但与"校验失败"共用退出码 1。日常扫描几乎天天会拒收一两条旧公告 → 天天 exit 1, Agent/脚本容易把"部分成功"误读成"整批失败"而中断后续流程。
+- 建议处理: 拆成两个退出码(如 0=全成功 / 1=有校验失败 / 2=有旧闻拒收但入库成功), 或旧闻拒收不参与退出码、只打提示。**本项是接口语义变更, 需先与调度侧对齐再改。**
+
 ### 低 (可选/优化)
 
 #### C1 · `datetime.datetime.utcnow()` 在 Python 3.12+ 已弃用
 - 位置: `scripts/normalize.py:47, 53`
 - 现象: 3.12 起 deprecation warning, 未来 hard error。
 - 建议处理: 改 `datetime.now(timezone.utc)`。
-
-#### C2 · `_norm_date` 对 `2026-13-45` 这种坏值原样返回, 污染 ISO 比较
-- 位置: `scripts/normalize.py:260-265`
-- 现象: 无效日期被原样返回, 字典序比较时可能误判新旧; 与 A3 关联。
-- 建议处理: 长度合法但语义非法时返回 None, 触发 A3 的 warn。
 
 #### C3 · `upsert` 的 patch 过滤 `v not in (None, [], {})` 误把 `0`/`False` 当空值
 - 位置: `scripts/normalize.py:411-412`
@@ -75,24 +67,148 @@
 - 现象: 同一仓库里 import 风格分裂, 维护时容易漏改。
 - 建议处理: 统一收口(例如在 `scripts/__init__.py` 或 `normalize.py` 里提供 `BASE_HELPERS` 一并 import)。
 
-#### C8 · `prompts/policy-extraction.md:34` 的 quote 长度限制 (80 字) 与代码 (120 字) 不一致
-- 位置: `prompts/policy-extraction.md:34` vs `scripts/normalize.py:328` / `docs/event-schema.md:28` / `TROUBLESHOOTING.md:43` / `AGENTS.md`
-- 现象: 提示词比代码严 40 字, Agent 抽取时切得太短, 浪费可溯源信息; 实际运行时不会报错。
-- 建议处理: 二选一——代码收紧到 80 字并改 `event-schema.md`, 或 prompt 放宽到 120 字。**优先放宽 prompt**。
+#### C11 · 第三方站点记录的"降 tier 3"与"整条拒收"口径曾不一致
+- 位置: `AGENTS.md` / `docs/event-schema.md` / `scripts/normalize.py` `check_source_domain`
+- 现象: 2026-10-19 前, 文档写"强制降 tier 3"(暗示保留为线索), 实现却是"降 tier 3 + 校验失败"= 整条拒收, 错误文案还写"[线索] ... 已将 tier 降为 3", 自相矛盾。
+- 现状: 行为**保持拒收**(与 `skills/global-policy-search/SKILL.md` 红线"第三方命中不存档、不入库"一致, 且不重新打开 2026-10 堵住的"伪 tier 1"口子), 文案与文档已统一为"整条不入库"。
+- 待办: 若业务上确实要保留 tier 3 线索条目, 需改行为并同步 event-schema.md / 两个 prompt / 报告展示层 —— 属口径变更, 不宜顺手改。
 
-#### C9 · `run_scan.sh:13` `set -u` 与 `[ -f "$HOME/.hermes/.env" ]` 在 `$HOME` 缺失时直接 exit
-- 位置: `scripts/run_scan.sh:13, 19`
-- 现象: 极端 cron 配置删除 HOME 时, `[ -f ]` 展开失败 → 整个脚本退出。当前 crontab.example 没显式设 HOME, 但 systemd 等环境里 HOME 可能 unset。
-- 建议处理: 改为 `[ -n "${HOME:-}" ] && [ -f "$HOME/.hermes/.env" ] && . ...` 双层守卫。
-
-#### C10 · `skills/daily-report/SKILL.md:29` 推送命令缺 `--message` / `--force` 用法
-- 位置: `skills/daily-report/SKILL.md:26-30`
-- 现象: 新人不知道"日报已发过怎么补发", 或 `run_scan.sh` 走 fallback 推送"待执行提醒"的 `--message` 路径。
-- 建议处理: 在 skill 步骤 2 补一句: "日报已发过想补发: `push_report.py --date YYYY-MM-DD --force`; `run_scan.sh` 走 fallback 时传 `--message` 跳过日报汇总"。
+#### C12 · `webapp` 地理编码把"查询失败"也写进缓存
+- 位置: `webapp/app.py:87`(`cache[country_en] = pos`, 失败时 `pos=None`)
+- 现象: 一次网络抖动/限速导致查不到坐标, 结果被永久缓存成 `None`, 该国所有点此后都不显示在地图上, 且没有任何日志。
+- 建议处理: 失败结果不写缓存(或短 TTL), 并打 `[WARN]` 日志。
 
 ---
 
 ## 已修复 (历史)
+
+### 2026-10-19 专项复审 (commit 0459442 之后)
+
+#### A3 · 脏日期可以让整条日报崩, 还能绕过旧闻窗口混进台账(闭环)
+- 位置: `scripts/normalize.py` `_parse_date` / `_norm_date` / `validate` / `stale_reason`;
+  `scripts/report.py` `policy_date` / `collect` / `policy_row` / `make_policy_detail` / `export_table`;
+  `scripts/report_docx.py`; `webapp/app.py` `slim_event`
+- 现象(三个叠加的口子, 逐个修掉):
+  1. **入库端不校验日期语义**: `_norm_date` 只按**长度**判断, "2026-13-45"(10 位, 但
+     13 月 45 日)被原样返回; `validate()` 也不查日历合法性 → 脏日期直接进库。
+  2. **脏日期能绕过旧闻窗口**: 窗口用**字符串**比较, "2026-13-45" > "2026-10-12"
+     → 被判成"比窗口还新"→ **放行入库**。也就是说, 越脏的日期越容易混进台账。
+  3. **日报展示层原样端出脏日期**: `active` 桶会 WARN 跳过, 但 `new` 桶(按 first_seen
+     筛)根本不查日期, "2026-13-45" 会原样出现在日报表格、Word 简报与 Excel 的日期列,
+     读者无法分辨那是脏数据还是真实日期。
+- 修法(源头 → 窗口 → 展示, 三层闭环):
+  - **入库端**: 新增 `_parse_date()` 解析真实日历日期(接受 YYYY / YYYY-MM / YYYY-MM-DD
+    与 ISO 日期时间前缀); `validate()` 对 `event_date` / `effective_date` 做日历合法性
+    校验, 非法即拒收(脏数据不再进库, 也就没有 event_id 漂移风险)。
+  - **旧闻窗口**: `_norm_date` 改为语义感知(非法返回 None); `stale_reason` 在
+    "日期全部解析不了"时按**日期不明**拒收(fail closed, 技能红线: 日期不明的条目不入库),
+    不再放行; `source.publish_date` 写坏时打 `[WARN]` 并退回 event_date 判定。
+  - **展示层**: 新增 `report.policy_date()` 统一口径(依次取 effective_date / event_date,
+    解析不了就显示"日期异常"), Markdown / Excel / Word / 面板全部改用它; `new` 桶里的
+    存量脏日期**保留条目并打 WARN**(不能因为日期坏就把今天的政策从日报里抹掉),
+    但日期列显示"日期异常"而不是原始脏串。
+- 回归: `scripts/test_smoke.py::DirtyDateGuardTests`(10 条)
+- 附: C2(`_norm_date` 对坏值原样返回)随本次一并闭环, 已从"未修复"移出。
+
+#### F0 · `report.collect()` 对非法 `--date` 抛裸 TypeError, 日报与推送一起丢
+- 位置: `scripts/report.py` `collect()`; 调用方 `report.py` / `push_report.py` / `report_docx.py`
+- 现象: A3 把 `_date()` 改成"解析失败返回 None", 而 `collect()` 拿它做日期减法
+  (`_date(date) - datetime.timedelta(days=days_back)`)。**库里非空时**,
+  `report.py --date 2026-13-45` 与 `push_report.py --date 2026-13-45` 都抛
+  `TypeError: unsupported operand type(s) for -: 'NoneType' and 'datetime.timedelta'`,
+  当天日报与推送一起丢, 且是裸 traceback(非中文提示)。空库时因提前 `return None`
+  走不到这行, 更难复现 —— 这正是 A3"半修"留下的坑。
+- 修法: `collect()` 开头解析并校验 date, 非法即抛 `ValueError`; 三个调用方捕获后打
+  中文错误、退出码 2(不再有裸 traceback)。回归: `scripts/test_smoke.py::ReportDateGuardTests`。
+- 影响: 非法/手误日期不再静默丢日报, 报错可读, 退出码可被监控区分。
+
+#### F1 · 评审核闸门阶段 2 忘设 `REVIEW_CHANNEL` → 闸门静默失效, 审阅渠道重复收报
+- 位置: `scripts/push_report.py` `main()` 阶段选择 + `_mark_pending` / 新增 `_pending_channel`
+- 现象: 阶段 2 的"发审阅渠道之外渠道"完全依赖环境变量 `REVIEW_CHANNEL`; `.review-pending/<日期>.flag`
+  里明明记了"已发至 企业微信"却从不读回。阶段 2 换个会话/换台机器执行忘了带这个变量时,
+  代码静默退化成"全量推送"——**微信(已审阅渠道)重复收到日报**, 钉钉也照收, 日志还显示
+  "推送完成(全量)", 看不出闸门没生效。直接违反用户"反馈必须先在原渠道完成再扩散到其它渠道"的红线。
+- 修法: `.review-pending` 标记首行写机器可读的 `review_channel=<显示名>`; 阶段 2 以标记里
+  记录的渠道为准(环境变量只作兜底), 标记缺失才回退环境变量; 输出显式打印"已排除审阅渠道 X"。
+  旧版本写的标记没有该行 → 读回 None → 自动回退, 向后兼容。
+- 回归: `scripts/test_smoke.py::PushReportReviewGateTests`
+  (`test_stage2_without_review_channel_env_still_excludes_review_channel` /
+   `test_stage2_pending_flag_wins_over_mismatched_env` / `test_pending_flag_records_review_channel`)。
+
+#### F2 · `risk.derive_missing()` 遇 `dimension_scores: null` 抛 TypeError, 整批写回中断
+- 位置: `scripts/risk.py` `derive_missing`; `scripts/normalize.py` `fill_defaults`
+- 现象: `setdefault` **不覆盖显式 null**。Agent 研判输出 `"dimension_scores": null`
+  (判"无法评估")或库里记录本身是 null 时, `dims_complete(None)` 抛
+  `TypeError: argument of type 'NoneType' is not iterable`; `risk.py --from-file` 批处理时
+  一条坏记录就让**整批**中断(前面已写回的保留, 后面的全丢)。
+- 修法: `derive_missing` 对非 dict 维度归一为 `{}`; `normalize.fill_defaults` 同样归一;
+  `risk.py --from-file` 逐条 try/except, 单条异常只跳过该条、退出码如实反映失败数。
+- 回归: `scripts/test_smoke.py::RiskNullDimsTests`
+
+#### F3 · IM 卡片"重点关注"漏掉"高影响"
+- 位置: `scripts/push_report.py` `brief_text`
+- 现象: 口径只认"中影响 or 收紧", 把合同里最重的一档**高影响**丢进"其他新增"——
+  用户第一眼看的微信/钉钉卡片反而把最该关注的政策藏起来了; 且 `report.py` 同一口径用的是
+  "高影响 or 收紧", 两处显示层不一致。
+- 修法: 统一为"高影响/中影响/收紧"进重点关注, 排序 高影响 > 中影响 > 收紧;
+  重点条目附研判依据的条件也补上高影响。
+- 回归: `scripts/test_smoke.py::BriefTextFocusTests`
+
+#### F4 · 目录型主机兜底只精确匹配 host, 同站子域漏网
+- 位置: `scripts/normalize.py` `_is_aggregate_url` / `AGGREGATE_HOSTS` / `_host_matches`
+- 现象: `host in AGGREGATE_HOSTS` 是精确匹配, `mcx.fsvps.gov.ru` 这类同站子域不在名单内,
+  同样形态的长描述型目录页可绕过兜底; 顺带发现 `_host_matches` 定义了却**零引用**(死代码)。
+- 修法: 改用后缀匹配(`host == s or host.endswith("." + s)`), 死代码 helper 同时启用。
+
+#### F5 · 目录页黑名单里两条 query 规则是死规则
+- 位置: `scripts/normalize.py` `LIST_URL_PATH_FRAGMENTS` / 新增 `LIST_URL_QUERY_PARAMS`
+- 现象: `"/index.php?list"` 与 `"/?list="` 写在**路径**黑名单里, 但 `_is_aggregate_url`
+  先剥 query 再匹配路径 —— 这两条永远匹配不上。于是 `index.php?list=5`、
+  `notices?list=all&page=2` 这类目录页能绕过拦截(实测 aggregate=False)。
+- 修法: 剥 query 后单独判列表型 query 参数名(`list` / `list[]` / `catid` / `rubric`);
+  取名偏紧以免误伤正文页。
+
+#### F6 · `source.official: 1` 逃生口无留痕, 且白占 `verification_notes`
+- 位置: `scripts/normalize.py` `check_source_domain`
+- 现象: 该分支原来只有一句 `e.setdefault("verification_notes", None)` —— 既没留痕,
+  又把本该由核验环节书写的 `verification_notes` 字段占住(写进去还是 None)。
+  `official: 1` 意味着"该条 tier=1 不靠官方域名库支撑、只靠抽取环节的显式声明",
+  这种记录事后无法与"域名库放行"的记录区分。
+- 修法: 自动写 `source.official_note` 审计留痕(注明主机未收录、需人工复核);
+  `verification_notes` 保持给核验环节。行为不变(tier=1 仍放行)。
+
+#### F7 · `webapp` 报告列表显示名残留疫情分支前缀
+- 位置: `webapp/app.py` `loadReports()`
+- 现象: 剥的是 `-daily-report.md`(疫情分支旧命名), 而政策日报落盘名是
+  `<日期>-policy-report.md` → replace 落空, 列表里显示成 "2026-10-19-policy-report.md"。
+- 修法: 同时剥 `-policy-report.md`。
+
+#### F8 · `webapp/api_summary` 的 `focus_now` 与 `high` 是同一个指标
+- 位置: `webapp/app.py` `api_summary()`
+- 现象: 两个字段算的都是"高影响"条数, 名字不同值相同, 看的人会以为是两个不同指标。
+- 修法: `focus_now` 改按关注档"立即关注"计数(可执行口径), `high` 保持影响等级口径。
+
+#### F9 · `prompts/policy-extraction.md` 的 quote 上限(80 字)与代码(120 字)不一致
+- 位置: `prompts/policy-extraction.md` 规则 5
+- 现象: 提示词比代码严 40 字, Agent 抽取时切得太短, 浪费可溯源信息(运行时不会报错)。
+- 修法: 按 known-issues 建议放宽提示词到 120 字, 与代码/文档一致。
+
+#### F10 · `prompts/policy-impact.md` 未提示"四维齐全时不要手写 score/level/focus"
+- 位置: `prompts/policy-impact.md` 等级映射段
+- 现象: 提示词只给了加权公式, 没明说"由代码推导"。Agent 手写的 score 与四维加权结果
+  相差超过 0.05 分即被 `risk.py` 拒绝写回, 整条研判白跑。
+- 修法: 补一条"四维齐全时留空 score/level/focus, 由 risk.py 推导"。
+
+#### F11 · `run_scan.sh` 在 `$HOME` 未设时因 `set -u` 整段退出
+- 位置: `scripts/run_scan.sh:19`
+- 现象: `[ -f "$HOME/.hermes/.env" ]` 在 HOME 未设置时被 `set -u` 直接打断, 脚本退出,
+  cron/systemd 环境下 HOME 可能 unset。
+- 修法: 改为 `[ -n "${HOME:-}" ] && [ -f "$HOME/.hermes/.env" ] && . ...` 双层守卫。
+
+#### F12 · `skills/daily-report/SKILL.md` 缺"补发/自定义消息"用法
+- 位置: `skills/daily-report/SKILL.md` 步骤 2
+- 现象: 新人不知道"日报已发过怎么补发", 也不知道 `run_scan.sh` fallback 走 `--message` 路径。
+- 修法: 补 `--force` 补发、`--message` 自定义文本、评审核闸门三段用法。
 
 ### 2026-10-18 体检 (commit f7ae1c4 起)
 

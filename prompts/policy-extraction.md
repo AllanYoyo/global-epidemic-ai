@@ -29,9 +29,9 @@
 
 1. **只收"变化"**:必须有明确动作。仅重申既有措施、无新内容的政策解读,不输出该条。
 2. 原文中没有的信息一律填 `null`,严禁编造或推测;生效日期、商品范围、适用地区保留原文口径。
-3. 日期统一为 ISO 8601(YYYY-MM-DD);只知道月份/年份时填该粒度的第一天,由 normalize.py 自动补齐。
+3. 日期统一为 ISO 8601(YYYY-MM-DD);只知道月份/年份时填该粒度的第一天,由 normalize.py 自动补齐。**必须是真实存在的日历日期**:`2026-13-45` / `2026-02-30` / `TBD` / `未知` 这类值会被入库端直接拒收(脏日期还会被"猜"成比窗口还新而混进台账);原文确实没给日期时,不要编,按 `source.publish_date` 填 null 并在 `summary_cn` 注明"原文未载明日期"。
 4. 国名给中英文双份;`policy_domain` 按**主要对象**归类:animal(动物卫生)/ plant(植物保护)/ both(动植物并重)/ trade(进出口贸易程序)/ measures(口岸措施)。
-5. 每条记录必须带 `source`(tier/name/url/publish_date/quote);`quote` 为原文关键句,不超过 80 字。
+5. 每条记录必须带 `source`(tier/name/url/publish_date/quote);`quote` 为原文关键句,不超过 120 字(与 normalize.py / event-schema.md 的硬校验一致)。
 6. `action_type` 取:收紧(新增/加严限制)、放松(取消/简化/放宽)、调整(范围/程序/商品变更)、恢复(解除后重新允许)。国际组织呼吁类无贸易方向变化时记"调整"。
 7. 同一公告含多项独立措施(对多国/多商品)时拆分为多条;同一措施不同来源合并为一条,其余来源放入 `cross_sources`。
 8. **event_id 关联对象必填**:`target_countries` / `products` / `disease_name_en` / `scope` 至少其一非空;原文未涉及任何关联对象(如纯组织内训类公告)时,在 JSON 中加一个 `policy_key` 字段,值是显式标识(如 `internal-training|2026-Q3`),用于兜底 event_id subject,避免与同日同国同领域政策碰撞。

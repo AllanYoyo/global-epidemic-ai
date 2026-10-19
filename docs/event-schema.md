@@ -23,10 +23,11 @@
 | category | string | 自动 | 固定为 `policy`;具体领域使用 `policy_domain` |
 | country_cn / country_en | string | ✅ | 发布/适用政策的国家或地区 |
 | region | string | – | 省州/保护区/口岸范围 |
-| event_date | string | ✅ | 公告/生效日期;政策优先使用 `effective_date` |
+| event_date | string | ✅ | 公告/生效日期;政策优先使用 `effective_date`。**必须是真实日历日期**(YYYY / YYYY-MM / YYYY-MM-DD 三种粒度, 年月粒度自动补第一天; `2026-13-45` / `2026-02-30` / `TBD` 一律拒收, 见 `normalize.py` `validate()`) |
 | effective_date / effective_until | string | – | 生效日/有效期截止日 |
 | source | object | ✅ | tier/name/url/publish_date/quote; quote 不超过 120 字 |
 | source.official | number | – | 官方域名库未收录该国时, 显式声明 `1` 表示该 URL 确为该国官方站点(归一化为 1); 缺省 0 |
+| source.official_note | string | 自动 | 走了 `source.official=1` 逃生口时自动写入的审计留痕: 说明该条 tier=1 **不是**官方域名库支撑、而是靠显式声明放行, 需人工复核 |
 | cross_sources | object[] | – | 其他独立来源 |
 | verification_status | string | 自动 | verified / single_source / unverified / false_positive / merged |
 | verification_notes | string | – | 官方核验结论 |
@@ -80,10 +81,10 @@ verified ──(政策影响研判)──→ 写入 impact_type / impact_level /
 ## 设计原则
 
 1. **可溯源**:政策必须能通过 `source.url` 回到外国政府/国际组织原文。
-2. **来源域名与 tier 自洽**:`source.tier=1` 只能由 `scripts/normalize.py` 的 `OFFICIAL_DOMAIN_SUFFIXES`(政府 `.gov/.gub/.go.*`、EUR-Lex、ePing 等官方域)支撑。第三方站点(行业媒体、他国贸易门户转述、商业数据库)一律降为 tier 3, 且**不得判 `verified`**。该国官方域确实未被收录时,在 `source` 里显式加 `official: 1` 说明。2026-10 实测:入库记录 100% unverified, 逾半数来源是第三方站点却标了 tier 1——此校验就是为堵这个口子。
+2. **来源域名与 tier 自洽**:`source.tier=1` 只能由 `scripts/normalize.py` 的 `OFFICIAL_DOMAIN_SUFFIXES`(政府 `.gov/.gub/.go.*`、EUR-Lex、ePing 等官方域)支撑。第三方站点(行业媒体、他国贸易门户转述、商业数据库)**整条不入库**(强制降 tier 3 + 校验拒收), 只可写进 `search-log.md` 当线索, 且**不得判 `verified`**。该国官方域确实未被收录时,在 `source` 里显式加 `official: 1` 说明——此时该条 tier=1 靠声明而非域名库支撑, 入库端会自动写入 `source.official_note` 留痕待人工复核。2026-10 实测:入库记录 100% unverified, 逾半数来源是第三方站点却标了 tier 1——此校验就是为堵这个口子。
 3. **不编造**:原文没有的商品、日期、影响和建议动作填 null 或“未注明”。
 4. **政策优先**:生产入口、网页、Word、Excel、推送只处理政策变化。
 5. **幂等**:政策主键稳定,重复入库更新原记录并保留 first_seen。
-6. **时间窗(旧闻不入库)**:新增记录的发布时间(`source.publish_date`,缺省 `event_date`)不得早于 `normalize.py --max-age-days` 窗口(默认 7 天,环境变量 `POLICY_MAX_AGE_DAYS` 覆盖,0 关闭)——日报"今日新增"按 first_seen 展示,常年挂网的旧公告一旦入库就会被当成当日新政策;该拦截只针对新增 `event_id`,已入库记录的核验/研判合并更新不受影响,库重建重放镜像 JSON 时传 `--max-age-days 0`。
+6. **时间窗(旧闻不入库)**:新增记录的发布时间(`source.publish_date`,缺省 `event_date`)不得早于 `normalize.py --max-age-days` 窗口(默认 7 天,环境变量 `POLICY_MAX_AGE_DAYS` 覆盖,0 关闭)——日报"今日新增"按 first_seen 展示,常年挂网的旧公告一旦入库就会被当成当日新政策;该拦截只针对新增 `event_id`,已入库记录的核验/研判合并更新不受影响,库重建重放镜像 JSON 时传 `--max-age-days 0`。**日期无法解析(日期不明)按旧闻拒收**——脏日期不允许被"猜"成新政策。
 7. **event_id 关联对象**:新增记录必须给出 `policy_key` / `disease_name_en` / `products` / `target_countries` / `scope` 至少其一, 否则同国/同领域/同动作/同日的两条政策会算出相同 event_id 并被默认合并吞掉。
-8. **目录页/历史归档页拒收(2026-10-19 引入)**:`source.url` 命中已知列表页模式(`vse-soobshcheniya` / `all-notifications` / `archive` / `news-list` / `event-list` / `notification-list` 等,以 `normalize.py` 的 `LIST_URL_PATH_FRAGMENTS` 为准)的记录直接拒收。目录页/历史归档页/全站通知汇总页自身没有页面级发布日期, 把页面内最旧或最新条目的日期当作 `event_date` / `source.publish_date` 会绕过 7 天窗口——复现案例 2026-10-19 fsvps `/vse-soobshcheniya` 整页历史被误读为新政策。**必须**点入目录页内具体条目原 URL, 用条目原 URL 与原页面级发布日期再入库。配套约束在 `prompts/policy-extraction.md` 页面类型判别段与 `skills/global-policy-search/SKILL.md` 步骤 3。
+8. **目录页/历史归档页拒收(2026-10-19 引入)**:目录页/历史归档页/全站通知汇总页/长描述型"信息汇总"页自身没有页面级发布日期, 把页面内最旧或最新条目的日期当作 `event_date` / `source.publish_date` 会绕过 7 天窗口——复现案例 2026-10-19 fsvps `/vse-soobshcheniya` 整页历史被误读为新政策。**必须**点入目录页内具体条目原 URL, 用条目原 URL 与原页面级发布日期再入库。三层拦截(以 `normalize.py` 为准): ①路径片段黑名单 `LIST_URL_PATH_FRAGMENTS`; ②列表型 query 参数 `LIST_URL_QUERY_PARAMS`(如 `?list=` / `?catid=`); ③已知目录主机 `AGGREGATE_HOSTS`(按**后缀**匹配, 同站子域同样适用)且 URL 路径不像"深文章"。配套约束在 `prompts/policy-extraction.md` 页面类型判别段与 `skills/global-policy-search/SKILL.md` 步骤 3。

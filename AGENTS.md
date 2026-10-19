@@ -25,7 +25,7 @@ global-policy-search (skill, 检索入口)
 - **影响加权合同**（risk.py 强校验，须与 prompts/policy-impact.md 一致）：
   `impact_score = trade*0.35 + biosecurity*0.30 + response*0.25 + alignment*0.10`；≥3.5 高影响 / ≥2.0 中影响 / 其余低影响；高→立即关注、中→持续观察、低→常规记录。四维齐全时 score/level/focus 由代码推导，不得手写冲突值。
 - **枚举值是中文**：action_type 收紧|放松|调整|恢复；policy_domain animal|plant|both|trade|measures；impact_type 约束|机会|中性；impact_level 高影响|中影响|低影响；china_relevance 直接涉及中国|间接影响|暂无明显关联；verification_status verified|single_source|unverified|false_positive|merged。
-- **可溯源硬要求**：`source.url` 与 `source.quote`（≤120 字）必填；原文没有的信息填 null，严禁编造。**`source.tier=1` 只能由 `normalize.py` 的 `OFFICIAL_DOMAIN_SUFFIXES`（官方域）支撑**——第三方站点（行业媒体、他国贸易门户转述、商业检疫数据库）强制降 tier 3 且不得判 verified；该国官方域确未收录时在 `source` 里显式加 `official: 1`。新增官方域时同步补进该列表。
+- **可溯源硬要求**：`source.url` 与 `source.quote`（≤120 字）必填；原文没有的信息填 null，严禁编造。**`source.tier=1` 只能由 `normalize.py` 的 `OFFICIAL_DOMAIN_SUFFIXES`（官方域）支撑**——第三方站点（行业媒体、他国贸易门户转述、商业检疫数据库）强制降 tier 3、**且整条拒收不入库**（只可写进 `search-log.md` 当线索），不得判 verified；该国官方域确未收录时在 `source` 里显式加 `official: 1`，此时入库端会自动写 `source.official_note` 留痕待人工复核。新增官方域时同步补进该列表。
 
 ## 常用命令
 
@@ -40,6 +40,7 @@ python scripts/report.py --date YYYY-MM-DD --excel --docx   # 日报（--policy 
 python scripts/push_report.py --date YYYY-MM-DD --dry-run   # 推送（企业微信/钉钉/SMTP）
 REVIEW_CHANNEL=wechat python scripts/push_report.py --date YYYY-MM-DD  # 先审微信（评审核闸门阶段 1）
 python scripts/push_report.py --date YYYY-MM-DD --review-approved  # 审核通过，发完剩余渠道（阶段 2）
+python scripts/push_report.py --date YYYY-MM-DD --force      # 当日已推送过，强制重发
 python webapp/app.py                                        # Flask 面板，默认 0.0.0.0:8000
 scripts/run_scan.sh policy                                  # 定时扫描入口（am|pm|policy）
 ```
@@ -50,8 +51,8 @@ scripts/run_scan.sh policy                                  # 定时扫描入口
 - 数据落地：`data/raw|events|reports/` 与 `database/`、`logs/` 均不入库（gitignore）。生产 VPS 用 `EPIDEMIC_DATA_DIR` / `EPIDEMIC_DB` 指到 repo 之外（/opt/global-epidemic-ai）。
 - 环境变量：run_scan.sh 自动加载 `~/.hermes/.env`；推送渠道 `WECHAT_WEBHOOK` / `DINGTALK_WEBHOOK`(+`DINGTALK_SECRET` 加签) / `SMTP_*`；面板 `DASHBOARD_HOST/PORT`、`RADAR_GEO`、`RADAR_POLICY_GENERATE_CMD`、`RADAR_PUBLIC_URL`；Hermes 无头调用模板 `HERMES_RUN_CMD`（`{PROMPT}` 占位符，未配置时退化为待执行提醒推送）。
 - **评审核闸门(2026-10-19 引入)**：用户在某渠道（微信/钉钉/邮箱）提出测试类请求时，强调"反馈必须先在原渠道完成再扩散到其它渠道"。`scripts/push_report.py` 新增 `REVIEW_CHANNEL` 环境变量（取值 `wechat`/`dingtalk`/`mail`）启用两段式：
-  - **阶段 1**：`push_report.py --date X`（不传 `--review-approved`）→ 只发审阅渠道，写 `data/reports/.review-pending/<日期>.flag`，不写 `.pushed/`；其它渠道不推送。
-  - **阶段 2**：用户在审阅端确认后再调 `push_report.py --date X --review-approved` → 把审阅渠道之外的剩余渠道发完，写 `.pushed/`，清理 `.review-pending/`。
+  - **阶段 1**：`push_report.py --date X`（不传 `--review-approved`）→ 只发审阅渠道，写 `data/reports/.review-pending/<日期>.flag`（首行 `review_channel=<显示名>` 供阶段 2 读回），不写 `.pushed/`；其它渠道不推送。
+  - **阶段 2**：用户在审阅端确认后再调 `push_report.py --date X --review-approved` → 把审阅渠道之外的剩余渠道发完，写 `.pushed/`，清理 `.review-pending/`。**审阅渠道以 `.review-pending` 标记里记录的渠道为准**（`REVIEW_CHANNEL` 只作兜底）：阶段 2 换会话/换机器执行时容易忘带环境变量，原实现会静默退化成"全量推送"，让审阅渠道重复收到日报、直接违反"先在原渠道完成再扩散"的红线——2026-10-19 已修。
   - **不启用**（默认，向后兼容）：不设 `REVIEW_CHANNEL` 时所有配置渠道一次性发出，行为与之前一致。`--message` 自定义文本不走闸门（cron fallback 推"待执行提醒"不能被卡）。
   - Hermes 在某渠道会话中复述"先在原渠道完成反馈"的口径时，应在该渠道对应的 `push_report.py` 调用中临时设置 `REVIEW_CHANNEL=<该渠道>`；用户在原渠道确认后再以 `--review-approved` 释放剩余渠道。
 

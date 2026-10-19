@@ -8,6 +8,7 @@ data/reports/*
 database/
 logs/
 .selftest/
+personal/
 
 # Python
 __pycache__/

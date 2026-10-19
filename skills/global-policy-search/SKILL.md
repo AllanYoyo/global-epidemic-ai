@@ -179,3 +179,19 @@ description: 监测各国政府动植物检疫与进出口管控政策变化。�
 > `python -c "import sys;sys.path.insert(0,'scripts');from normalize import biz_today;print(biz_today())"`
 > 取当前业务日期, **不要**用 `date` 命令或自己算——生产 VPS 系统时区是 `Etc/UTC`,
 > 直接取 UTC 日期会让北京时间早间跑批错一天。
+
+## 评审核闸门(2026-10-19 引入)
+
+用户在某渠道(微信/钉钉/邮箱)提出测试类请求时, 反复强调"反馈必须先在原渠道完成再扩散到其它渠道"。
+本档在 Hermes 调 `push_report.py` 时, 应按用户在哪个渠道提问来设置 `REVIEW_CHANNEL`:
+
+- 用户在**企业微信**里发起的扫描/测试请求 → 该次 `push_report.py` 调用前设
+  `REVIEW_CHANNEL=wechat`, 首跑只发微信, 写 `data/reports/.review-pending/<日期>.flag`。
+  用户在微信端确认后, 再调 `push_report.py --date X --review-approved` 把钉钉/邮箱发完。
+- 同理 `REVIEW_CHANNEL=dingtalk` / `REVIEW_CHANNEL=mail`。
+- 不设 `REVIEW_CHANNEL` 时所有渠道一次性发, 行为与之前一致, 适用于 cron 全量推送。
+- `--message` 自定义文本不走闸门(避免 cron fallback 的"待执行提醒"被卡)。
+
+为什么不能只在 chat 里强调: push_report.py 旧版"配了哪个发哪个, 一发全发", 没有 review-gate
+状态机, 无论 chat 怎么强调都无效; 本工作流必须靠 `REVIEW_CHANNEL` + `--review-approved`
+落地。详见 `scripts/push_report.py` 模块 docstring。

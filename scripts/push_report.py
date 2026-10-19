@@ -11,14 +11,42 @@
   DINGTALK_SECRET      钉钉加签密钥(可选, 安全设置选"加签"时必填)
   SMTP_HOST / SMTP_PORT / SMTP_USER / SMTP_PASS / SMTP_TO   邮箱(PORT 默认 465 走 SSL)
   RADAR_PUBLIC_URL     可选, 消息尾部的面板/日报访问链接
+  REVIEW_CHANNEL       (可选) 评审核闸门的目标渠道, 取值 wechat|dingtalk|mail;
+                       设为非空时启用"先审后发"两段式: 首跑只发该渠道并写
+                       .review-pending.<日期>.flag, 待人工在审阅端确认后用
+                       --review-approved 才把其余渠道发完, 详见下文"评审核闸门"。
 
 用法:
   python push_report.py --date 2026-09-12
   python push_report.py --date 2026-09-12 --dry-run
   python push_report.py --date 2026-09-12 --force   # 当日已推送过, 强制重发
+  python push_report.py --date 2026-09-12 --review-approved   # 审核通过, 发完剩余渠道
 
 幂等: 日报摘要在同一天只发送一次, 成功后写 data/reports/.pushed/<日期>.flag;
 重复调用自动跳过(防止 agent/定时任务重复推送)。--message 自定义消息不受限。
+
+评审核闸门(2026-10-19 引入)
+----------------------------
+背景: 用户在微信/钉钉端提出测试或日扫请求时, 强调"反馈必须先在原渠道完成再扩散到其它渠道";
+push_report.py 原版"配了哪个发哪个, 一发全发"做不到这一点 —— cron 触发或 Hermes 复述指令
+都会把消息同时发给所有渠道。
+
+启用: 设环境变量 `REVIEW_CHANNEL=wechat`(取值 wechat / dingtalk / mail)。
+两段式流程:
+  阶段 1(审阅): push_report.py --date X  → 只发审阅渠道(wechat), 写
+                data/reports/.review-pending/<日期>.flag, 不写 .pushed/
+                (此时其它渠道未推送, 二次调用默认跳过, 防误触)
+  阶段 2(批准): 用户在审阅端确认 → push_report.py --date X --review-approved
+                → 把审阅渠道之外的所有已配置渠道发完, 写 .pushed/, 删
+                .review-pending/。下次调用跳过。
+
+典型用法(Hermes 在微信会话里复述"先发微信审"的口径):
+  HERMES_RUN_CMD 不配置时, run_scan.sh cron 会退化推"待执行提醒"; 在 Hermes
+  会话中显式调用 push_report.py 时, 由会话侧把 REVIEW_CHANNEL=wechat 设上,
+  Hermes 收到用户在微信端的"ok / 发钉钉"再 --review-approved。
+
+不启用(默认, 向后兼容): 不设 REVIEW_CHANNEL, 行为与 2026-10-19 之前完全一致:
+所有配置渠道一次性发出, 写 .pushed/。
 """
 import argparse
 import base64
@@ -40,6 +68,13 @@ import report
 from normalize import DATA_DIR, biz_now, biz_today
 
 PUSH_FLAG_DIR = os.path.join(DATA_DIR, "reports", ".pushed")
+PENDING_DIR = os.path.join(DATA_DIR, "reports", ".review-pending")
+# REVIEW_CHANNEL 取值 → (环境变量名, 显示名)
+REVIEW_CHANNEL_MAP = {
+    "wechat": ("WECHAT_WEBHOOK", "企业微信"),
+    "dingtalk": ("DINGTALK_WEBHOOK", "钉钉"),
+    "mail": ("SMTP_HOST", "邮箱"),
+}
 
 
 def _cut(text, nbytes):
@@ -163,6 +198,45 @@ def send_mail(subject, text, docx_path):
     return {"ok": True}
 
 
+def _pending_path(date):
+    return os.path.join(PENDING_DIR, "%s.flag" % date)
+
+
+def _is_pending(date):
+    return os.path.isfile(_pending_path(date))
+
+
+def _mark_pending(date, channel_name):
+    os.makedirs(PENDING_DIR, exist_ok=True)
+    with open(_pending_path(date), "w", encoding="utf-8") as f:
+        f.write("%s 等待审核: 已发至 %s, 待 --review-approved 发完其它渠道\n" %
+                (biz_now(), channel_name))
+
+
+def _clear_pending(date):
+    p = _pending_path(date)
+    if os.path.isfile(p):
+        os.remove(p)
+
+
+def _build_channels(text, date, docx):
+    """按环境变量组装可推送的渠道列表 [(显示名, sender_fn), ...]。
+
+    显示名与 REVIEW_CHANNEL_MAP 中的 review_label 一一对应, 用于评审核闸门的
+    渠道匹配; 因此不带动态后缀(如 SMTP_TO 邮箱地址), 避免 "邮箱(x@y)" vs "邮箱"
+    这种字符串匹配不上。
+    """
+    channels = []
+    if os.environ.get("WECHAT_WEBHOOK"):
+        channels.append(("企业微信", lambda: send_wechat(text)))
+    if os.environ.get("DINGTALK_WEBHOOK"):
+        channels.append(("钉钉", lambda: send_dingtalk(text, "疫见全球·政策监测日报 %s" % date)))
+    if os.environ.get("SMTP_HOST"):
+        # 显示名固定为 "邮箱"(不带 SMTP_TO 邮箱地址), 与 REVIEW_CHANNEL_MAP["mail"] 一致
+        channels.append(("邮箱", lambda: send_mail("疫见全球·政策监测日报 %s" % date, text, docx)))
+    return channels
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="日报推送: 企业微信 / 钉钉 / 邮箱(渠道环境变量见模块 docstring 与 .env.example)")
@@ -172,65 +246,151 @@ def main():
     ap.add_argument("--message", help="发送自定义提醒文本(跳过日报汇总, 供 run_scan.sh 等调用)")
     ap.add_argument("--dry-run", action="store_true", help="只打印消息内容与目标渠道, 不发送")
     ap.add_argument("--force", action="store_true", help="当日日报已推送过也强制重发")
+    ap.add_argument("--review-approved", action="store_true",
+                    help="评审核闸门: 审核通过, 发完审阅渠道之外的其它渠道, "
+                         "并清理 .review-pending/<日期>.flag; 与 REVIEW_CHANNEL=... 配对使用")
     args = ap.parse_args()
 
     flag_path = os.path.join(PUSH_FLAG_DIR, "%s.flag" % args.date)
-    if not args.message and not args.dry_run and not args.force and os.path.isfile(flag_path):
-        # [WARN] 而非 [跳过]: 走的是正常幂等分支, 但外部监控只盯 exit code 会看不出
-        # "今天没推", 与"推送成功"无法区分。WARN 前缀便于告警脚本 grep。
-        print("[WARN] %s 日报已推送过(标记: %s), 本次未推送; 需重发请加 --force"
-              % (args.date, flag_path))
-        return 0
+    pending_path = _pending_path(args.date)
+    review_channel = os.environ.get("REVIEW_CHANNEL", "").strip().lower()
+    review_channel = review_channel if review_channel in REVIEW_CHANNEL_MAP else ""
 
+    # --message 走自定义文本, 不走日报汇总; 也不参与评审核闸门(通常是 cron fallback
+    # 推"待执行提醒", 没有日报可审)。允许照常发到所有渠道(不写 .pushed, 不影响日报幂等)。
     if args.message:
         text = args.message
         docx = None
-    else:
-        data = report.collect(args.date, args.days_back, args.db_path)
-        if data is None:
-            print("[提示] 政策库为空, 无可推送内容。")
+        channels = _build_channels(text, args.date, docx)
+        if args.dry_run or not channels:
+            print(text)
+            print("\n---")
+            if not channels:
+                print("[提示] 未配置任何推送渠道(WECHAT_WEBHOOK / DINGTALK_WEBHOOK / SMTP_*), "
+                      "详见 .env.example")
+                return 1
+            print("[dry-run] 将发送到: %s(未实际发送)" % "、".join(c[0] for c in channels))
+            return 0
+        ok = 0
+        for name, fn in channels:
+            try:
+                fn()
+                print("[OK] %s 推送成功" % name)
+                ok += 1
+            except Exception as exc:
+                print("[失败] %s: %s" % (name, exc))
+        print("\n自定义消息推送完成: %d/%d 个渠道成功。" % (ok, len(channels)))
+        return 0 if ok else 1
+
+    # 走日报汇总分支
+    if not args.dry_run and not args.force:
+        # 终态标记: 全部渠道已完成, 跳过
+        if os.path.isfile(flag_path):
+            # [WARN] 而非 [跳过]: 走的是正常幂等分支, 但外部监控只盯 exit code 会看不出
+            # "今天没推", 与"推送成功"无法区分。WARN 前缀便于告警脚本 grep。
+            print("[WARN] %s 日报已推送过(标记: %s), 本次未推送; 需重发请加 --force"
+                  % (args.date, flag_path))
+            return 0
+        # 审核阶段标记: 只发过审阅渠道, 等 --review-approved
+        if os.path.isfile(pending_path) and not args.review_approved:
+            with open(pending_path, encoding="utf-8") as f:
+                pending_note = f.read().strip()
+            print("[WARN] %s 日报处于待审状态(%s); 本次未推送。\n"
+                  "  审核通过请加 --review-approved; 重审请加 --force(会重发审阅渠道)"
+                  % (args.date, pending_note))
+            return 0
+
+    data = report.collect(args.date, args.days_back, args.db_path)
+    if data is None:
+        print("[提示] 政策库为空, 无可推送内容。")
+        return 1
+    text = brief_text(args.date, data)
+    docx = os.path.join(DATA_DIR, "reports", "%s-policy-report.docx" % args.date)
+    channels = _build_channels(text, args.date, docx)
+
+    # 决定本次实际推送的渠道集合
+    if review_channel:
+        # 评审核闸门模式: 按 --review-approved 区分阶段
+        review_env, review_label = REVIEW_CHANNEL_MAP[review_channel]
+        if not os.environ.get(review_env):
+            print("[失败] REVIEW_CHANNEL=%s 但 %s 未配置, 评审核闸门无法启用"
+                  % (review_channel, review_env))
             return 1
-        text = brief_text(args.date, data)
-        docx = os.path.join(DATA_DIR, "reports", "%s-policy-report.docx" % args.date)
+        if args.review_approved:
+            # 阶段 2: 发审阅渠道之外的所有已配渠道
+            target = [c for c in channels if c[0] != review_label]
+            stage_label = "审核通过(发完剩余渠道)"
+        else:
+            # 阶段 1: 只发审阅渠道
+            target = [c for c in channels if c[0] == review_label]
+            if not target:
+                print("[失败] REVIEW_CHANNEL=%s 但审阅渠道未配置或环境变量名错配"
+                      % review_channel)
+                return 1
+            stage_label = "审核(仅发 %s)" % review_label
+    else:
+        # 普通模式: 全部渠道(向后兼容)
+        target = channels
+        stage_label = "全量"
 
-    channels = []
-    if os.environ.get("WECHAT_WEBHOOK"):
-        channels.append(("企业微信", lambda: send_wechat(text)))
-    if os.environ.get("DINGTALK_WEBHOOK"):
-        channels.append(("钉钉", lambda: send_dingtalk(text, "疫见全球·政策监测日报 %s" % args.date)))
-    if os.environ.get("SMTP_HOST"):
-        channels.append(("邮箱(%s)" % os.environ.get("SMTP_TO", ""),
-                         lambda: send_mail("疫见全球·政策监测日报 %s" % args.date, text, docx)))
+    if not target:
+        if args.dry_run:
+            print("[dry-run] 评审核闸门开启但剩余渠道无配置可发, --review-approved 视为 no-op")
+            return 0
+        # 非 dry-run 阶段 2 命中: 没有任何剩余渠道要发, 视为已结束, 写终态标记
+        if review_channel and args.review_approved:
+            os.makedirs(PUSH_FLAG_DIR, exist_ok=True)
+            with open(flag_path, "w", encoding="utf-8") as f:
+                f.write("%s 已推送(仅审阅渠道 %s, 无剩余渠道)\n" %
+                        (biz_now(), REVIEW_CHANNEL_MAP[review_channel][1]))
+            _clear_pending(args.date)
+            print("[OK] 审阅渠道外无可发渠道, 已写终态标记并清理审核待办")
+            return 0
+        print("[失败] 当前模式无目标渠道")
+        return 1
 
-    if args.dry_run or not channels:
+    if args.dry_run:
         print(text)
         print("\n---")
-        if not channels:
-            print("[提示] 未配置任何推送渠道(WECHAT_WEBHOOK / DINGTALK_WEBHOOK / SMTP_*), "
-                  "详见 .env.example")
-            return 1
-        # dry-run 命中幂等 flag 时显式提示: 不然 Agent 看到 "[dry-run] 将发送到 X" 容易
-        # 误以为今天没推过, 错过 --force 补发时机。
-        if not args.message and os.path.isfile(flag_path):
-            print("[提示] 今日日报已推送过(标记: %s), --dry-run 仅预览不会重发; "
-                  "要重发请加 --force" % flag_path)
-        print("[dry-run] 将发送到: %s(未实际发送)" % "、".join(c[0] for c in channels))
+        if review_channel and not args.review_approved:
+            print("[dry-run] 评审核闸门·阶段 1 预览: 只发 %s(REVIEW_CHANNEL=%s); "
+                  "审阅通过后用 --review-approved 发完剩余渠道"
+                  % (REVIEW_CHANNEL_MAP[review_channel][1], review_channel))
+        elif review_channel and args.review_approved:
+            review_label = REVIEW_CHANNEL_MAP[review_channel][1]
+            remaining = [c[0] for c in channels if c[0] != review_label]
+            if remaining:
+                print("[dry-run] 评审核闸门·阶段 2 预览: 审核通过, 将发送到: %s"
+                      % "、".join(remaining))
+            else:
+                print("[dry-run] 评审核闸门·阶段 2 预览: 审核通过, 剩余渠道无配置可发")
+        else:
+            print("[dry-run] 模式: %s; 将发送到: %s(未实际发送)" %
+                  (stage_label, "、".join(c[0] for c in target)))
         return 0
 
     ok = 0
-    for name, fn in channels:
+    for name, fn in target:
         try:
             fn()
             print("[OK] %s 推送成功" % name)
             ok += 1
         except Exception as exc:
             print("[失败] %s: %s" % (name, exc))
-    print("\n推送完成: %d/%d 个渠道成功。" % (ok, len(channels)))
-    if not args.message and ok == len(channels) and channels:
-        os.makedirs(PUSH_FLAG_DIR, exist_ok=True)
-        with open(flag_path, "w", encoding="utf-8") as f:
-            f.write("%s 已推送: %s\n" % (biz_now(),
-                                         "、".join(c[0] for c in channels)))
+    print("\n推送完成(%s): %d/%d 个渠道成功。" % (stage_label, ok, len(target)))
+
+    # 标记终态: 阶段 1 写 .review-pending, 阶段 2 写 .pushed 并清理待办
+    if not args.message and ok == len(target) and target:
+        if review_channel and not args.review_approved:
+            # 阶段 1 成功: 写待审标记
+            _mark_pending(args.date, REVIEW_CHANNEL_MAP[review_channel][1])
+        else:
+            # 阶段 2 或全量模式: 写终态
+            os.makedirs(PUSH_FLAG_DIR, exist_ok=True)
+            with open(flag_path, "w", encoding="utf-8") as f:
+                f.write("%s 已推送: %s\n" %
+                        (biz_now(), "、".join(c[0] for c in target)))
+            _clear_pending(args.date)
     return 0 if ok else 1
 
 

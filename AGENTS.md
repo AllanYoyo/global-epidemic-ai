@@ -38,6 +38,8 @@ python scripts/normalize.py --input <json> --db     # 入库（支持 - 读 stdi
 python scripts/risk.py --event-id <id> --dim trade=4 --dim biosecurity=3,...   # 影响写回
 python scripts/report.py --date YYYY-MM-DD --excel --docx   # 日报（--policy 已废弃为 no-op）
 python scripts/push_report.py --date YYYY-MM-DD --dry-run   # 推送（企业微信/钉钉/SMTP）
+REVIEW_CHANNEL=wechat python scripts/push_report.py --date YYYY-MM-DD  # 先审微信（评审核闸门阶段 1）
+python scripts/push_report.py --date YYYY-MM-DD --review-approved  # 审核通过，发完剩余渠道（阶段 2）
 python webapp/app.py                                        # Flask 面板，默认 0.0.0.0:8000
 scripts/run_scan.sh policy                                  # 定时扫描入口（am|pm|policy）
 ```
@@ -47,6 +49,11 @@ scripts/run_scan.sh policy                                  # 定时扫描入口
 - scripts 内**同级导入**：risk.py `from normalize import ...`；report.py 和 webapp/app.py 靠 `sys.path.insert` 引入 scripts/ 与 templates/（Excel 样式工具在 `templates/base.py`）。因此一律从**仓库根目录**以 `python scripts/xxx.py` 运行；`run_scan.sh` 特意 `cd "$REPO"` 即为此（勿删）。
 - 数据落地：`data/raw|events|reports/` 与 `database/`、`logs/` 均不入库（gitignore）。生产 VPS 用 `EPIDEMIC_DATA_DIR` / `EPIDEMIC_DB` 指到 repo 之外（/opt/global-epidemic-ai）。
 - 环境变量：run_scan.sh 自动加载 `~/.hermes/.env`；推送渠道 `WECHAT_WEBHOOK` / `DINGTALK_WEBHOOK`(+`DINGTALK_SECRET` 加签) / `SMTP_*`；面板 `DASHBOARD_HOST/PORT`、`RADAR_GEO`、`RADAR_POLICY_GENERATE_CMD`、`RADAR_PUBLIC_URL`；Hermes 无头调用模板 `HERMES_RUN_CMD`（`{PROMPT}` 占位符，未配置时退化为待执行提醒推送）。
+- **评审核闸门(2026-10-19 引入)**：用户在某渠道（微信/钉钉/邮箱）提出测试类请求时，强调"反馈必须先在原渠道完成再扩散到其它渠道"。`scripts/push_report.py` 新增 `REVIEW_CHANNEL` 环境变量（取值 `wechat`/`dingtalk`/`mail`）启用两段式：
+  - **阶段 1**：`push_report.py --date X`（不传 `--review-approved`）→ 只发审阅渠道，写 `data/reports/.review-pending/<日期>.flag`，不写 `.pushed/`；其它渠道不推送。
+  - **阶段 2**：用户在审阅端确认后再调 `push_report.py --date X --review-approved` → 把审阅渠道之外的剩余渠道发完，写 `.pushed/`，清理 `.review-pending/`。
+  - **不启用**（默认，向后兼容）：不设 `REVIEW_CHANNEL` 时所有配置渠道一次性发出，行为与之前一致。`--message` 自定义文本不走闸门（cron fallback 推"待执行提醒"不能被卡）。
+  - Hermes 在某渠道会话中复述"先在原渠道完成反馈"的口径时，应在该渠道对应的 `push_report.py` 调用中临时设置 `REVIEW_CHANNEL=<该渠道>`；用户在原渠道确认后再以 `--review-approved` 释放剩余渠道。
 
 ## 约定与注意事项
 

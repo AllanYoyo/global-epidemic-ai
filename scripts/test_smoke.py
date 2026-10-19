@@ -11,6 +11,8 @@
 - scripts/normalize.py: 目录/历史归档/全站通知汇总页拒收(2026-10-19 引入;
   source.url 命中 LIST_URL_PATH_FRAGMENTS 即拒收, 不论日期如何)
 - scripts/risk.py: 四维加权合同(score / level / focus 三者一致, 0.05 容差)
+- scripts/push_report.py: 评审核闸门(2026-10-19 引入; REVIEW_CHANNEL + --review-approved
+  两段式, 默认行为向后兼容, --message 自定义文本不走闸门)
 
 用法:
   python scripts/test_smoke.py            # 简洁输出
@@ -21,6 +23,7 @@ import datetime
 import io
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -363,6 +366,185 @@ class AggregateUrlTests(unittest.TestCase):
             "https://example.gov/informationen-ueber-beschraenkungen/",
         ):
             self.assertTrue(self.n._is_aggregate_url(url), url)
+
+
+class PushReportReviewGateTests(unittest.TestCase):
+    """评审核闸门(2026-10-19 引入): 用户在微信/钉钉端提测试请求时, 反馈必须在原渠道完成;
+    评审核闸门强制: REVIEW_CHANNEL=wechat 模式下, 首跑只发微信 + 写 .review-pending,
+    --review-approved 才把剩余渠道发完并清理待办。
+
+    复现 2026-10-19: 用户强调"先微信审核", 但 push_report.py 旧版一发就发齐
+    (WECHAT_WEBHOOK + DINGTALK_WEBHOOK 同时配就同时发), 不分阶段。
+    """
+
+    def setUp(self):
+        import push_report
+        self.pr = push_report
+        self.tmp = tempfile.mkdtemp(prefix="push-gate-")
+        # push_report 在 import 时已经从 normalize 锁定 DATA_DIR, 模块级常量
+        # PUSH_FLAG_DIR / PENDING_DIR 也已基于旧 DATA_DIR 解析。这里把它们
+        # 重新指向当前测试 tmp 目录, 让每个测试用独立的 flag/pending 状态。
+        self.flag_dir = os.path.join(self.tmp, "reports", ".pushed")
+        self.pending_dir = os.path.join(self.tmp, "reports", ".review-pending")
+        self.env_backup = dict(os.environ)
+        os.environ["WECHAT_WEBHOOK"] = "https://test.example/wechat"
+        os.environ["DINGTALK_WEBHOOK"] = "https://test.example/dingtalk"
+        os.environ.pop("REVIEW_CHANNEL", None)
+        os.environ.pop("SMTP_HOST", None)
+
+        self.calls = []
+        self._patches = [
+            mock.patch.object(self.pr, "PUSH_FLAG_DIR", self.flag_dir),
+            mock.patch.object(self.pr, "PENDING_DIR", self.pending_dir),
+            mock.patch.object(self.pr, "send_wechat",
+                              side_effect=lambda t: self.calls.append(("wechat", t))),
+            mock.patch.object(self.pr, "send_dingtalk",
+                              side_effect=lambda t, title: self.calls.append(("dingtalk", t, title))),
+            mock.patch.object(self.pr, "send_mail",
+                              side_effect=lambda s, t, p: self.calls.append(("mail", s, t, p))),
+            mock.patch.object(self.pr.report, "collect",
+                              return_value={"new": [], "active": [], "covered": []}),
+        ]
+        for p in self._patches:
+            p.start()
+
+    def tearDown(self):
+        for p in self._patches:
+            p.stop()
+        os.environ.clear()
+        os.environ.update(self.env_backup)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _run(self, args, env_extra=None):
+        """按指定 args + env 跑 push_report.main(), 收集 stdout。"""
+        if env_extra:
+            for k, v in env_extra.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        buf = io.StringIO()
+        with mock.patch("sys.argv", ["push_report.py"] + args), \
+                redirect_stdout(buf):
+            try:
+                rc = self.pr.main()
+            except SystemExit as e:
+                rc = e.code
+        return rc, buf.getvalue()
+
+    def test_backward_compat_no_review_channel_sends_all(self):
+        # 默认(无 REVIEW_CHANNEL): 所有配置渠道一次性发出, 写 .pushed
+        rc, out = self._run(["--date", "2026-10-19"])
+        self.assertEqual(rc, 0, out)
+        channels_called = {c[0] for c in self.calls}
+        self.assertEqual(channels_called, {"wechat", "dingtalk"}, out)
+        # 终态标记: .pushed/<date>.flag
+        self.assertTrue(os.path.isfile(
+            os.path.join(self.tmp, "reports", ".pushed", "2026-10-19.flag")))
+        # 不写 .review-pending
+        self.assertFalse(os.path.isfile(
+            os.path.join(self.tmp, "reports", ".review-pending", "2026-10-19.flag")))
+
+    def test_review_channel_stage1_sends_only_review(self):
+        # 阶段 1: REVIEW_CHANNEL=wechat, 只发微信 + 写 .review-pending
+        rc, out = self._run(["--date", "2026-10-19"],
+                            env_extra={"REVIEW_CHANNEL": "wechat"})
+        self.assertEqual(rc, 0, out)
+        channels_called = {c[0] for c in self.calls}
+        self.assertEqual(channels_called, {"wechat"}, out)
+        # 阶段 1 写 .review-pending, 不写 .pushed
+        self.assertTrue(os.path.isfile(
+            os.path.join(self.tmp, "reports", ".review-pending", "2026-10-19.flag")))
+        self.assertFalse(os.path.isfile(
+            os.path.join(self.tmp, "reports", ".pushed", "2026-10-19.flag")))
+
+    def test_review_channel_stage2_skips_without_approval(self):
+        # 阶段 1 跑过, 阶段 2 不带 --review-approved → 跳过, 不再发
+        self._run(["--date", "2026-10-19"],
+                  env_extra={"REVIEW_CHANNEL": "wechat"})
+        self.calls.clear()
+        rc, out = self._run(["--date", "2026-10-19"],
+                            env_extra={"REVIEW_CHANNEL": "wechat"})
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.calls, [], out)
+        self.assertIn("待审", out)
+
+    def test_review_channel_stage2_with_approval_sends_remaining(self):
+        # 阶段 1: 仅微信
+        self._run(["--date", "2026-10-19"],
+                  env_extra={"REVIEW_CHANNEL": "wechat"})
+        self.calls.clear()
+        # 阶段 2: --review-approved → 发钉钉, 写 .pushed, 清理 .review-pending
+        rc, out = self._run(["--date", "2026-10-19", "--review-approved"],
+                            env_extra={"REVIEW_CHANNEL": "wechat"})
+        self.assertEqual(rc, 0, out)
+        channels_called = {c[0] for c in self.calls}
+        self.assertEqual(channels_called, {"dingtalk"}, out)
+        self.assertTrue(os.path.isfile(
+            os.path.join(self.tmp, "reports", ".pushed", "2026-10-19.flag")))
+        self.assertFalse(os.path.isfile(
+            os.path.join(self.tmp, "reports", ".review-pending", "2026-10-19.flag")))
+
+    def test_review_channel_unset_env_falls_back_to_all(self):
+        # REVIEW_CHANNEL 设了非法值 → 退化为全量(向后兼容)
+        rc, out = self._run(["--date", "2026-10-19"],
+                            env_extra={"REVIEW_CHANNEL": "unknown-channel"})
+        self.assertEqual(rc, 0, out)
+        channels_called = {c[0] for c in self.calls}
+        self.assertEqual(channels_called, {"wechat", "dingtalk"}, out)
+
+    def test_review_channel_mail_without_smtp_errors(self):
+        # REVIEW_CHANNEL=mail 但 SMTP_HOST 未配 → 报错, 不发任何渠道
+        os.environ.pop("SMTP_HOST", None)
+        rc, out = self._run(["--date", "2026-10-19"],
+                            env_extra={"REVIEW_CHANNEL": "mail"})
+        self.assertNotEqual(rc, 0)
+        self.assertIn("REVIEW_CHANNEL=mail", out)
+        self.assertEqual(self.calls, [])
+
+    def test_review_channel_dingtalk_first_stage(self):
+        # REVIEW_CHANNEL=dingtalk, 阶段 1 只发钉钉
+        rc, out = self._run(["--date", "2026-10-19"],
+                            env_extra={"REVIEW_CHANNEL": "dingtalk"})
+        self.assertEqual(rc, 0, out)
+        channels_called = {c[0] for c in self.calls}
+        self.assertEqual(channels_called, {"dingtalk"}, out)
+        self.assertTrue(os.path.isfile(
+            os.path.join(self.tmp, "reports", ".review-pending", "2026-10-19.flag")))
+
+    def test_review_approved_with_no_remaining_channels_writes_final_flag(self):
+        # 阶段 1 邮件审阅(配 SMTP), 阶段 2 无剩余渠道 → 写终态 + 清理待办
+        os.environ["SMTP_HOST"] = "smtp.test"
+        os.environ["SMTP_USER"] = "u"
+        os.environ["SMTP_PASS"] = "p"
+        os.environ["SMTP_TO"] = "x@y"
+        os.environ.pop("WECHAT_WEBHOOK", None)
+        os.environ.pop("DINGTALK_WEBHOOK", None)
+        self._run(["--date", "2026-10-19"],
+                  env_extra={"REVIEW_CHANNEL": "mail"})
+        self.calls.clear()
+        rc, out = self._run(["--date", "2026-10-19", "--review-approved"],
+                            env_extra={"REVIEW_CHANNEL": "mail"})
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.calls, [])
+        self.assertTrue(os.path.isfile(
+            os.path.join(self.tmp, "reports", ".pushed", "2026-10-19.flag")))
+        self.assertFalse(os.path.isfile(
+            os.path.join(self.tmp, "reports", ".review-pending", "2026-10-19.flag")))
+
+    def test_message_path_bypasses_review_gate(self):
+        # --message 走自定义文本, 不参与评审核闸门(避免 cron fallback 通知被卡)
+        rc, out = self._run(["--date", "2026-10-19",
+                             "--message", "⏰ 提醒"],
+                            env_extra={"REVIEW_CHANNEL": "wechat"})
+        self.assertEqual(rc, 0, out)
+        channels_called = {c[0] for c in self.calls}
+        self.assertEqual(channels_called, {"wechat", "dingtalk"}, out)
+        # --message 不写 .review-pending, 也不写 .pushed
+        self.assertFalse(os.path.isfile(
+            os.path.join(self.tmp, "reports", ".review-pending", "2026-10-19.flag")))
+        self.assertFalse(os.path.isfile(
+            os.path.join(self.tmp, "reports", ".pushed", "2026-10-19.flag")))
 
 
 class NormalizeValidateTests(unittest.TestCase):

@@ -84,6 +84,47 @@
 
 ### 2026-10-19 专项复审 (commit 0459442 之后)
 
+#### G1 · 评审核闸门有 5 条漏法, "只发微信"实际会发到钉钉(用户实测)→ 全部 fail-closed
+- 位置: `scripts/push_report.py`(`main()` 渠道判定 / `--message` 分支 / 幂等早退块);
+  `scripts/run_scan.sh`(am/policy 档 prompt、fallback 提醒); `skills/daily-report/SKILL.md`;
+  `skills/global-policy-search/SKILL.md`; `AGENTS.md`; `README.md`; `TROUBLESHOOTING.md`
+- 用户实测反馈: "测试环节只把内容推送到微信, 刚刚的测试还是发了钉钉群"。
+  逐条复现后确认 5 条漏法(每条都用探针实跑, 不是推测):
+
+  | # | 漏法 | 复现结果 | 后果 |
+  |---|---|---|---|
+  | ① | 渠道名写错/写中文时**静默丢弃** | `REVIEW_CHANNEL=weixin` → 发出 `['wechat','dingtalk']` | 等价于"没设闸门"→ 全量。中文"企业微信"、简写"wx" 最常踩 |
+  | ② | `--force` 绕过待审保护 | 阶段 1 后 `--force` 忘带参数 → `['wechat','dingtalk']` | 钉钉收到 |
+  | ③ | `--message` 完全绕过闸门 | 带 `REVIEW_CHANNEL=wechat` 仍 `['wechat','dingtalk']` | 钉钉收到 |
+  | ④ | 待审期间 `--message` 仍群发 | 阶段 1 后 `--message` → `['wechat','dingtalk']` | 钉钉收到 |
+  | ⑤ | **默认就是全量**(结构性) | 不带任何参数 → `['wechat','dingtalk']` | 任何一次"忘了指定渠道"都会扩散 |
+
+- 根因: 闸门是 **opt-in + fail-open** 设计 —— ①脚本层靠环境变量 opt-in, 认不出的值被
+  静默丢弃(后果是"发所有渠道"而不是"报错不发"); ②`--force` / `--message` 两条路径
+  直接绕过; ③**编排层默认全量**(`run_scan.sh` 的 policy prompt 与两个 skill 的推送
+  步骤写的都是"推送到已配置渠道", "只发审阅渠道"只是附带条件); ④"本轮来自哪个渠道"
+  这个信息没有任何地方承载, 全靠 Agent 每次记得手动设环境变量。
+- 修法(脚本层 + 编排层一起改):
+  - **脚本层 fail-closed**: 认不出的渠道名 → **报错退出**(不再静默丢弃); 新增
+    `--review-channel` 显式参数(优先于环境变量, 命令行里可见可审计)并把中文别名
+    (企业微信/钉钉/邮箱)与简写(wx/wecom/email)纳入白名单; `--broadcast` 与
+    `--review-channel` 互斥。
+  - **消除两条旁路**: 待审期间(存在 `.review-pending`)任何推送, 含 `--force` 与
+    `--message`, 一律只发审阅渠道; `--broadcast` 会被待审标记挡下。
+  - **默认不扩散(堵住 ⑤)**: 日报推送必须显式给出 `--review-channel`(阶段 1)/
+    `--review-approved`(阶段 2)/`--broadcast`(定时全量)之一, 否则**不推送**并以
+    退出码 2 打印三种写法。理由: "忘了指定"的后果应是"没发"(用户马上发现),
+    而不是"发到所有渠道"(要等别人投诉才发现)。定时任务入口 `run_scan.sh` 已改为
+    显式 `--broadcast`, 不受影响。
+  - **编排层**: `run_scan.sh` 的 am/policy 档 prompt 把"推送前**必须先判定本轮是否
+    来自单一渠道会话**"写成前置步骤并给出两条分支命令; `daily-report` skill 把
+    "判定渠道"提为推送的第 0 步; `global-policy-search` skill 同步。
+- 回归: `scripts/test_smoke.py::PushReportReviewGateTests` 新增 12 条
+  (含 5 条漏法逐条锁死 + 2 条对照组: 定时 `--broadcast` 仍全量、阶段 1 仍只发微信);
+  自测 95 → 108 条全绿。
+- 旧用例修正: 4 条老用例把"漏法"当正确行为写死了(其中一条明确断言"非法值应退化为
+  全量"), 已按新合同改写 —— 这本身说明旧测试没能拦住这些漏法。
+
 #### A3 · 脏日期可以让整条日报崩, 还能绕过旧闻窗口混进台账(闭环)
 - 位置: `scripts/normalize.py` `_parse_date` / `_norm_date` / `validate` / `stale_reason`;
   `scripts/report.py` `policy_date` / `collect` / `policy_row` / `make_policy_detail` / `export_table`;

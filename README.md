@@ -59,7 +59,12 @@ python scripts/report.py --date $(date +%F) --excel --docx
 
 # 推送政策日报(企业微信/钉钉/邮箱, 配了哪个发哪个; 建议先 --dry-run 预览)
 python scripts/push_report.py --date $(date +%F) --dry-run
-python scripts/push_report.py --date $(date +%F)          # 同一天只发一次(幂等), 重发需 --force
+# 渠道会话(先在原渠道给用户看, 确认后再发其余渠道):
+python scripts/push_report.py --date $(date +%F) --review-channel wechat
+python scripts/push_report.py --date $(date +%F) --review-approved
+# 定时任务的全量推送(需显式声明):
+python scripts/push_report.py --date $(date +%F) --broadcast
+# 同一天只发一次(幂等), 重发需 --force
 
 # 启动政策监测面板
 python webapp/app.py

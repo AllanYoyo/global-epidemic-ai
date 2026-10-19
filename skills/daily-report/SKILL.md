@@ -23,18 +23,42 @@ description: 生成每日动植物检疫政策监测日报(Markdown + Word 简�
 
    产出 `data/reports/<日期>-policy-report.md` + `.xlsx`(无 openpyxl 时降级 CSV) + `.docx` 政策监测 Word 简报(无 python-docx 时跳过)。
 
-2. (可选)推送办公渠道:
+2. 推送办公渠道(**第 0 步: 先判定渠道, 不得跳过**):
+
+   用户明确要求"反馈必须先在原渠道完成再扩散到其它渠道"。**推送前必须先回答一个问题:
+   本轮请求来自哪个渠道?**
+
+   - **来自单一渠道会话**(用户在微信/钉钉/邮箱里发起的扫描、测试或补发请求):
+     **只能先发那个渠道**, 等用户在该渠道确认后, 再发其余渠道:
+
+     ```bash
+     # 阶段 1: 只发审阅渠道(渠道名按实际渠道替换: wechat / dingtalk / mail, 也认中文别名)
+     python scripts/push_report.py --date <YYYY-MM-DD> --review-channel wechat
+     # 阶段 2: 用户在原渠道确认"可以发"之后, 才发完其余渠道
+     python scripts/push_report.py --date <YYYY-MM-DD> --review-approved
+     ```
+
+     ⚠ **红线**: 未经原渠道用户确认, 不得执行阶段 2, 也不得改用不带
+     `--review-channel` 的命令 —— 那样会把日报发到所有渠道(钉钉/邮箱也会收到),
+     等于绕过"先在原渠道完成"的要求。**当日已推送过**(被幂等跳过)时, 补发要
+     `--force --review-channel <渠道>`, 仍然只发该渠道。
+   - **来自定时任务**(cron `run_scan.sh`, 非渠道会话): 全量推送, 需**显式** `--broadcast`
+     `python scripts/push_report.py --date <YYYY-MM-DD> --broadcast`。
+
+   其它用法:
 
    ```bash
-   python scripts/push_report.py --date <YYYY-MM-DD>   # 企业微信/钉钉/邮箱(SMTP), 未配置自动跳过; --dry-run 预览
+   python scripts/push_report.py --date <YYYY-MM-DD> --dry-run   # 只预览, 不发送
+   python scripts/push_report.py --date <YYYY-MM-DD> --force     # 当日已推送过, 强制重发
    ```
 
-   - 日报当天已推送过(有 `data/reports/.pushed/<日期>.flag`)会被幂等跳过, 补发加 `--force`:
-     `python scripts/push_report.py --date <YYYY-MM-DD> --force`。
-   - `run_scan.sh` 未配 `HERMES_RUN_CMD` 时的 fallback 走 `--message` 路径
-     (自定义提醒文本, 不走日报汇总, 不参与评审核闸门, 也不写 `.pushed`)。
-   - 用户在某个渠道要求"先在原渠道给我看"时: `REVIEW_CHANNEL=wechat python scripts/push_report.py --date <YYYY-MM-DD>`
-     只发微信, 用户确认后 `python scripts/push_report.py --date <YYYY-MM-DD> --review-approved` 发完其余渠道。
+   - **不指定任何范围时脚本不会推送**(退出码 2 并提示三种写法)。这是有意的:
+     扩散必须显式声明, 免得"忘了指定渠道"被当成"发所有渠道"。
+   - 日报当天已推送过(有 `data/reports/.pushed/<日期>.flag`)会被幂等跳过, 补发加 `--force`。
+   - `run_scan.sh` 未配 `HERMES_RUN_CMD` 时的 fallback 走 `--broadcast --message` 路径
+     (面向所有渠道的运维提醒)。但**存在待审标记时**只发审阅渠道。
+   - 用户要求"发邮件给…"/"邮件通知"时, 不走本脚本: 直接调用 Hermes 的 `tuta-webmail` 技能发送
+     (主题纯中文无 emoji, 正文用日报"五问"要点转纯文本; Tuta 免费版无附件, 需附件改用 SMTP 渠道)。
 
    用户要求"发邮件给…"/"邮件通知"时, 不走本脚本: 直接调用 Hermes 的 `tuta-webmail` 技能发送
    (主题纯中文无 emoji, 正文用日报"五问"要点转纯文本; Tuta 免费版无附件, 需附件改用 SMTP 渠道)。

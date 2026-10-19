@@ -68,7 +68,10 @@ python -c "import sqlite3;con=sqlite3.connect('database/epidemic.db');print(con.
 |---|---|
 | 提示"未配置推送渠道"退出码 1 | `WECHAT_WEBHOOK` / `DINGTALK_WEBHOOK` / `SMTP_*` 一个都没配；配哪个发哪个 |
 | 钉钉发不出去 | 安全设置选"加签"时必须同时配 `DINGTALK_SECRET`；webhook 过期需在钉钉群机器人设置里重建 |
-| 同一天重复执行只发了一次 | **这是幂等特性**：成功后写 `data/reports/.pushed/<日期>.flag`；确认有新内容要重发用 `--force` |
+| 同一天重复执行只发了一次 | **这是幂等特性**：成功后写 `data/reports/.pushed/<日期>.flag`；确认有新内容要重发用 `--force`（渠道会话里补发用 `--force --review-channel <渠道>`，仍只发该渠道） |
+| 提示"未指定推送范围"退出码 2，日报没发出去 | **默认不扩散**：必须显式给 `--review-channel <渠道>`（渠道会话阶段 1）、`--review-approved`（阶段 2）或 `--broadcast`（定时全量）之一。这是刻意的 fail-closed，防止"忘了指定渠道"被当成"发所有渠道" |
+| 提示"审阅渠道无法识别"退出码 1 | `--review-channel` 的值认不出。合法值：`wechat` / `dingtalk` / `mail`，也认中文别名（企业微信/钉钉/邮箱）与简写（wx/wecom/email）。**认不出时脚本中止而不是发到所有渠道** |
+| 明明只想发微信，钉钉群也收到了 | ①查是否用了不带 `--review-channel` 的命令（现在默认不推送，不会漏发）；②查该日期是否已有 `.review-pending` 待审标记（有则任何推送都只发审阅渠道）；③查是否走了 `--broadcast` |
 | 想先看效果再发 | `python scripts/push_report.py --date <日期> --dry-run` 只打印不发送 |
 | 邮件没到 | `SMTP_PORT` 默认 465 走 SSL；Tuta 等网页邮箱不经本脚本，由 Hermes 直接调用其 webmail 技能 |
 

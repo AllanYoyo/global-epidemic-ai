@@ -78,7 +78,7 @@ flowchart TD
 |---|---|
 | report.py | 按日期聚合库中记录 → Markdown 速览（政策速览/详情/影响综述/待办/统计/来源）+ Excel 台账（缺 openpyxl 降级 CSV） |
 | report_docx.py | Word 简报（缺 python-docx 跳过） |
-| push_report.py | 企微/钉钉(加签)/SMTP 邮箱，配哪个发哪个；`--dry-run` 只打印；**同日幂等**（`data/reports/.pushed/<日期>.flag`），重发需 `--force`；摘要结构 = 重点关注(中影响/收紧) + 其他新增，每条附原文链接 |
+| push_report.py | 企微/钉钉(加签)/SMTP 邮箱，配哪个发哪个；`--dry-run` 只打印；**同日幂等**（`data/reports/.pushed/<日期>.flag`），重发需 `--force`；摘要结构 = 重点关注(高/中影响、收紧) + 其他新增，每条附原文链接。**推送范围必须显式声明**：`--review-channel <渠道>`(渠道会话阶段 1, 只发该渠道) / `--review-approved`(阶段 2, 发完剩余渠道) / `--broadcast`(定时全量)；三者都不给则不推送(退出码 2) |
 
 ## 3. 数据库 schema 与索引策略
 

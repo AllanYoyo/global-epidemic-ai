@@ -180,20 +180,42 @@ description: 监测各国政府动植物检疫与进出口管控政策变化。�
 > 取当前业务日期, **不要**用 `date` 命令或自己算——生产 VPS 系统时区是 `Etc/UTC`,
 > 直接取 UTC 日期会让北京时间早间跑批错一天。
 
-## 评审核闸门(2026-10-19 引入)
+## 评审核闸门(2026-10-19 引入; 2026-10-19 晚加固)
 
 用户在某渠道(微信/钉钉/邮箱)提出测试类请求时, 反复强调"反馈必须先在原渠道完成再扩散到其它渠道"。
-本档在 Hermes 调 `push_report.py` 时, 应按用户在哪个渠道提问来设置 `REVIEW_CHANNEL`:
 
-- 用户在**企业微信**里发起的扫描/测试请求 → 该次 `push_report.py` 调用前设
-  `REVIEW_CHANNEL=wechat`, 首跑只发微信, 写 `data/reports/.review-pending/<日期>.flag`。
-  用户在微信端确认后, 再调 `push_report.py --date X --review-approved` 把钉钉/邮箱发完。
-- 同理 `REVIEW_CHANNEL=dingtalk` / `REVIEW_CHANNEL=mail`。
-- 阶段 2 的审阅渠道**以 `.review-pending` 标记里记录的渠道为准**, `REVIEW_CHANNEL` 只作兜底:
-  换会话/换机器执行忘了带环境变量也不会让审阅渠道重复收报(2026-10-19 修复)。
-- 不设 `REVIEW_CHANNEL` 时所有渠道一次性发, 行为与之前一致, 适用于 cron 全量推送。
-- `--message` 自定义文本不走闸门(避免 cron fallback 的"待执行提醒"被卡)。
+**推送前必须先判定本轮来自哪个渠道**, 判定结果决定用哪条命令:
 
-为什么不能只在 chat 里强调: push_report.py 旧版"配了哪个发哪个, 一发全发", 没有 review-gate
-状态机, 无论 chat 怎么强调都无效; 本工作流必须靠 `REVIEW_CHANNEL` + `--review-approved`
+- **来自单一渠道会话**(用户在某个渠道里发起本轮请求)→ **只能先发那个渠道**:
+
+  ```bash
+  python scripts/push_report.py --date <YYYY-MM-DD> --review-channel wechat   # 渠道名按实际替换
+  # 用户在该渠道确认"可以发"之后, 才执行:
+  python scripts/push_report.py --date <YYYY-MM-DD> --review-approved
+  ```
+
+  首跑只发审阅渠道并写 `data/reports/.review-pending/<日期>.flag`(首行记录渠道);
+  确认后 `--review-approved` 把其余渠道(钉钉/邮箱)发完并清理待办标记。
+
+  ⚠ **红线**: 未经原渠道用户确认, 不得执行 `--review-approved`, 也不得改用不带
+  `--review-channel` 的命令(那会发到所有渠道)。`--review-channel` 优先于
+  `REVIEW_CHANNEL` 环境变量, 且**渠道名认不得时脚本会报错中止**(不会静默全量)。
+
+- **来自定时任务**(cron `run_scan.sh`, 非渠道会话)→ 全量推送, 需**显式** `--broadcast`:
+  `python scripts/push_report.py --date <YYYY-MM-DD> --broadcast`。
+
+其它约定:
+
+- 阶段 2 的审阅渠道**以 `.review-pending` 标记里记录的渠道为准**, `--review-channel`/
+  `REVIEW_CHANNEL` 只作兜底: 换会话/换机器执行忘了带参数也不会让审阅渠道重复收报。
+- **待审期间**(存在 `.review-pending` 标记)的任何推送, 含 `--force` 与 `--message`,
+  都只发审阅渠道, 不会扩散到其它渠道。
+- `--message` 自定义文本在**没有**待审标记、也**没有**指定审阅渠道时照常群发
+  (cron fallback 的"待执行提醒"不能被卡)。
+- **不指定范围就不推**: 日报推送必须显式给出 `--review-channel`(阶段 1)、
+  `--review-approved`(阶段 2)或 `--broadcast`(定时全量)之一, 否则脚本退出码 2 不推送。
+  "忘了指定"的后果是"没发"(用户马上发现), 而不是"发到所有渠道"(要等别人投诉)。
+
+为什么不能只在 chat 里强调: push_report.py 原版"配了哪个发哪个, 一发全发", 没有 review-gate
+状态机, 无论 chat 怎么强调都无效; 本工作流必须靠 `--review-channel` + `--review-approved`
 落地。详见 `scripts/push_report.py` 模块 docstring。

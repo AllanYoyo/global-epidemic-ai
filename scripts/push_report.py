@@ -17,39 +17,51 @@
                        --review-approved 才把其余渠道发完, 详见下文"评审核闸门"。
 
 用法:
-  python push_report.py --date 2026-09-12
   python push_report.py --date 2026-09-12 --dry-run
-  python push_report.py --date 2026-09-12 --force   # 当日已推送过, 强制重发
-  python push_report.py --date 2026-09-12 --review-approved   # 审核通过, 发完剩余渠道
+  python push_report.py --date 2026-09-12 --review-channel wechat   # 阶段 1: 只发审阅渠道
+  python push_report.py --date 2026-09-12 --review-approved        # 阶段 2: 发完剩余渠道
+  python push_report.py --date 2026-09-12 --broadcast              # 定时任务: 显式全量
+  python push_report.py --date 2026-09-12 --force                  # 当日已推送过, 强制重发
+
+推送范围必须显式声明(2026-10-19 加固):
+  日报推送必须给出 --review-channel(阶段 1) / --review-approved(阶段 2) /
+  --broadcast(定时全量) 之一, 否则**不推送**并以退出码 2 提示。这是刻意的
+  fail-closed: "忘了指定渠道"的后果应是"没发"(用户马上发现), 而不是"发到所有
+  渠道"(要等别人投诉才发现)。
 
 幂等: 日报摘要在同一天只发送一次, 成功后写 data/reports/.pushed/<日期>.flag;
 重复调用自动跳过(防止 agent/定时任务重复推送)。--message 自定义消息不受限。
 
-评审核闸门(2026-10-19 引入)
-----------------------------
+评审核闸门(2026-10-19 引入, 当晚加固)
+------------------------------------
 背景: 用户在微信/钉钉端提出测试或日扫请求时, 强调"反馈必须先在原渠道完成再扩散到其它渠道";
 push_report.py 原版"配了哪个发哪个, 一发全发"做不到这一点 —— cron 触发或 Hermes 复述指令
 都会把消息同时发给所有渠道。
 
-启用: 设环境变量 `REVIEW_CHANNEL=wechat`(取值 wechat / dingtalk / mail)。
+启用: 传 `--review-channel <渠道>`(wechat / dingtalk / mail, 也认中文别名 企业微信/钉钉/邮箱
+与简写 wx/wecom/email); 等价于环境变量 `REVIEW_CHANNEL=wechat`, 命令行参数优先。
 两段式流程:
-  阶段 1(审阅): push_report.py --date X  → 只发审阅渠道(wechat), 写
+  阶段 1(审阅): push_report.py --date X --review-channel wechat → 只发审阅渠道, 写
                 data/reports/.review-pending/<日期>.flag(首行记录审阅渠道),
                 不写 .pushed/(此时其它渠道未推送, 二次调用默认跳过, 防误触)
   阶段 2(批准): 用户在审阅端确认 → push_report.py --date X --review-approved
                 → 把审阅渠道之外的所有已配置渠道发完, 写 .pushed/, 删
                 .review-pending/。下次调用跳过。
-  阶段 2 的审阅渠道以 .review-pending 标记为准, REVIEW_CHANNEL 只作兜底:
+  阶段 2 的审阅渠道以 .review-pending 标记为准, --review-channel 只作兜底:
   2026-10-19 修复 —— 原实现只认环境变量, 阶段 2 忘设 REVIEW_CHANNEL 时会静默
   退化成"全量推送", 审阅渠道重复收到日报, 闸门形同虚设。
 
 典型用法(Hermes 在微信会话里复述"先发微信审"的口径):
-  HERMES_RUN_CMD 不配置时, run_scan.sh cron 会退化推"待执行提醒"; 在 Hermes
-  会话中显式调用 push_report.py 时, 由会话侧把 REVIEW_CHANNEL=wechat 设上,
-  Hermes 收到用户在微信端的"ok / 发钉钉"再 --review-approved。
+  Hermes 收到用户在微信端的请求 → push_report.py --date X --review-channel wechat
+  → 收到用户在微信端的"ok / 发钉钉" → push_report.py --date X --review-approved
 
-不启用(默认, 向后兼容): 不设 REVIEW_CHANNEL, 行为与 2026-10-19 之前完全一致:
-所有配置渠道一次性发出, 写 .pushed/。
+2026-10-19 晚加固(5 条漏法, 全部 fail-closed):
+  ① 渠道名写错(如 weixin)曾被静默丢弃 → 等于"没设闸门" → 全量推送; 现在认不出
+     就报错退出(中文别名/简写已入白名单)。
+  ② --force 曾绕过待审保护 → 现在待审期间只发审阅渠道。
+  ③ --message 曾完全绕过闸门; ④ 待审期间 --message 仍群发 —— 现在都只发审阅渠道。
+  ⑤ "没指定渠道 = 全量发" 是最大的口子: 现在默认**不推送**(退出码 2), 全量必须
+     显式 --broadcast(仅定时任务用)。
 """
 import argparse
 import base64
@@ -77,6 +89,22 @@ REVIEW_CHANNEL_MAP = {
     "wechat": ("WECHAT_WEBHOOK", "企业微信"),
     "dingtalk": ("DINGTALK_WEBHOOK", "钉钉"),
     "mail": ("SMTP_HOST", "邮箱"),
+}
+# 显示名 → 环境变量名(审阅渠道反查, 用于"该渠道到底配没配"的校验)
+REVIEW_CHANNEL_ENV = {
+    "企业微信": "WECHAT_WEBHOOK",
+    "钉钉": "DINGTALK_WEBHOOK",
+    "邮箱": "SMTP_HOST",
+}
+# 渠道别名: 允许中文与常见简写。
+# 2026-10-19 修复(闸门漏法 1): 原实现对无法识别的 REVIEW_CHANNEL 静默丢弃 → 等于
+# "没设闸门" → 走全量分支, 配置写错的后果是**发到所有渠道**而不是"报错不发"。
+# 当时最可能的触发方式就是写成中文"企业微信"或简写"wx"。现在: 别名认得的就用,
+# 认不得的**报错退出**(fail-closed), 绝不静默退化成全量。
+REVIEW_CHANNEL_ALIASES = {
+    "wechat": "wechat", "wx": "wechat", "wecom": "wechat", "企业微信": "wechat",
+    "dingtalk": "dingtalk", "ding": "dingtalk", "钉钉": "dingtalk",
+    "mail": "mail", "email": "mail", "smtp": "mail", "邮箱": "mail", "邮件": "mail",
 }
 
 
@@ -281,27 +309,82 @@ def main():
     ap.add_argument("--message", help="发送自定义提醒文本(跳过日报汇总, 供 run_scan.sh 等调用)")
     ap.add_argument("--dry-run", action="store_true", help="只打印消息内容与目标渠道, 不发送")
     ap.add_argument("--force", action="store_true", help="当日日报已推送过也强制重发")
+    ap.add_argument("--review-channel", metavar="CHANNEL",
+                    help="评审核闸门·阶段 1 的审阅渠道(wechat|dingtalk|mail, 也认中文别名 "
+                         "企业微信/钉钉/邮箱)。只发该渠道并写 .review-pending 待审标记; "
+                         "用户确认后再用 --review-approved 发完其余渠道。"
+                         "命令行参数优先于 REVIEW_CHANNEL 环境变量; 取值无法识别时报错退出")
+    ap.add_argument("--broadcast", action="store_true",
+                    help="显式全量推送(发给所有已配置渠道)。**仅定时任务用**: "
+                         "渠道会话请求必须用 --review-channel, 否则违反"
+                         "\"反馈先在原渠道完成再扩散到其它渠道\"")
     ap.add_argument("--review-approved", action="store_true",
                     help="评审核闸门: 审核通过, 发完审阅渠道之外的其它渠道, "
-                         "并清理 .review-pending/<日期>.flag; 与 REVIEW_CHANNEL=... 配对使用")
+                         "并清理 .review-pending/<日期>.flag; 与 --review-channel 配对使用")
     args = ap.parse_args()
 
     flag_path = os.path.join(PUSH_FLAG_DIR, "%s.flag" % args.date)
     pending_path = _pending_path(args.date)
-    review_channel = os.environ.get("REVIEW_CHANNEL", "").strip().lower()
-    review_channel = review_channel if review_channel in REVIEW_CHANNEL_MAP else ""
 
-    # --message 走自定义文本, 不走日报汇总; 也不参与评审核闸门(通常是 cron fallback
-    # 推"待执行提醒", 没有日报可审)。允许照常发到所有渠道(不写 .pushed, 不影响日报幂等)。
+    # ---- 审阅渠道解析: 显式参数优先, 非法取值 fail-closed ----
+    # 2026-10-19 修复(闸门漏法 1): 原实现把认不出的 REVIEW_CHANNEL 静默丢弃,
+    # 等价于"没设闸门" → 全量推送。名字写错(最常见: 写中文"企业微信"或简写"wx")
+    # 的代价变成"日报发到所有渠道", 正好踩中"先在原渠道完成再扩散"的红线。
+    # 现在认不出的取值**报错退出** —— 宁可不发, 也不发错地方。
+    raw_channel = (args.review_channel if args.review_channel is not None
+                   else os.environ.get("REVIEW_CHANNEL", ""))
+    raw_channel = str(raw_channel or "").strip()
+    review_channel = None
+    if raw_channel:
+        review_channel = REVIEW_CHANNEL_ALIASES.get(raw_channel.lower())
+        if not review_channel:
+            print("[错误] 审阅渠道无法识别: %r" % raw_channel)
+            print("       合法取值: wechat | dingtalk | mail"
+                  "(也认中文别名 企业微信 / 钉钉 / 邮箱)")
+            print("       为避免把日报发到所有渠道, 已中止; 修正后重试。")
+            return 1
+
+    if args.broadcast and review_channel:
+        print("[错误] --broadcast 与 --review-channel 互斥: "
+              "全量推送与\"只发审阅渠道\"不能同时指定")
+        return 1
+
+    # 审阅渠道(阶段 1 要单独发的那个 / 阶段 2 要排除的那个):
+    #   阶段 2(--review-approved): 待审标记里记录的渠道 > 显式指定的渠道
+    #   有待审标记(未批准):        一律用标记里的渠道 —— 待审期间任何推送
+    #                              (含 --force / --message)都不得扩散到其它渠道
+    #   其余:                      显式指定的渠道
+    pending_label = _pending_channel(args.date)
+    env_label = REVIEW_CHANNEL_MAP[review_channel][1] if review_channel else ""
+    if args.review_approved:
+        review_label = pending_label or env_label
+    elif pending_label:
+        review_label = pending_label
+    else:
+        review_label = env_label
+    if args.broadcast and pending_label and not args.review_approved:
+        print("[提示] 该日期存在待审标记, --broadcast 被闸门挡下: 只发审阅渠道 %s; "
+              "用户确认后用 --review-approved 发完其余渠道" % pending_label)
+
+    # --message 走自定义文本, 不走日报汇总(通常是 cron fallback 推"待执行提醒",
+    # 没有日报可审)。但**待审期间**或**显式指定了审阅渠道**时, 自定义文本同样
+    # 不得扩散到其它渠道(2026-10-19 修复闸门漏法 3/4: 原实现 --message 完全
+    # 绕过闸门, 待审期间钉钉群照样收到提醒)。
     if args.message:
         text = args.message
         docx = None
         channels = _build_channels(text, args.date, docx)
+        if review_label:
+            channels = [c for c in channels if c[0] == review_label]
         if args.dry_run or not channels:
             print(text)
             print("\n---")
             if not channels:
-                print("[提示] 未配置任何推送渠道(WECHAT_WEBHOOK / DINGTALK_WEBHOOK / SMTP_*), "
+                if review_label:
+                    print("[失败] 审阅渠道 %s 未配置(%s), 详见 .env.example"
+                          % (review_label, REVIEW_CHANNEL_ENV.get(review_label, "?")))
+                else:
+                    print("[提示] 未配置任何推送渠道(WECHAT_WEBHOOK / DINGTALK_WEBHOOK / SMTP_*), "
                       "详见 .env.example")
                 return 1
             print("[dry-run] 将发送到: %s(未实际发送)" % "、".join(c[0] for c in channels))
@@ -348,23 +431,16 @@ def main():
     channels = _build_channels(text, args.date, docx)
 
     # 决定本次实际推送的渠道集合
-    # 审阅渠道(要排除/要单独发的那个渠道)按下面优先级确定:
-    #   阶段 2(--review-approved): 待审标记里记录的渠道 > REVIEW_CHANNEL 环境变量
-    #   阶段 1(未批准):            REVIEW_CHANNEL 环境变量
-    # 2026-10-19 修正: 原实现阶段 2 只认环境变量, 忘设 REVIEW_CHANNEL 时会静默
-    # 退化成"全量推送" —— 审阅渠道重复收到日报, 闸门形同虚设(实测复现)。
-    pending_label = _pending_channel(args.date)
-    env_label = REVIEW_CHANNEL_MAP[review_channel][1] if review_channel else ""
-    if args.review_approved:
-        review_label = pending_label or env_label
-    else:
-        review_label = env_label
-
-    if review_channel and not args.review_approved:
-        review_env = REVIEW_CHANNEL_MAP[review_channel][0]
-        if not os.environ.get(review_env):
-            print("[失败] REVIEW_CHANNEL=%s 但 %s 未配置, 评审核闸门无法启用"
-                  % (review_channel, review_env))
+    # 审阅渠道(review_label)已在 main() 开头解析完毕, 优先级:
+    #   阶段 2(--review-approved): 待审标记里记录的渠道 > 显式指定的渠道
+    #   有待审标记(未批准):        一律用标记里的渠道(待审期间不得扩散)
+    #   其余:                      显式指定的渠道(--review-channel / REVIEW_CHANNEL)
+    if review_label and not args.review_approved:
+        # 审阅渠道必须真的配了, 否则"只发审阅渠道"= 一条都不发, 要报错而不是静默
+        review_env = REVIEW_CHANNEL_ENV.get(review_label)
+        if not review_env or not os.environ.get(review_env):
+            print("[失败] 审阅渠道 %s 未配置(%s), 评审核闸门无法启用"
+                  % (review_label, review_env or "?"))
             return 1
 
     if review_label:
@@ -379,14 +455,29 @@ def main():
                 print("[失败] 审阅渠道 %s 未配置或环境变量名错配" % review_label)
                 return 1
             stage_label = "审核(仅发 %s)" % review_label
-    else:
-        # 普通模式: 全部渠道(向后兼容)
-        if args.review_approved:
-            # 阶段 2 却读不到审阅渠道(既无待审标记, 也无 REVIEW_CHANNEL):
-            # 只能按全量发, 但必须说明白, 别让人以为闸门生效了。
-            print("[警告] 未读到审阅渠道(无 .review-pending 标记且未设 REVIEW_CHANNEL), 按全量推送")
+    elif args.broadcast:
+        # 显式全量(定时任务)
         target = channels
-        stage_label = "全量"
+        stage_label = "全量(--broadcast)"
+    else:
+        # 2026-10-19 修复(闸门漏法 5): **默认不扩散**。
+        # 原实现是"没指定审阅渠道 = 全量发", 于是任何一次"忘了指定渠道"的调用
+        # (Agent 照抄命令 / 参数拼错 / 换了会话)都会把日报发到所有渠道。
+        # 现在扩散必须**显式声明**(--broadcast), 忘了就变成"不发" ——
+        # "没消息"用户马上会发现, "发到所有渠道"要等别人投诉才发现。
+        if args.review_approved:
+            print("[警告] 未读到审阅渠道(无 .review-pending 标记, 也未指定 --review-channel/"
+                  "REVIEW_CHANNEL), 按全量推送")
+            target = channels
+            stage_label = "全量"
+        else:
+            print("[错误] 未指定推送范围, 已中止(默认不扩散)。请明确选择其一:")
+            print("       · 渠道会话(先在原渠道完成, 确认后再扩散):")
+            print("         python scripts/push_report.py --date %s --review-channel wechat" % args.date)
+            print("         用户确认后: python scripts/push_report.py --date %s --review-approved" % args.date)
+            print("       · 定时任务(全量):")
+            print("         python scripts/push_report.py --date %s --broadcast" % args.date)
+            return 2
 
     if not target:
         if args.dry_run:
@@ -419,9 +510,9 @@ def main():
         print(text)
         print("\n---")
         if review_label and not args.review_approved:
-            print("[dry-run] 评审核闸门·阶段 1 预览: 只发 %s(REVIEW_CHANNEL=%s); "
+            print("[dry-run] 评审核闸门·阶段 1 预览: 只发 %s(审阅渠道=%s); "
                   "审阅通过后用 --review-approved 发完剩余渠道"
-                  % (review_label, review_channel))
+                  % (review_label, raw_channel or review_label))
         elif review_label and args.review_approved:
             remaining = [c[0] for c in channels if c[0] != review_label]
             if remaining:

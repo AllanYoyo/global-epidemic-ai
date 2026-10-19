@@ -465,7 +465,12 @@ class PushReportReviewGateTests(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _run(self, args, env_extra=None):
-        """按指定 args + env 跑 push_report.main(), 收集 stdout。"""
+        """按指定 args + env 跑 push_report.main(), 收集 stdout。
+
+        每次调用前先清掉 REVIEW_CHANNEL(除非 env_extra 显式给), 避免上一条用例
+        残留的环境变量影响下一条(2026-10-19 闸门加固时踩过)。
+        """
+        os.environ.pop("REVIEW_CHANNEL", None)
         if env_extra:
             for k, v in env_extra.items():
                 if v is None:
@@ -482,8 +487,9 @@ class PushReportReviewGateTests(unittest.TestCase):
         return rc, buf.getvalue()
 
     def test_backward_compat_no_review_channel_sends_all(self):
-        # 默认(无 REVIEW_CHANNEL): 所有配置渠道一次性发出, 写 .pushed
-        rc, out = self._run(["--date", "2026-10-19"])
+        # 2026-10-19 闸门加固: 全量推送改为**显式** --broadcast(默认不扩散),
+        # 定时任务的正规入口保持"发所有渠道"。
+        rc, out = self._run(["--date", "2026-10-19", "--broadcast"])
         self.assertEqual(rc, 0, out)
         channels_called = {c[0] for c in self.calls}
         self.assertEqual(channels_called, {"wechat", "dingtalk"}, out)
@@ -535,9 +541,8 @@ class PushReportReviewGateTests(unittest.TestCase):
             os.path.join(self.tmp, "reports", ".review-pending", "2026-10-19.flag")))
 
     def test_review_channel_unset_env_falls_back_to_all(self):
-        # REVIEW_CHANNEL 设了非法值 → 退化为全量(向后兼容)
-        rc, out = self._run(["--date", "2026-10-19"],
-                            env_extra={"REVIEW_CHANNEL": "unknown-channel"})
+        # 真的"没设"审阅渠道 + 显式 --broadcast(定时任务)→ 全量发, 向后兼容
+        rc, out = self._run(["--date", "2026-10-19", "--broadcast"])
         self.assertEqual(rc, 0, out)
         channels_called = {c[0] for c in self.calls}
         self.assertEqual(channels_called, {"wechat", "dingtalk"}, out)
@@ -548,7 +553,8 @@ class PushReportReviewGateTests(unittest.TestCase):
         rc, out = self._run(["--date", "2026-10-19"],
                             env_extra={"REVIEW_CHANNEL": "mail"})
         self.assertNotEqual(rc, 0)
-        self.assertIn("REVIEW_CHANNEL=mail", out)
+        self.assertIn("邮箱", out)
+        self.assertIn("SMTP_HOST", out)
         self.assertEqual(self.calls, [])
 
     def test_review_channel_dingtalk_first_stage(self):
@@ -581,14 +587,15 @@ class PushReportReviewGateTests(unittest.TestCase):
         self.assertFalse(os.path.isfile(
             os.path.join(self.tmp, "reports", ".review-pending", "2026-10-19.flag")))
 
-    def test_message_path_bypasses_review_gate(self):
-        # --message 走自定义文本, 不参与评审核闸门(避免 cron fallback 通知被卡)
+    def test_message_path_respects_review_gate(self):
+        # 2026-10-19 晚加固: --message 曾完全绕过闸门(带 REVIEW_CHANNEL 也照样群发),
+        # 现在渠道会话里的自定义文本同样只发审阅渠道。
         rc, out = self._run(["--date", "2026-10-19",
                              "--message", "⏰ 提醒"],
                             env_extra={"REVIEW_CHANNEL": "wechat"})
         self.assertEqual(rc, 0, out)
         channels_called = {c[0] for c in self.calls}
-        self.assertEqual(channels_called, {"wechat", "dingtalk"}, out)
+        self.assertEqual(channels_called, {"wechat"}, out)
         # --message 不写 .review-pending, 也不写 .pushed
         self.assertFalse(os.path.isfile(
             os.path.join(self.tmp, "reports", ".review-pending", "2026-10-19.flag")))
@@ -634,13 +641,131 @@ class PushReportReviewGateTests(unittest.TestCase):
     def test_pending_channel_missing_returns_none(self):
         self.assertIsNone(self.pr._pending_channel("2099-01-01"))
 
+    # ---- 2026-10-19 晚: 闸门加固(5 条漏法回归) ----
+
+    def test_unrecognized_review_channel_fails_closed(self):
+        # 漏法 1(最致命): 渠道名写错曾被静默丢弃 → 等于"没设闸门" → 全量推送。
+        # 现在认不出就报错中止(中文别名与简写已纳入白名单, 见下面那条用例)。
+        for bad in ("weixin", "unknown-channel", "企业微信群", "corp-wechat"):
+            self.calls.clear()
+            rc, out = self._run(["--date", "2026-10-30"],
+                                env_extra={"REVIEW_CHANNEL": bad})
+            self.assertNotEqual(rc, 0, (bad, out))
+            self.assertIn("无法识别", out)
+            self.assertEqual(self.calls, [], (bad, out))
+
+    def test_review_channel_accepts_chinese_alias(self):
+        # 渠道名认得出就应当按中文别名工作(而不是报错或静默全量)
+        # 每个别名用不同日期, 避免被"同日幂等"标记挡掉
+        aliases = [a for a in ("企业微信", "wx", "wecom", "微信")
+                   if a in self.pr.REVIEW_CHANNEL_ALIASES]
+        for i, alias in enumerate(aliases):
+            self.calls.clear()
+            day = "2026-11-%02d" % (i + 1)
+            rc, out = self._run(["--date", day],
+                                env_extra={"REVIEW_CHANNEL": alias})
+            self.assertEqual(rc, 0, (alias, out))
+            self.assertEqual({c[0] for c in self.calls}, {"wechat"}, (alias, out))
+
+    def test_review_channel_cli_flag_works(self):
+        # 显式参数优先于环境变量, 且渠道在命令行里可见可审计
+        self.calls.clear()
+        rc, out = self._run(["--date", "2026-10-31", "--review-channel", "wechat"])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual({c[0] for c in self.calls}, {"wechat"}, out)
+
+    def test_force_cannot_escape_pending_review_gate(self):
+        # 漏法 2: 阶段 1 落待审后, --force 且忘带渠道参数曾直接全量重发 → 钉钉收到
+        self._run(["--date", "2026-10-20"],
+                  env_extra={"REVIEW_CHANNEL": "wechat"})
+        self.calls.clear()
+        rc, out = self._run(["--date", "2026-10-20", "--force"])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual({c[0] for c in self.calls}, {"wechat"}, out)
+        self.assertNotIn("dingtalk", {c[0] for c in self.calls}, out)
+
+    def test_message_path_respects_review_channel(self):
+        # 漏法 3: --message 曾完全绕过闸门, 带 REVIEW_CHANNEL 也照样群发
+        self.calls.clear()
+        rc, out = self._run(["--date", "2026-10-30", "--message", "⏰ 提醒"],
+                            env_extra={"REVIEW_CHANNEL": "wechat"})
+        self.assertEqual(rc, 0, out)
+        self.assertEqual({c[0] for c in self.calls}, {"wechat"}, out)
+
+    def test_message_path_respects_pending_gate(self):
+        # 漏法 4: 待审期间 --message 提醒仍群发到钉钉
+        self._run(["--date", "2026-10-21"],
+                  env_extra={"REVIEW_CHANNEL": "wechat"})
+        self.calls.clear()
+        rc, out = self._run(["--date", "2026-10-21", "--message", "⏰ 提醒"])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual({c[0] for c in self.calls}, {"wechat"}, out)
+
+    def test_message_without_gate_still_broadcasts(self):
+        # 正常 cron fallback 的"待执行提醒"仍应群发(没有待审标记, 也没指定渠道)
+        self.calls.clear()
+        rc, out = self._run(["--date", "2026-10-30", "--message", "⏰ 提醒"])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual({c[0] for c in self.calls}, {"wechat", "dingtalk"}, out)
+
+    def test_review_channel_not_configured_fails_loudly(self):
+        # 审阅渠道没配 = 一条都发不出去, 要报错而不是静默
+        os.environ.pop("WECHAT_WEBHOOK", None)
+        self.calls.clear()
+        rc, out = self._run(["--date", "2026-10-30", "--review-channel", "wechat"])
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("未配置", out)
+        self.assertEqual(self.calls, [], out)
+
+    def test_no_scope_does_not_push_at_all(self):
+        # 漏法 5(结构性): 原来"没指定渠道 = 全量发", 于是任何一次忘了指定的调用
+        # 都会把日报发到所有渠道。现在默认**不推送**, 扩散必须显式 --broadcast。
+        self.calls.clear()
+        rc, out = self._run(["--date", "2026-10-30"])
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("未指定推送范围", out)
+        self.assertEqual(self.calls, [], out)
+
+    def test_broadcast_sends_all_channels_explicitly(self):
+        # 定时任务的全量推送: 显式 --broadcast 仍然全量发(向后兼容的正规入口)
+        self.calls.clear()
+        rc, out = self._run(["--date", "2026-10-30", "--broadcast"])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual({c[0] for c in self.calls}, {"wechat", "dingtalk"}, out)
+
+    def test_broadcast_and_review_channel_are_mutually_exclusive(self):
+        # "只发微信"与"发所有渠道"不能同时声明
+        self.calls.clear()
+        rc, out = self._run(["--date", "2026-10-30", "--broadcast", "--review-channel", "wechat"])
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("互斥", out)
+        self.assertEqual(self.calls, [], out)
+
+    def test_broadcast_blocked_by_pending_gate(self):
+        # 待审期间 --broadcast 不能扩散, 只发审阅渠道(加 --force 才会真的再走一遍发送)
+        self._run(["--date", "2026-10-22"], env_extra={"REVIEW_CHANNEL": "wechat"})
+        self.calls.clear()
+        rc, out = self._run(["--date", "2026-10-22", "--force", "--broadcast"])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual({c[0] for c in self.calls}, {"wechat"}, out)
+        self.assertIn("待审标记", out)
+
+    def test_pending_gate_blocks_resend_without_force(self):
+        # 待审期间再跑一次(无 --force): 幂等早退, 一条都不发
+        self._run(["--date", "2026-10-23"], env_extra={"REVIEW_CHANNEL": "wechat"})
+        self.calls.clear()
+        rc, out = self._run(["--date", "2026-10-23"])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.calls, [], out)
+        self.assertIn("待审", out)
+
     def test_dry_run_without_channels_says_channel_config_not_review_gate(self):
         # 2026-10-19 修正: 一个推送渠道都没配时, dry-run 原来打的是
         # "评审核闸门开启但剩余渠道无配置可发" —— 闸门根本没开, 这条提示会把人带偏
         # (以为被闸门挡住了, 实际是没配渠道)。
         os.environ.pop("WECHAT_WEBHOOK", None)
         os.environ.pop("DINGTALK_WEBHOOK", None)
-        rc, out = self._run(["--date", "2026-10-19", "--dry-run"])
+        rc, out = self._run(["--date", "2026-10-19", "--broadcast", "--dry-run"])
         self.assertIn("未配置任何推送渠道", out)
         self.assertNotIn("评审核闸门开启", out)
 

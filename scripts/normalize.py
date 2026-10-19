@@ -9,6 +9,10 @@ event_id 已存在时默认合并更新: 空值与兜底默认值不覆盖已有
 新记录带旧闻拦截: 发布时间(source.publish_date, 缺省 event_date)早于
  --max-age-days 窗口(默认 7 天, POLICY_MAX_AGE_DAYS 覆盖, 0 关闭)判为旧闻拒收;
  已入库 event_id 的合并更新不受影响, 防止常年挂网的旧公告被当"今日新增"入日报。
+聚合/目录/历史归档页拒收: source.url 命中已知列表页模式(vse-soobshcheniya /
+ all-notifications / archive / news-list / event-list / notification-list 等)时,
+ 视为目录页而非单条政策来源, 直接拒收; 须点入目录页内具体条目原 URL 后再抽取入库。
+ 详见 check_source_domain() 与 prompts/policy-extraction.md 页面类型判别段。
 日期口径: 一律用本模块的 biz_today()/biz_now()(东八区), 不用宿主机 date.today()
  —— 生产 VPS 系统时区是 Etc/UTC, 直接取 UTC 日期会让北京时间早间跑批整体错一天。
 """
@@ -188,6 +192,62 @@ def _is_third_party(host):
     return any(host == h or host.endswith("." + h) for h in THIRD_PARTY_HINTS)
 
 
+# ---- 已知聚合/目录/历史归档页 URL 模式(2026-10-19 引入) ----
+# 背景: 检索撞到 vse-soobshcheniya(vse-=所有)这类"全部通知"目录页时, 抽取把页面内
+# 最旧条目日期当 event_date, 而 7 天窗口若被 source.publish_date 取自"今天/最近条目"绕过,
+# 就会把整页历史当作新政策入库。目录页本身**没有页面级发布日期**, 不可作为单条政策的来源。
+# 这些 URL 模式命中即拒收: 必须点入目录页内具体条目原 URL 后, 用条目原 URL 与原页面
+# 发布日再入库。配套修改见 prompts/policy-extraction.md / skills/global-policy-search/SKILL.md。
+# 注意: 路径片段都是 lower-case 匹配(URL 解析后小写化路径); query/fragment 不参与。
+# 防止误伤: 仅收录**确实**是"目录/列表/归档"语义的片段, 不收录常见业务子路径。
+LIST_URL_PATH_FRAGMENTS = (
+    # 俄文 "vse-soobshcheniya" = "所有通知"; fsvps 整站通知汇总页
+    "vse-soobshcheniya", "vse_soobshcheniya", "all-soobshcheniya", "all_soobshcheniya",
+    # 英文/葡文/西文 "全部通知/新闻" 常见目录片段
+    "all-notifications", "all_notifications", "all-news", "all_news",
+    "all-press-releases", "all_press_releases",
+    # 历史归档/索引/列表
+    "/archive", "/archives", "/news/archive", "/press/archive",
+    "/news-list", "/newslist", "/news/list", "/news/index",
+    "/press-list", "/presslist", "/press/list",
+    "/media-list", "/medialist", "/media/list",
+    # 列表/索引语义(单词边界, 避免误伤业务子路径)
+    "/index.php?list", "/?list=",
+    # WOAH/FAO 等机构常见的"通报列表/事件列表"页
+    "/event-list", "/eventlist", "/event/list",
+    "/notification-list", "/notificationlist", "/notification/list",
+    "/report-list", "/reportlist", "/report/list",
+    # 法文/西班牙文 "全部新闻/全部通知"
+    "/toutes-les-actualites", "/todas-las-noticias", "/alle-meldungen",
+)
+
+
+def _is_aggregate_url(url):
+    """URL 路径是否命中已知聚合/目录/历史归档页模式(必须点入条目原 URL 抽取)。
+
+    列表页/历史归档页/全站通知汇总页等**目录型** URL, 自身没有页面级发布日期,
+    把页面内某个条目的日期当作 event_date 是误读; 入库端必须拒收这种"来源"。
+
+    返回: True / False。空 URL / 非字符串 / 无路径段 → False。
+    """
+    if not isinstance(url, str) or "//" not in url:
+        return False
+    # 拆 URL: scheme://host/path?query#fragment
+    try:
+        after_scheme = url.split("//", 1)[1]  # "host/path..."
+    except IndexError:
+        return False
+    # 取 path 段(去掉 query 和 fragment)
+    path_and_query = after_scheme.split("/", 1)[1] if "/" in after_scheme else ""
+    path = path_and_query.split("?", 1)[0].split("#", 1)[0]
+    if not path:
+        return False
+    # 标准化: 小写, 补前导 /, 与 LIST_URL_PATH_FRAGMENTS 的 "/xxx" 形式对齐
+    path = "/" + path if not path.startswith("/") else path
+    path = path.lower()
+    return any(frag in path for frag in LIST_URL_PATH_FRAGMENTS)
+
+
 def _host_matches(host, suffixes):
     return any(host == s or host.endswith("." + s) for s in suffixes)
 
@@ -198,12 +258,23 @@ def check_source_domain(e):
     返回 (errors, normalized_event):
     - tier=1 但主机非官方域 -> 报错拒收(除非该国确无已知官方域, 用 source.official=1 显式声明)
     - 命中第三方黑名单 -> tier 强制降为 3, 且不得判 verified
+    - 命中已知聚合/目录页模式 -> 拒收, 不可作为单条政策来源
     """
     errs = []
     src = e.get("source") or {}
     url = src.get("url")
     host = _source_host(url)
     tier = src.get("tier")
+
+    # 聚合/目录/历史归档页: 自身没有页面级发布日期, 把页面内条目日期当 event_date
+    # 是误读。整页不可作为单条政策的来源, 须点入页面内具体条目原 URL 后再抽取入库。
+    # 2026-10-19 引入: 复现 fsvps /vse-soobshcheniya 把 2026-07-31 历史条目误读为新政策
+    if _is_aggregate_url(url):
+        errs.append(
+            "source.url 命中已知聚合/目录/历史归档页模式(%s); 目录页本身没有页面级发布日期, "
+            "不可作为单条政策来源。请点入该目录页内具体条目原 URL 后, 用条目原 URL 与原页面"
+            "发布日再入库; 抽取阶段详见 prompts/policy-extraction.md 页面类型判别段" % url)
+        return errs, e
 
     if host and _is_third_party(host):
         # 第三方站点: 只能是线索。降级并禁止 verified。

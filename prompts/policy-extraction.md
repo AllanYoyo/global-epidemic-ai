@@ -36,7 +36,22 @@
 7. 同一公告含多项独立措施(对多国/多商品)时拆分为多条;同一措施不同来源合并为一条,其余来源放入 `cross_sources`。
 8. **event_id 关联对象必填**:`target_countries` / `products` / `disease_name_en` / `scope` 至少其一非空;原文未涉及任何关联对象(如纯组织内训类公告)时,在 JSON 中加一个 `policy_key` 字段,值是显式标识(如 `internal-training|2026-Q3`),用于兜底 event_id subject,避免与同日同国同领域政策碰撞。
 9. **旧闻不输出**:原始情报头部注明的窗口下限之前发布的条目直接丢弃,不要输出——常年挂网的公告页会被检索撞到,但它们不是新政策变化;`source.publish_date` 必须如实取页面发布日期(meta/日期栏/文首),取不到填 `null`,严禁用检索日期或生效日期冒充,入库端按它做旧闻拦截。
-10. 输出 JSON 数组,除 JSON 外不要输出任何其他文字。
+10. **页面类型判别(2026-10-19 强制)**:
+    - **目录页/历史归档页/全站通知汇总页不可作为单条政策来源**。识别信号(任一即视为目录页):
+      1. URL 路径命中已知列表模式(vse-soobshcheniya / all-notifications / archive /
+         news-list / event-list / notification-list / report-list 等;以 normalize.py
+         `LIST_URL_PATH_FRAGMENTS` 为准);
+      2. 页面没有页面级发布日期(无 meta/日期栏/文首日期),只有页面内列表项各自带日期;
+      3. 页面是"所有通知 / 新闻归档 / 通报列表 / 事件清单"等明确目录语义。
+    - **目录页处理**:**不要**从目录页本身抽取任何政策记录。对每个列表项,点入其
+      原 URL 抓取后,按单条政策流程处理(collect.py → 重新抽取 → normalize.py)。
+      目录页整页无新条目时, 在 search-log.md 标"列表页-无窗口内新条目"。
+    - **冒充页面级发布日期的典型错误**(2026-10-19 复现的 fsvps 案例): 把今天
+      (抓取日) 或目录页内最新条目的日期填入 `source.publish_date` —— 这是
+      绕过 7 天窗口的常见手法, 严格禁止。`source.publish_date` 必须是该 URL
+      自己的页面发布日期(HTML meta / RSS pubDate / 文首日期 / 文末修订日),
+      取不到填 `null`(入库端会拦截; 不允许用目录页内某条目日期冒充)。
+11. 输出 JSON 数组,除 JSON 外不要输出任何其他文字。
 
 ## 字段要点
 

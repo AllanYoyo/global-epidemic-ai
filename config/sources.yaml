@@ -344,7 +344,13 @@ sources:
     track: policy
     lang: [ru]
     method: browse
-    notes: 中俄边境动植物检疫官方源, 全部消息含动物/植物通报列表
+    # 2026-10-19 标记 list_mode: aggregate —— vse-soobshcheniya 是"所有通知"目录页,
+    # 自身无页面级发布日期, 抽取把页面内最旧条目日期当 event_date 会绕过 7 天窗口。
+    # 该源不直接作为单条政策的来源 URL; 必须点入页面内具体条目原 URL 抽取。
+    # 配套兜底: normalize.py 的 LIST_URL_PATH_FRAGMENTS 命中该路径片段会拒收。
+    list_mode: aggregate
+    notes: 中俄边境动植物检疫官方源; vse-soobshcheniya 是全站通知汇总目录页,
+      须逐条点入条目原 URL 抽取(目录页自身不能入库)。
   - id: ru-rshn-khv
     name: 俄罗斯远东兽医监督局(哈巴罗夫斯克/犹太州/马加丹)
     url: https://rshn-khv-eao.ru/

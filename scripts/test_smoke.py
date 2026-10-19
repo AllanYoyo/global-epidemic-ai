@@ -8,6 +8,8 @@
 - scripts/normalize.py: 合并保留 event_id / first_seen
 - scripts/normalize.py: 旧闻拦截(发布时间早于 --max-age-days 窗口的新记录拒收,
   已入库 event_id 的合并更新不受影响, 0 关闭)
+- scripts/normalize.py: 目录/历史归档/全站通知汇总页拒收(2026-10-19 引入;
+  source.url 命中 LIST_URL_PATH_FRAGMENTS 即拒收, 不论日期如何)
 - scripts/risk.py: 四维加权合同(score / level / focus 三者一致, 0.05 容差)
 
 用法:
@@ -244,6 +246,81 @@ class SourceDomainTests(unittest.TestCase):
         for host in ("bangladeshtradeportal.gov.bd", "thebrief.com.na",
                      "agrinfo.eu", "freyrsolutions.com", "www.evs.ee"):
             self.assertTrue(self.n._is_third_party(host), host)
+
+
+class AggregateUrlTests(unittest.TestCase):
+    """目录/历史归档/全站通知汇总页不可作为单条政策来源(2026-10-19 引入)。
+
+    复现案例: 2026-10-19 fsvps /vse-soobshcheniya 整页历史被误读为新政策入库。
+    根因: 目录页自身没有页面级发布日期, 抽取把页面内最旧条目日期当 event_date,
+    7 天窗口若被 source.publish_date 取自"今天/最新条目"绕过就放行。
+    修复: normalize.py 加 LIST_URL_PATH_FRAGMENTS 黑名单, 命中即拒收;
+    配合 prompt / skill / sources.yaml 三层防御。
+    """
+
+    def setUp(self):
+        import normalize
+        self.n = normalize
+
+    def test_fsvps_vse_soobshcheniya_aggregate_url_flagged(self):
+        # 复现 2026-10-19 案例: fsvps /vse-soobshcheniya 是"所有通知"目录页
+        self.assertTrue(self.n._is_aggregate_url(
+            "https://fsvps.gov.ru/ru/vse-soobshcheniya"))
+
+    def test_known_aggregate_url_patterns_caught(self):
+        for url in (
+            "https://fsvps.gov.ru/ru/vse-soobshcheniya",
+            "https://example.gov/news-list",
+            "https://example.gov/news-list/2026",
+            "https://example.gov/news/list?page=2",
+            "https://example.gov/all-notifications",
+            "https://example.gov/press-list",
+            "https://example.gov/archive",
+            "https://example.gov/archives/2026/09",
+            "https://example.gov/news/archive",
+            "https://example.gov/event-list",
+            "https://example.gov/notification-list",
+            "https://example.gov/report-list",
+        ):
+            self.assertTrue(self.n._is_aggregate_url(url), url)
+
+    def test_normal_business_urls_not_flagged(self):
+        # 防误伤: 普通业务子路径 / 单条政策页 / 具体公告 ID 都应放行
+        for url in (
+            "https://fsvps.gov.ru/ru/fsvps/press-service/news/12345",
+            "https://www.aphis.usda.gov/aphis/newsroom/news/sa_by_date/sa-2026",
+            "https://eur-lex.europa.eu/eli/reg/2026/2268/oj",
+            "https://epingalert.org/en/SPS/Notifications/Detail/12345",
+            "https://www.maff.go.jp/j/press/syouan/2026_10_01.html",
+            "https://www.gov.uk/government/news/example-uk-policy-2026",
+            "https://www.federalregister.gov/documents/2026/10/15/2026-12345",
+            # 新闻条目页面: 单词 "list" 在查询参数里不是路径段
+            "https://example.gov/news/article-2026-10-15",
+        ):
+            self.assertFalse(self.n._is_aggregate_url(url), url)
+
+    def test_aggregate_url_validation_rejects_record(self):
+        # 关键回归: 哪怕来源是官方域(fsvps .gov.ru), 命中聚合模式也必须拒收
+        e = _source_event(
+            source={"tier": 1, "name": "fsvps",
+                    "url": "https://fsvps.gov.ru/ru/vse-soobshcheniya",
+                    "publish_date": "2026-10-19", "quote": "目录页内容截取..."})
+        errs = self.n.validate(dict(e))
+        self.assertTrue(any("聚合" in m or "目录" in m for m in errs), errs)
+
+    def test_aggregate_url_rejects_even_with_old_event_date_published_recent(self):
+        # 复现 2026-10-19 绕过 7 天窗口的具体场景:
+        # source.publish_date = 今天(2026-10-19, 抽错"页面访问日"),
+        # event_date = 2026-07-31(目录页内最旧条目日期)。
+        # 没有聚合模式校验时, 这条会被放行(因为 publish_date 在窗口内)；
+        # 加上 LIST_URL_PATH_FRAGMENTS 后, 直接拒收, 不论日期如何。
+        e = _source_event(
+            event_date="2026-07-31", effective_date="2026-07-31",
+            source={"tier": 1, "name": "fsvps",
+                    "url": "https://fsvps.gov.ru/ru/vse-soobshcheniya",
+                    "publish_date": "2026-10-19", "quote": "目录页内容截取..."})
+        errs = self.n.validate(dict(e))
+        self.assertTrue(any("聚合" in m for m in errs), errs)
 
 
 class NormalizeValidateTests(unittest.TestCase):

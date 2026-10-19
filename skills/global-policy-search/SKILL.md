@@ -96,6 +96,15 @@ description: 监测各国政府动植物检疫与进出口管控政策变化。�
    - 在 `search-log.md` 头部注明当天 ISO 星期与实际扫描的条目列表。
 3. **逐条存档**:
    - **先核发布日期再存档**:从页面 meta、日期栏或文首确认发布时间;早于窗口下限的是常年挂网的旧闻,不存档不入库,在 search-log.md 该行末尾标注「跳过-旧闻」;页面完全没有日期线索时先从正文/URL/站点列表页判断,仍无法确认的按旧闻处理并标注「跳过-日期不明」;
+   - **目录页/历史归档页(2026-10-19 强制)**:`config/sources.yaml` 中 `list_mode: aggregate`
+     的源(如 ru-fsvps /vse-soobshcheniya 全站通知汇总页)整体不可作为单条政策的来源 URL。
+     目录页自身没有页面级发布日期, 把页面内最旧/最新条目日期填进 `source.publish_date`
+     是绕过 7 天窗口的典型错误。处理:
+     1. 不对目录页本身 `collect.py` 存档; 在 search-log.md 标「列表页-不直接存档」;
+     2. 对页面内每个列表项, **点入其原 URL**, 抓取条目页, 按"单条政策"流程处理;
+     3. 整页无新条目或无独立 URL 时, 标「列表页-无窗口内新条目」并结束;
+     4. 抽取阶段见 `prompts/policy-extraction.md` 页面类型判别段; 入库端
+        `normalize.py` 的 `LIST_URL_PATH_FRAGMENTS` 是兜底黑名单(命中即拒收)。
    - 网页:`python scripts/collect.py --url "<URL>" --title "<标题>"`(存到 `data/raw/<日期>/`);
    - 搜索摘要:写入 `data/raw/<日期>/search-log.md`(每行:国家 | 主题 | 动作 | 来源 | 标题 | URL | 摘要 | 命中查询)。
 4. **抽取入库**:按 `prompts/policy-extraction.md` 抽取为 `record_type=policy` 的记录(字段见 `docs/event-schema.md`),抽取时在 <<<RAW_FEED>>> 头部第一行注明「窗口下限: YYYY-MM-DD」。汇总到 `data/raw/<日期>/extracted-policy.json` 后:
@@ -145,6 +154,14 @@ description: 监测各国政府动植物检疫与进出口管控政策变化。�
 - **欧盟议题不按成员国拆分**:欧盟动植物检疫为层面统一立法(植物健康 Reg (EU) 2016/2031、动物健康 Reg (EU) 2019/2131),紧急措施由 SANTE 以实施条例/SERS 发布。搜欧盟措施只查 `eu-sante-sers` 与 EUR-Lex,**不要**按法国/德国/意大利/西班牙/荷兰/匈牙利逐国检索——那是同一议题的重复劳动,成员国源已降为 `track: outbreak`。
 - 每条记录必须带 URL 与抓取时间;没有出处的动作线索不进入下一环节。
 - **旧闻不入库**:发布时间(`source.publish_date`,缺省 `event_date`)必须落在时间窗内;检索撞到的历史公告页即使 URL 从未见过也不入库,只在 search-log.md 备注。回补历史需显式放宽 `--max-age-days`,不得关掉校验当日常扫描用。
+- **目录页/历史归档页不可作为单条政策来源(2026-10-19 强制)**:`source.url`
+  命中已知列表页模式(`vse-soobshcheniya` / `all-notifications` / `archive` / `news-list`
+  / `event-list` / `notification-list` 等,以 `normalize.py` 的 `LIST_URL_PATH_FRAGMENTS`
+  为准)时, 整页直接拒收, 须点入目录页内具体条目原 URL 后再用 `source.url`。
+  `source.publish_date` 必须是**该 URL 自己的页面级发布日期**(HTML meta / RSS
+  pubDate / 文首日期 / 文末修订日), 严禁用今天(抓取日)或目录页内某条目日期冒充——
+  这是绕过 7 天窗口的常见手法, 复现案例 2026-10-19 fsvps 目录页误把 2026-07-31
+  历史条目当作新政策入库即因此而来。
 - **动作必须有原文依据**:"疑似将暂停""市场传闻"不入库;仅重申既有措施的公告不收。
 - `action_type` 判定拿不准时保守记"调整",并在 summary_cn 说明,不臆断收紧/放松。
 - Tier 3 媒体的政策消息只作线索,必须回溯官方公告原文后才可入库。

@@ -219,16 +219,74 @@ LIST_URL_PATH_FRAGMENTS = (
     "/report-list", "/reportlist", "/report/list",
     # 法文/西班牙文 "全部新闻/全部通知"
     "/toutes-les-actualites", "/todas-las-noticias", "/alle-meldungen",
+    # ---- 2026-10-19 二次复盘补: 俄式"信息汇总型"长 slug 目录页 ----
+    # 复现 2026-10-19 fsvps /informacija-o-vvedenii-i-snjatii-vremennyh-ogranichenij-na-postavki-
+    # rastitelnoj-produkcii/ —— 翻译为"关于植物产品临时供应限制的引入与解除的信息",
+    # 整页本质是"按国家 × 商品长期汇总的临时限制清单", 没有页面级发布日期。
+    # 这种页 URL 用描述性长 slug(俄语 / 西语 / 法语 / 德语), 不带通用 list/archive 字样,
+    # 单独建一张主题型目录页前缀表; 新增站发现同类长描述型目录页时在此追加。
+    "informacija-o-", "informaciya-o-",        # 俄 "关于...的信息"
+    "svodka-", "svodki-",                       # 俄 "摘要/汇总"
+    "obzor-",                                   # 俄 "概览"
+    "vvedenie-i-snjatie", "vvedenii-i-snjatii",  # 俄 "引入与解除" 复合前缀
+    "vremennye-ogranichenija", "vremennye-ogranicheniya",  # 俄 "临时限制"
+    # 西语 / 法语 "información sobre" 之类
+    "informacion-sobre-", "informations-sur-",
+    # 德语 "Informationen über"
+    "informationen-ueber-", "informationen-uber-",
 )
+
+# ---- 已知"目录型"主机(2026-10-19 引入) ----
+# 这些主机的 `list_mode: aggregate` 在 sources.yaml 已标, 但 agent 可能从站内链接或站内
+# 检索跳到同主机的**另一条**长描述型目录页(不在 LIST_URL_PATH_FRAGMENTS 里), 仍会把
+# 整页历史当新政策入库。这里加 host 级兜底: 目录主机上, 凡 URL 路径**不像"深文章"**
+# (没有 /press/ /news/ /p/ /article/ 等深文章段, 也没有数字 ID 段)的一律视为目录拒收。
+# 复现案例 2026-10-19 fsvps /informacija-o-vvedenii-i-.../rastitelnoj-produkcii/。
+# 新发现同类型目录主机时在此追加。
+AGGREGATE_HOSTS = frozenset({
+    # Rosselkhoznadzor 联邦兽医与植物检疫监督局 —— 整站以"信息页"形式组织临时限制清单
+    "fsvps.gov.ru", "www.fsvps.gov.ru",
+})
+
+# 路径中含这些片段之一 → 视为"深文章"(具体公告/单条政策页), 不被 host 兜底拦
+# 用单复数都收, 避免站点 URL 风格不一致
+_DEEP_ARTICLE_MARKERS = (
+    "/press-service/", "/press/", "/press-release", "/pressreleases/",
+    "/news/", "/news-", "/new/",                  # 站内新闻条目
+    "/article/", "/articles/", "/p/", "/post/",   # CMS 风格
+    "/publication/", "/publications/",
+    "/detail/", "/view/", "/item/",
+    "/document/", "/doc/",                        # 文档
+    "/notice/", "/notices/",                      # 通报
+    "/announcement/", "/announcements/",
+    "/regulation/", "/resolution/", "/order/",    # 法规/决议/命令
+    "/act/", "/acts/",                            # 法律行为
+)
+
+# 路径段含 3+ 位连续数字(典型站内 ID) → 视为具体条目页; 短数字(<3)可能是版本号, 不收
+_ARTICLE_ID_RE = __import__("re").compile(r"/\d{3,}(?:/|$)")
+
+
+def _looks_like_article_path(path):
+    """在 host 兜底里判断: URL 路径是否看起来像一篇具体文章/单条政策条目。"""
+    if any(m in path for m in _DEEP_ARTICLE_MARKERS):
+        return True
+    if _ARTICLE_ID_RE.search(path):
+        return True
+    return False
 
 
 def _is_aggregate_url(url):
-    """URL 路径是否命中已知聚合/目录/历史归档页模式(必须点入条目原 URL 抽取)。
+    """URL 是否命中已知聚合/目录/历史归档页模式(必须点入条目原 URL 抽取)。
 
-    列表页/历史归档页/全站通知汇总页等**目录型** URL, 自身没有页面级发布日期,
-    把页面内某个条目的日期当作 event_date 是误读; 入库端必须拒收这种"来源"。
+    列表页/历史归档页/全站通知汇总页/长描述型信息页等**目录型** URL, 自身没有页面
+    级发布日期, 把页面内某个条目的日期当作 event_date 是误读; 入库端必须拒收。
 
-    返回: True / False。空 URL / 非字符串 / 无路径段 → False。
+    三层判断:
+    1) 路径片段黑名单(LIST_URL_PATH_FRAGMENTS): 通用 list/archive/vse- 等;
+    2) 已知目录主机(AGGREGATE_HOSTS) + URL 路径不像"深文章" → 一律视为目录
+       (复现 fsvps 站内任意"informacija-o-*"长描述型信息页, 这些不在通用黑名单里);
+    3) 返回 True / False。空 URL / 非字符串 / 无路径段 → False。
     """
     if not isinstance(url, str) or "//" not in url:
         return False
@@ -245,7 +303,17 @@ def _is_aggregate_url(url):
     # 标准化: 小写, 补前导 /, 与 LIST_URL_PATH_FRAGMENTS 的 "/xxx" 形式对齐
     path = "/" + path if not path.startswith("/") else path
     path = path.lower()
-    return any(frag in path for frag in LIST_URL_PATH_FRAGMENTS)
+
+    # 第 1 层: 通用黑名单
+    if any(frag in path for frag in LIST_URL_PATH_FRAGMENTS):
+        return True
+
+    # 第 2 层: host 级兜底(已知目录主机 + 路径不像深文章 → 视为目录)
+    host = _source_host(url)
+    if host in AGGREGATE_HOSTS and not _looks_like_article_path(path):
+        return True
+
+    return False
 
 
 def _host_matches(host, suffixes):

@@ -37,12 +37,20 @@
 8. **event_id 关联对象必填**:`target_countries` / `products` / `disease_name_en` / `scope` 至少其一非空;原文未涉及任何关联对象(如纯组织内训类公告)时,在 JSON 中加一个 `policy_key` 字段,值是显式标识(如 `internal-training|2026-Q3`),用于兜底 event_id subject,避免与同日同国同领域政策碰撞。
 9. **旧闻不输出**:原始情报头部注明的窗口下限之前发布的条目直接丢弃,不要输出——常年挂网的公告页会被检索撞到,但它们不是新政策变化;`source.publish_date` 必须如实取页面发布日期(meta/日期栏/文首),取不到填 `null`,严禁用检索日期或生效日期冒充,入库端按它做旧闻拦截。
 10. **页面类型判别(2026-10-19 强制)**:
-    - **目录页/历史归档页/全站通知汇总页不可作为单条政策来源**。识别信号(任一即视为目录页):
+    - **目录页/历史归档页/全站通知汇总页/长描述型"信息汇总"页不可作为单条政策来源**。
+      识别信号(任一即视为目录页):
       1. URL 路径命中已知列表模式(vse-soobshcheniya / all-notifications / archive /
          news-list / event-list / notification-list / report-list 等;以 normalize.py
          `LIST_URL_PATH_FRAGMENTS` 为准);
-      2. 页面没有页面级发布日期(无 meta/日期栏/文首日期),只有页面内列表项各自带日期;
-      3. 页面是"所有通知 / 新闻归档 / 通报列表 / 事件清单"等明确目录语义。
+      2. **URL 主机是已知"目录型"站点**(`sources.yaml` 里标了 `list_mode: aggregate`,
+         当前已知: fsvps.gov.ru;以 normalize.py `AGGREGATE_HOSTS` 为准), **且**
+         URL 路径不含"深文章"标记(`/press/` / `/press-service/` / `/news/` / `/article/`
+         / `/p/` / `/detail/` 等)和 3+ 位数字 ID 段 —— 这种"短 slug 长描述型"页面
+         (典型如 fsvps /informacija-o-vvedenii-i-snjatii-...-rastitelnoj-produkcii/)
+         **一律视为目录页**, 即便路径里没有 vse-/list/archive 等通用字样;
+      3. 页面没有页面级发布日期(无 meta/日期栏/文首日期),只有页面内列表项各自带日期;
+      4. 页面是"所有通知 / 新闻归档 / 通报列表 / 事件清单 / 关于 X 的信息"等
+         明确目录语义。
     - **目录页处理**:**不要**从目录页本身抽取任何政策记录。对每个列表项,点入其
       原 URL 抓取后,按单条政策流程处理(collect.py → 重新抽取 → normalize.py)。
       目录页整页无新条目时, 在 search-log.md 标"列表页-无窗口内新条目"。

@@ -347,10 +347,16 @@ sources:
     # 2026-10-19 标记 list_mode: aggregate —— vse-soobshcheniya 是"所有通知"目录页,
     # 自身无页面级发布日期, 抽取把页面内最旧条目日期当 event_date 会绕过 7 天窗口。
     # 该源不直接作为单条政策的来源 URL; 必须点入页面内具体条目原 URL 抽取。
-    # 配套兜底: normalize.py 的 LIST_URL_PATH_FRAGMENTS 命中该路径片段会拒收。
+    # 2026-10-19 二次复盘: agent 又抓到 fsvps 同站另一条长描述型目录页
+    # /informacija-o-vvedenii-i-snjatii-vremennyh-ogranichenij-na-postavki-rastitelnoj-produkcii/
+    # (关于植物产品临时供应限制的引入与解除信息), URL 里没有通用 list/archive 字样,
+    # 通用黑名单漏匹配。normalize.py 已加 host 级兜底(AGGREGATE_HOSTS 含 fsvps.gov.ru),
+    # 站内任何"路径不像深文章"的 URL 一律视为目录拒收。
     list_mode: aggregate
-    notes: 中俄边境动植物检疫官方源; vse-soobshcheniya 是全站通知汇总目录页,
-      须逐条点入条目原 URL 抽取(目录页自身不能入库)。
+    aggregate_host: fsvps.gov.ru
+    notes: 中俄边境动植物检疫官方源; vse-soobshcheniya 与站内任意"informacija-o-*" /
+      "svodka-*" 等长描述型信息页均为目录页, 须逐条点入条目原 URL 抽取(目录页自身
+      不能入库, 即使带官方 tier 1 也被 normalize.py 拒收)。
   - id: ru-rshn-khv
     name: 俄罗斯远东兽医监督局(哈巴罗夫斯克/犹太州/马加丹)
     url: https://rshn-khv-eao.ru/

@@ -322,6 +322,48 @@ class AggregateUrlTests(unittest.TestCase):
         errs = self.n.validate(dict(e))
         self.assertTrue(any("聚合" in m for m in errs), errs)
 
+    def test_fsvps_long_descriptive_aggregate_url_rejected(self):
+        # 2026-10-19 二次复盘: 通用黑名单没拦住 fsvps 站另一条长描述型目录页
+        # /informacija-o-vvedenii-i-snjatii-vremennyh-ogranichenij-na-postavki-rastitelnoj-produkcii/
+        # 翻译: 关于植物产品临时供应限制的引入与解除的信息。本质是按国家 × 商品
+        # 长期汇总的临时限制清单, 自身没有页面级发布日期。
+        # 修复: host 兜底(AGGREGATE_HOSTS) + _looks_like_article_path 双重判断,
+        # 该 URL 路径里没有 /press/ /news/ /article/ 等深文章标记也没有数字 ID,
+        # → 视为目录拒收。
+        url = ("https://fsvps.gov.ru/informacija-o-vvedenii-i-snjatii-"
+               "vremennyh-ogranichenij-na-postavki-rastitelnoj-produkcii/")
+        self.assertTrue(self.n._is_aggregate_url(url), url)
+        e = _source_event(
+            source={"tier": 1, "name": "fsvps", "url": url,
+                    "publish_date": "2026-10-19",
+                    "quote": "页面是按国家 × 商品长期汇总的临时限制清单"})
+        errs = self.n.validate(dict(e))
+        self.assertTrue(any("聚合" in m for m in errs), errs)
+
+    def test_fsvps_article_path_not_flagged_by_host_fallback(self):
+        # 防 host 兜底误伤: fsvps 站内具体文章页(有 /press-service/ /news/ + 数字 ID)
+        # 应被放行, 不被 host 兜底当作目录。
+        for url in (
+            "https://fsvps.gov.ru/press-service/news/12345",
+            "https://fsvps.gov.ru/ru/press/news/98765",
+            "https://fsvps.gov.ru/news/2026/10/15/some-article-12345",
+            "https://fsvps.gov.ru/article/12345",
+        ):
+            self.assertFalse(self.n._is_aggregate_url(url), url)
+
+    def test_other_aggregate_path_fragments_caught(self):
+        # 2026-10-19 二次复盘补充: 俄式/欧式"信息汇总型"长 slug 前缀
+        for url in (
+            "https://fsvps.gov.ru/svodka-2026-10/",
+            "https://fsvps.gov.ru/obzor-ogranichenij/",
+            "https://fsvps.gov.ru/vvedenii-i-snjatii-vremennyh-ogranichenij/",
+            "https://fsvps.gov.ru/vremennye-ogranichenija-na-postavki/",
+            "https://example.gov/informacion-sobre-restricciones/",
+            "https://example.gov/informations-sur-restrictions/",
+            "https://example.gov/informationen-ueber-beschraenkungen/",
+        ):
+            self.assertTrue(self.n._is_aggregate_url(url), url)
+
 
 class NormalizeValidateTests(unittest.TestCase):
     """P1#2: event_id 关联对象必填, 缺时 validate 拒收。"""

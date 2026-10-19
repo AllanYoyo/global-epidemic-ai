@@ -22,6 +22,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import urllib.parse
 from datetime import date as _date
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -212,7 +213,8 @@ LIST_URL_PATH_FRAGMENTS = (
     "/press-list", "/presslist", "/press/list",
     "/media-list", "/medialist", "/media/list",
     # 列表/索引语义(单词边界, 避免误伤业务子路径)
-    "/index.php?list", "/?list=",
+    # 注意: 带 query 的列表页(index.php?list= / notices?list=all)在下面
+    # LIST_URL_QUERY_PARAMS 单独判定 —— 本表的片段只匹配 path, query 不参与。
     # WOAH/FAO 等机构常见的"通报列表/事件列表"页
     "/event-list", "/eventlist", "/event/list",
     "/notification-list", "/notificationlist", "/notification/list",
@@ -234,6 +236,18 @@ LIST_URL_PATH_FRAGMENTS = (
     "informacion-sobre-", "informations-sur-",
     # 德语 "Informationen über"
     "informationen-ueber-", "informationen-uber-",
+)
+
+# ---- 目录页的 query 型信号(2026-10-19 补) ----
+# 上一版把 "/index.php?list" / "/?list=" 写进 LIST_URL_PATH_FRAGMENTS, 但
+# _is_aggregate_url 会先剥掉 query 再匹配路径 —— 这两条规则永远匹配不上, 属死规则。
+# 现改为: 剥 query 后单独判 query 参数名。
+# 命中即视为目录页: 这些参数名是 CMS/门户的"列表/栏目"入口约定
+# (index.php?list=5 / notices?list=all&page=2 / ?catid=37 ...)。
+# 取名偏紧: "cat" / "category" / "section" 等通用词在正文页 URL 上也常见,
+# 误伤代价大于漏放, 故不收。
+LIST_URL_QUERY_PARAMS = (
+    "list", "list[]", "catid", "rubric",
 )
 
 # ---- 已知"目录型"主机(2026-10-19 引入) ----
@@ -284,8 +298,11 @@ def _is_aggregate_url(url):
 
     三层判断:
     1) 路径片段黑名单(LIST_URL_PATH_FRAGMENTS): 通用 list/archive/vse- 等;
+    1b) query 参数黑名单(LIST_URL_QUERY_PARAMS): index.php?list= / notices?catid= 等
+        列表型入口 —— query 已被剥出 path, 必须在 query 上单独判;
     2) 已知目录主机(AGGREGATE_HOSTS) + URL 路径不像"深文章" → 一律视为目录
        (复现 fsvps 站内任意"informacija-o-*"长描述型信息页, 这些不在通用黑名单里);
+       主机按**后缀**匹配, 同站子域(mcx.fsvps.gov.ru 等)同样适用;
     3) 返回 True / False。空 URL / 非字符串 / 无路径段 → False。
     """
     if not isinstance(url, str) or "//" not in url:
@@ -297,20 +314,31 @@ def _is_aggregate_url(url):
         return False
     # 取 path 段(去掉 query 和 fragment)
     path_and_query = after_scheme.split("/", 1)[1] if "/" in after_scheme else ""
-    path = path_and_query.split("?", 1)[0].split("#", 1)[0]
-    if not path:
+    path, _, query = path_and_query.partition("?")
+    path = path.split("#", 1)[0]
+    query = query.split("#", 1)[0]
+    if not path and not query:
         return False
     # 标准化: 小写, 补前导 /, 与 LIST_URL_PATH_FRAGMENTS 的 "/xxx" 形式对齐
-    path = "/" + path if not path.startswith("/") else path
+    path = "/" + path if path and not path.startswith("/") else path
     path = path.lower()
 
-    # 第 1 层: 通用黑名单
-    if any(frag in path for frag in LIST_URL_PATH_FRAGMENTS):
+    # 第 1 层: 通用黑名单(路径片段)
+    if path and any(frag in path for frag in LIST_URL_PATH_FRAGMENTS):
         return True
+
+    # 第 1b 层: 列表型 query 参数(路径匹配不到时, query 才是信号)
+    if query:
+        try:
+            params = urllib.parse.parse_qs(query, keep_blank_values=True)
+        except ValueError:
+            params = {}
+        if any(k.lower() in LIST_URL_QUERY_PARAMS for k in params):
+            return True
 
     # 第 2 层: host 级兜底(已知目录主机 + 路径不像深文章 → 视为目录)
     host = _source_host(url)
-    if host in AGGREGATE_HOSTS and not _looks_like_article_path(path):
+    if _host_matches(host, AGGREGATE_HOSTS) and not _looks_like_article_path(path):
         return True
 
     return False
@@ -325,7 +353,8 @@ def check_source_domain(e):
 
     返回 (errors, normalized_event):
     - tier=1 但主机非官方域 -> 报错拒收(除非该国确无已知官方域, 用 source.official=1 显式声明)
-    - 命中第三方黑名单 -> tier 强制降为 3, 且不得判 verified
+    - 命中第三方黑名单 -> tier 强制降为 3, 该条**不入库**(只可作 search-log 线索),
+      且不得判 verified
     - 命中已知聚合/目录页模式 -> 拒收, 不可作为单条政策来源
     """
     errs = []
@@ -345,13 +374,14 @@ def check_source_domain(e):
         return errs, e
 
     if host and _is_third_party(host):
-        # 第三方站点: 只能是线索。降级并禁止 verified。
+        # 第三方站点: 只能是线索, 不进政策台账(降 tier 3 + 本条拒收)。
+        # 注意: 这里 append 的都会让 validate 失败 —— 即整条不入库, 而不是"降级后入库"。
         if tier == 1:
             src["tier"] = 3
         if e.get("verification_status") in ("verified",):
             errs.append("来源为第三方站点(%s), 不得判 verified(仅可线索)" % host)
-        errs.append("[线索] 来源主机 %s 非官方站点, 已将 source.tier 降为 3; "
-                    "须回溯该国官方原文后重新入库才能支撑 verified" % host)
+        errs.append("来源主机 %s 命中第三方站点黑名单: 本条不入库(仅可写进 search-log.md 当线索); "
+                    "须回溯该国官方原文后重新入库(tier 已降为 3, 不得判 verified)" % host)
         e["source"] = src
         return errs, e
 
@@ -361,7 +391,14 @@ def check_source_domain(e):
                 "source.tier=1 但来源主机 %s 不在官方域名库内; "
                 "若该国确有本系统未收录的官方域, 在 source 里显式加 official: 1 说明" % host)
         else:
-            e.setdefault("verification_notes", None)
+            # official:1 逃生口: 允许 tier=1, 但必须**留痕** —— 该条 tier=1 不是靠
+            # 官方域名库支撑, 而是靠抽取环节的显式声明, 事后可审计、可回查。
+            # (2026-10-19 修正: 原来这里是 e.setdefault("verification_notes", None),
+            #  既没留痕, 又白占一个本该由核验环节写的字段。)
+            note = ("tier=1 依据 source.official=1 显式声明放行(主机 %s 不在 OFFICIAL_DOMAIN_SUFFIXES "
+                    "内), 非域名库支撑, 请人工复核该 URL 确为该国官方站点" % host)
+            src["official_note"] = note
+            e["source"] = src
     return errs, e
 
 
@@ -400,14 +437,39 @@ def event_id_of(e):
     return hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
 
 
+def _parse_date(value):
+    """把日期串解析为真实的日历日期; 不是合法日期返回 None(不猜)。
+
+    接受 YYYY / YYYY-MM / YYYY-MM-DD, 以及 ISO 日期时间前缀
+    (2026-10-19T00:00:00, 取日期部分)。语义非法一律 None:
+    2026-13-45 / 2026-02-30 / 2026-00-01 / TBD 都不是日期。
+    """
+    s = str(value or "").strip()
+    if not s:
+        return None
+    if len(s) > 10:                      # ISO 日期时间: 取日期部分
+        s = s[:10]
+    try:
+        if len(s) == 4:
+            return datetime.date(int(s), 1, 1)
+        if len(s) == 7:
+            return datetime.date(int(s[:4]), int(s[5:7]), 1)
+        if len(s) == 10:
+            return datetime.date.fromisoformat(s)
+    except ValueError:
+        return None
+    return None
+
+
 def _norm_date(value):
-    """把 YYYY / YYYY-MM 粒度补齐为 YYYY-MM-DD; 长度不合法返回 None(不猜)。"""
-    d = str(value or "").strip()
-    if len(d) == 4:
-        return d + "-01-01"
-    if len(d) == 7:
-        return d + "-01"
-    return d if len(d) == 10 else None
+    """把 YYYY / YYYY-MM 粒度补齐为 YYYY-MM-DD; 不是合法日历日期返回 None(不猜)。
+
+    2026-10-19 修正(A3 闭环): 原实现只按**长度**判断, "2026-13-45" 这类
+    语义非法的 10 位串会被原样返回, 于是旧闻窗口的字符串比较把它当成
+    "比窗口下限还新"而放行 —— 脏日期反而能绕过拦截入库。
+    """
+    d = _parse_date(value)
+    return d.isoformat() if d else None
 
 
 def published_date(e):
@@ -425,11 +487,18 @@ def published_date(e):
 
 
 def stale_reason(e, cutoff):
-    """时间窗校验: 发布时间早于 cutoff(YYYY-MM-DD)判为旧闻, 返回拒收原因; 其余返回 None。"""
+    """时间窗校验: 发布时间早于 cutoff(YYYY-MM-DD)判为旧闻, 返回拒收原因; 其余返回 None。
+
+    2026-10-19 修正(A3 闭环): 日期字段**解析不了**时按"日期不明"拒收(fail closed),
+    不放行。技能红线写明"页面完全没有日期线索时...按旧闻处理"; 入库端已拦掉非法
+    event_date/effective_date, 这里的分支兜住手工构造/存量脏数据。
+    """
     if not cutoff:
         return None
     d = published_date(e)
-    if d and d < cutoff:
+    if d is None:
+        return "日期不明(发布时间/事件日期均不是合法日期, 无法判定新旧)"
+    if d < cutoff:
         return "发布时间 %s 早于窗口下限 %s" % (d, cutoff)
     return None
 
@@ -448,6 +517,14 @@ def validate(e):
             errs.append("缺少必填字段 %s" % key)
     if not (e.get("event_date") or e.get("effective_date")):
         errs.append("政策记录需要 event_date 或 effective_date")
+    # 日期必须是真实的日历日期(2026-10-19 A3 闭环): 2026-13-45 / 2026-02-30 /
+    # "TBD" 这类脏值若放行, 一来旧闻窗口的字符串比较会把它当成"比窗口还新"从而
+    # 绕过拦截, 二来日报表格会原样端出无法辨认的日期。源头拒收, 不给下游留雷。
+    for key in ("event_date", "effective_date"):
+        val = e.get(key)
+        if val and _parse_date(val) is None:
+            errs.append("%s 不是合法日期: %r(应为 YYYY / YYYY-MM / YYYY-MM-DD 的真实日历日期)"
+                        % (key, val))
     if e.get("category") not in (None, "policy"):
         errs.append("政策记录的 category 必须为 policy")
     if e.get("action_type") and e["action_type"] not in POLICY_ACTIONS:
@@ -509,7 +586,10 @@ def fill_defaults(e):
     e.setdefault("impact_rationale", None)
     e.setdefault("china_relevance", None)
     e.setdefault("recommended_action", None)
-    e.setdefault("dimension_scores", {})
+    # dimension_scores 必须是 dict: 显式 null(Agent "无法评估" 时会写 null)若原样保留,
+    # 后续 risk.py 读维度会 TypeError。setdefault 不覆盖显式 null, 故这里显式归一。
+    if not isinstance(e.get("dimension_scores"), dict):
+        e["dimension_scores"] = {}
     e.setdefault("disease_name_cn", None)
     e.setdefault("disease_name_en", None)
     e.setdefault("region", None)
@@ -590,7 +670,10 @@ def write_event_file(e, out_dir):
 def _load_input(spec):
     raw = __import__("sys").stdin.read() if spec == "-" else open(spec, encoding="utf-8").read()
     data = json.loads(raw)
-    return data.get("events") or [data] if isinstance(data, dict) else data
+    records = data.get("events") or [data] if isinstance(data, dict) else data
+    if not isinstance(records, list):
+        raise ValueError("输入的 events 必须是数组(当前是 %s)" % type(records).__name__)
+    return records
 
 
 def main():
@@ -618,6 +701,14 @@ def main():
         if errs:
             failed.append((i, errs))
             continue
+        # 发布日期写坏不等于不可入库(它可以退回 event_date 判新旧), 但必须提醒
+        # 抽取环节: publish_date 应当是页面自己的发布日, 取不到就填 null,
+        # 写 "TBD"/"2026-13-45" 这种值等于把判定依据交给了 event_date。
+        src = e.get("source")
+        pub = src.get("publish_date") if isinstance(src, dict) else None
+        if pub and _parse_date(pub) is None:
+            print("[WARN] 第%d条 source.publish_date 不是合法日期(%r), 旧闻窗口将退回 event_date 判定; "
+                  "取不到请填 null" % (i, pub))
         events.append((i, fill_defaults(dict(e))))
     for i, errs in failed:
         print("[校验失败] 第%d条: %s" % (i, "; ".join(errs)))

@@ -16,7 +16,7 @@ MODE="${1:-am}"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 PY="${PYTHON_BIN:-python3}"
 
-[ -f "$HOME/.hermes/.env" ] && . "$HOME/.hermes/.env"
+[ -n "${HOME:-}" ] && [ -f "$HOME/.hermes/.env" ] && . "$HOME/.hermes/.env"
 
 # 生产 VPS 系统时区是 Etc/UTC, 而 cron 按 Asia/Shanghai 触发。若不显式固定,
 # `date +%F` 取到 UTC 日期, 北京时间早间跑批会整体错一天(2026-10 实测: 10-15

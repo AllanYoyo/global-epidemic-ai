@@ -141,12 +141,15 @@ class SourceDomainTests(unittest.TestCase):
         self.assertEqual(self.n.validate(dict(self.base)), [])
 
     def test_third_party_host_rejected(self):
+        # 2026-10-19 文案修正: 行为不变(第三方来源整条拒收不入库), 只是把错误文案
+        # 改成与实现一致 —— 原文案写"[线索] ... 已将 tier 降为 3", 让人以为会入库。
         e = _source_event(
             source={"tier": 1, "name": "n",
                     "url": "https://freyrsolutions.com/notice/1", "quote": "q"},
             verification_status="unverified")
         errs = self.n.validate(dict(e))
-        self.assertTrue(any("非官方站点" in m for m in errs), errs)
+        self.assertTrue(any("第三方" in m for m in errs), errs)
+        self.assertTrue(any("不入库" in m for m in errs), errs)
 
     def test_third_party_tier_downgraded_to_3(self):
         e = _source_event(
@@ -367,6 +370,52 @@ class AggregateUrlTests(unittest.TestCase):
         ):
             self.assertTrue(self.n._is_aggregate_url(url), url)
 
+    def test_query_type_list_pages_rejected(self):
+        # 2026-10-19 三次复盘: 上一版把 "/index.php?list" / "/?list=" 写进了路径黑名单,
+        # 但 _is_aggregate_url 先剥 query 再匹配路径 —— 这两条规则永远匹配不上(死规则),
+        # 于是 index.php?list=5 / notices?list=all&page=2 这类目录页能绕过拦截。
+        for url in (
+            "https://example.gov/index.php?list=5",
+            "https://example.gov/notices?list=all&page=2",
+            "https://example.gov/press.php?catid=37",
+        ):
+            self.assertTrue(self.n._is_aggregate_url(url), url)
+
+    def test_query_check_does_not_over_block_article_urls(self):
+        # 防误伤: 普通正文页即使带 query 也应放行
+        for url in (
+            "https://www.aphis.usda.gov/newsroom/news/sa-2026?page=2",
+            "https://eur-lex.europa.eu/eli/reg/2026/2268/oj?locale=en",
+            "https://fsvps.gov.ru/press-service/news/12345",
+        ):
+            self.assertFalse(self.n._is_aggregate_url(url), url)
+
+    def test_aggregate_host_fallback_covers_subdomains(self):
+        # 2026-10-19 三次复盘: 目录主机兜底原先是精确匹配 host, 同站子域
+        # (mcx.fsvps.gov.ru 等)不在名单内, 同样形态的长描述型目录页可绕过。
+        for url in (
+            "https://fsvps.gov.ru/dopolnitelnye-svedeniya-2026/",
+            "https://www.fsvps.gov.ru/dopolnitelnye-svedeniya-2026/",
+            "https://mcx.fsvps.gov.ru/dopolnitelnye-svedeniya-2026/",
+        ):
+            self.assertTrue(self.n._is_aggregate_url(url), url)
+        # 深文章页仍放行
+        self.assertFalse(self.n._is_aggregate_url(
+            "https://mcx.fsvps.gov.ru/press-service/news/12345"))
+
+    def test_official_declaration_leaves_audit_trail(self):
+        # 2026-10-19: official:1 逃生口原来既不留痕, 又白占 verification_notes
+        # (本该由核验环节写的字段)。现在写进 source.official_note, 事后可审计。
+        e = _source_event(
+            source={"tier": 1, "name": "n", "official": 1,
+                    "url": "https://somedomain.gov.example/x", "quote": "q"},
+            verification_status="unverified")
+        self.assertEqual(self.n.validate(dict(e)), [])
+        self.assertIn("official_note", e["source"])
+        self.assertIn("somedomain.gov.example", e["source"]["official_note"])
+        # 核验环节的 verification_notes 不得被占用
+        self.assertIsNone(e.get("verification_notes"))
+
 
 class PushReportReviewGateTests(unittest.TestCase):
     """评审核闸门(2026-10-19 引入): 用户在微信/钉钉端提测试请求时, 反馈必须在原渠道完成;
@@ -545,6 +594,98 @@ class PushReportReviewGateTests(unittest.TestCase):
             os.path.join(self.tmp, "reports", ".review-pending", "2026-10-19.flag")))
         self.assertFalse(os.path.isfile(
             os.path.join(self.tmp, "reports", ".pushed", "2026-10-19.flag")))
+
+    def test_stage2_without_review_channel_env_still_excludes_review_channel(self):
+        # 2026-10-19 修复的关键回归: 阶段 2 忘设 REVIEW_CHANNEL 时, 原实现静默退化成
+        # "全量推送", 审阅渠道(微信)重复收到日报, 闸门形同虚设。
+        # 现在阶段 2 以 .review-pending 标记里记录的渠道为准。
+        self._run(["--date", "2026-10-19"],
+                  env_extra={"REVIEW_CHANNEL": "wechat"})
+        self.calls.clear()
+        os.environ.pop("REVIEW_CHANNEL", None)   # 阶段 2 忘带环境变量
+        rc, out = self._run(["--date", "2026-10-19", "--review-approved"])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual({c[0] for c in self.calls}, {"dingtalk"}, out)
+        self.assertTrue(os.path.isfile(
+            os.path.join(self.tmp, "reports", ".pushed", "2026-10-19.flag")))
+        self.assertFalse(os.path.isfile(
+            os.path.join(self.tmp, "reports", ".review-pending", "2026-10-19.flag")))
+
+    def test_stage2_pending_flag_wins_over_mismatched_env(self):
+        # 阶段 1 审的是微信, 阶段 2 环境变量却写成 dingtalk: 必须以标记为准,
+        # 否则会把微信(已审阅渠道)又发一遍, 反而把钉钉漏掉。
+        self._run(["--date", "2026-10-19"],
+                  env_extra={"REVIEW_CHANNEL": "wechat"})
+        self.calls.clear()
+        rc, out = self._run(["--date", "2026-10-19", "--review-approved"],
+                            env_extra={"REVIEW_CHANNEL": "dingtalk"})
+        self.assertEqual(rc, 0, out)
+        self.assertEqual({c[0] for c in self.calls}, {"dingtalk"}, out)
+
+    def test_pending_flag_records_review_channel(self):
+        self._run(["--date", "2026-10-19"],
+                  env_extra={"REVIEW_CHANNEL": "wechat"})
+        path = os.path.join(self.tmp, "reports", ".review-pending", "2026-10-19.flag")
+        with open(path, encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn("review_channel=企业微信", content)
+        self.assertEqual(self.pr._pending_channel("2026-10-19"), "企业微信")
+
+    def test_pending_channel_missing_returns_none(self):
+        self.assertIsNone(self.pr._pending_channel("2099-01-01"))
+
+    def test_dry_run_without_channels_says_channel_config_not_review_gate(self):
+        # 2026-10-19 修正: 一个推送渠道都没配时, dry-run 原来打的是
+        # "评审核闸门开启但剩余渠道无配置可发" —— 闸门根本没开, 这条提示会把人带偏
+        # (以为被闸门挡住了, 实际是没配渠道)。
+        os.environ.pop("WECHAT_WEBHOOK", None)
+        os.environ.pop("DINGTALK_WEBHOOK", None)
+        rc, out = self._run(["--date", "2026-10-19", "--dry-run"])
+        self.assertIn("未配置任何推送渠道", out)
+        self.assertNotIn("评审核闸门开启", out)
+
+    def test_stage2_without_any_review_channel_warns(self):
+        # 阶段 2 却读不到审阅渠道(既无待审标记, 也未设 REVIEW_CHANNEL): 按全量发,
+        # 但必须打警告 —— 不能让人以为闸门生效了。
+        rc, out = self._run(["--date", "2026-10-19", "--review-approved"])
+        self.assertEqual(rc, 0, out)
+        self.assertIn("未读到审阅渠道", out)
+        self.assertEqual({c[0] for c in self.calls}, {"wechat", "dingtalk"}, out)
+
+
+class BriefTextFocusTests(unittest.TestCase):
+    """IM 卡片"重点关注"口径必须与 report.py 一致(2026-10-19 修复)。
+
+    原实现只把"中影响 or 收紧"放进重点关注, 合同里最重的一档"高影响"被丢进
+    "其他新增" —— 用户第一眼看的 IM 卡片反而把最该关注的政策藏起来了。
+    """
+
+    def setUp(self):
+        import push_report
+        self.pr = push_report
+
+    def _card(self, level):
+        data = {"new": [{"event_id": "a", "title_cn": "重点政策", "country_cn": "X",
+                          "action_type": "调整", "impact_level": level,
+                          "impact_type": "约束", "source": {"url": "https://x/1"}}],
+                "active": [], "covered": []}
+        return self.pr.brief_text("2026-10-19", data)
+
+    def test_high_impact_goes_to_focus_section(self):
+        txt = self._card("高影响")
+        self.assertIn("重点关注", txt)
+        focus_part = txt.split("重点关注", 1)[1].split("其他新增")[0]
+        self.assertIn("重点政策", focus_part)
+
+    def test_medium_impact_goes_to_focus_section(self):
+        txt = self._card("中影响")
+        focus_part = txt.split("重点关注", 1)[1].split("其他新增")[0]
+        self.assertIn("重点政策", focus_part)
+
+    def test_low_impact_stays_in_other(self):
+        txt = self._card("低影响")
+        self.assertNotIn("重点关注", txt)
+        self.assertIn("重点政策", txt.split("其他新增", 1)[1])
 
 
 class NormalizeValidateTests(unittest.TestCase):
@@ -878,6 +1019,227 @@ class RiskContractTests(unittest.TestCase):
              "china_relevance": "间接影响", "recommended_action": "核查准入",
              "impact_rationale": "依据xxx", "impact_score": 3.25, "impact_focus": "持续观察"}
         self.assertEqual(self.validate_result(r), [])
+
+
+class ReportDateGuardTests(unittest.TestCase):
+    """非法 --date 不得让 report/push 崩裸 TypeError(2026-10-19 修复)。
+
+    复现: A3 修复把 _date() 改成"解析失败返回 None", 但 collect() 拿它做日期减法
+    (`_date(date) - timedelta`), 库里非空时 `report.py --date 2026-13-45` 与
+    `push_report.py --date 2026-13-45` 都抛 TypeError, 当天日报与推送一起丢。
+    """
+
+    def setUp(self):
+        import normalize
+        import report
+        self.n = normalize
+        self.report = report
+        # 造一条非空库(空库时 collect 提前 return None, 走不到日期运算)
+        self.con = self.n.open_db()
+        e = self.n.fill_defaults(_source_event())
+        self.con.execute(
+            "INSERT OR REPLACE INTO events (event_id,payload,category,event_date,record_type) "
+            "VALUES (?,?,?,?,?)",
+            (e["event_id"], json.dumps(e, ensure_ascii=False), "policy",
+             e["event_date"], "policy"))
+        self.con.commit()
+        self.con.close()
+
+    def test_collect_raises_value_error_on_bad_date(self):
+        with self.assertRaises(ValueError):
+            self.report.collect("2026-13-45", 14)
+
+    def test_collect_accepts_valid_date(self):
+        data = self.report.collect("2026-10-19", 14)
+        self.assertIsNotNone(data)
+        self.assertIn("new", data)
+
+    def test_report_main_prints_chinese_error_and_exits_2(self):
+        with mock.patch("sys.argv", ["report.py", "--date", "2026-13-45"]), \
+                redirect_stdout(io.StringIO()) as buf:
+            rc = self.report.main()
+        self.assertEqual(rc, 2)
+        self.assertIn("日期格式非法", buf.getvalue())
+
+
+class RiskNullDimsTests(unittest.TestCase):
+    """dimension_scores 为 null 时不得崩(2026-10-19 修复)。
+
+    复现: derive_missing 用 setdefault 归一, 而 setdefault 不覆盖显式 null;
+    Agent 研判输出 "dimension_scores": null 时 dims_complete(None) 抛 TypeError,
+    risk.py --from-file 整批中断。
+    """
+
+    def setUp(self):
+        import risk
+        self.risk = risk
+
+    def test_derive_missing_handles_null_dims(self):
+        out = self.risk.derive_missing({"dimension_scores": None})
+        self.assertEqual(out["dimension_scores"], {})
+        self.assertIsNone(out.get("impact_score"))
+
+    def test_derive_missing_handles_non_dict_dims(self):
+        out = self.risk.derive_missing({"dimension_scores": "trade=4"})
+        self.assertEqual(out["dimension_scores"], {})
+
+    def test_fill_defaults_normalizes_null_dims(self):
+        import normalize
+        e = normalize.fill_defaults(_source_event(dimension_scores=None))
+        self.assertEqual(e["dimension_scores"], {})
+
+    def test_from_file_batch_survives_one_bad_record(self):
+        # 一条坏记录不得让整批写回中断(与 report.py 的 A3 同理)
+        import normalize
+        import risk
+        con = normalize.open_db()
+        try:
+            good = normalize.fill_defaults(_source_event(products=["种苗"]))
+            con.execute(
+                "INSERT OR REPLACE INTO events (event_id,payload,category,event_date,record_type) "
+                "VALUES (?,?,?,?,?)",
+                (good["event_id"], json.dumps(good, ensure_ascii=False), "policy",
+                 good["event_date"], "policy"))
+            con.commit()
+            payload = [
+                {"event_id": "no-such-event-id", "impact_type": "约束",
+                 "impact_level": "中影响", "china_relevance": "间接影响",
+                 "recommended_action": "x", "impact_rationale": "y",
+                 "impact_score": 3.0, "impact_focus": "持续观察",
+                 "dimension_scores": None},
+                {"event_id": good["event_id"], "impact_type": "约束",
+                 "impact_level": "中影响", "china_relevance": "间接影响",
+                 "recommended_action": "核查准入", "impact_rationale": "依据",
+                 "impact_score": 3.25, "impact_focus": "持续观察",
+                 "dimension_scores": {"trade": 4, "biosecurity": 3,
+                                      "response": 3, "alignment": 2}},
+            ]
+            path = os.path.join(TMP, "impact-batch.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False)
+            with mock.patch("sys.argv", ["risk.py", "--from-file", path]), \
+                    redirect_stdout(io.StringIO()):
+                rc = risk.main()
+            # 第一条不存在 -> 失败; 第二条必须已经写回
+            rows = normalize.load_events(con, "event_id = ?", (good["event_id"],))
+            self.assertEqual(rc, 1)
+            self.assertTrue(rows)
+            self.assertEqual(rows[0].get("impact_level"), "中影响")
+        finally:
+            con.close()
+
+
+class NormalizeInputGuardTests(unittest.TestCase):
+    """入库输入结构校验: events 必须是数组(2026-10-19 新增)。"""
+
+    def test_events_must_be_list(self):
+        import normalize
+        path = os.path.join(TMP, "bad-shape.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"events": {"a": 1}}, f)
+        with self.assertRaises(ValueError):
+            normalize._load_input(path)
+
+    def test_list_input_ok(self):
+        import normalize
+        path = os.path.join(TMP, "ok-shape.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump([_source_event()], f, ensure_ascii=False)
+        self.assertEqual(len(normalize._load_input(path)), 1)
+
+
+class DirtyDateGuardTests(unittest.TestCase):
+    """A3 闭环(2026-10-19): 脏日期不许进库, 也不许绕过旧闻窗口, 更不许原样端进日报。
+
+    复现: 旧实现只按**长度**判日期, "2026-13-45"(10 位, 但 13 月 45 日)会被
+    原样返回; 旧闻窗口用字符串比较, "2026-13-45" > "2026-10-12" → 判为"比窗口
+    还新"→ **脏日期反而绕过了拦截入库**, 然后日报表格里原样出现 2026-13-45。
+    """
+
+    def setUp(self):
+        import normalize
+        self.n = normalize
+
+    def test_norm_date_rejects_semantic_invalid(self):
+        for bad in ("2026-13-45", "2026-02-30", "2026-00-01", "TBD", "2026-1-5", "未知"):
+            self.assertIsNone(self.n._norm_date(bad), bad)
+
+    def test_norm_date_accepts_legal_granularity(self):
+        self.assertEqual(self.n._norm_date("2026"), "2026-01-01")
+        self.assertEqual(self.n._norm_date("2026-10"), "2026-10-01")
+        self.assertEqual(self.n._norm_date("2026-10-19"), "2026-10-19")
+        # ISO 日期时间取日期部分
+        self.assertEqual(self.n._norm_date("2026-10-19T08:30:00"), "2026-10-19")
+
+    def test_validate_rejects_dirty_event_date(self):
+        e = _source_event(event_date="2026-13-45", effective_date="2026-13-45")
+        errs = self.n.validate(e)
+        self.assertTrue(any("不是合法日期" in m for m in errs), errs)
+
+    def test_validate_rejects_tbd_date(self):
+        e = _source_event(event_date="TBD", effective_date="TBD")
+        errs = self.n.validate(e)
+        self.assertTrue(any("不是合法日期" in m for m in errs), errs)
+
+    def test_validate_accepts_month_and_year_granularity(self):
+        e = _source_event(event_date="2026-10", effective_date="2026-10")
+        self.assertEqual(self.n.validate(e), [])
+        e2 = _source_event(event_date="2026", effective_date="2026")
+        self.assertEqual(self.n.validate(e2), [])
+
+    def test_dirty_date_cannot_bypass_stale_gate(self):
+        # 关键回归: 脏日期曾因字符串比较而被判为"比窗口还新"从而放行
+        e = _source_event(event_date="2026-13-45", effective_date="2026-13-45",
+                          source={"tier": 1, "name": "s", "url": "https://www.aphis.usda.gov/x",
+                                  "publish_date": "2026-13-45", "quote": "q"})
+        reason = self.n.stale_reason(e, "2026-10-05")
+        self.assertIsNotNone(reason)
+        self.assertIn("日期不明", reason)
+
+    def test_bad_publish_date_falls_back_to_event_date(self):
+        e = _source_event(event_date="2026-09-15", effective_date="2026-09-15",
+                          source={"tier": 1, "name": "s", "url": "https://www.aphis.usda.gov/y",
+                                  "publish_date": "2026-13-45", "quote": "q"})
+        self.assertEqual(self.n.published_date(e), "2026-09-15")
+
+    def test_report_policy_date_marks_dirty(self):
+        import report
+        self.assertEqual(report.policy_date({"event_date": "2026-13-45"}), "日期异常")
+        self.assertEqual(report.policy_date({"event_date": "TBD"}), "日期异常")
+        self.assertEqual(report.policy_date({"effective_date": "2026-13-45",
+                                             "event_date": "2026-10-19"}), "2026-10-19")
+        self.assertEqual(report.policy_date({"event_date": "2026-10-19"}), "2026-10-19")
+        self.assertEqual(report.policy_date({"effective_date": "2026-10",
+                                             "event_date": "2026-10-19"}), "2026-10-19")
+
+    def test_report_table_shows_date_anomaly(self):
+        import report
+        row = report.policy_row(1, {"country_cn": "X", "action_type": "收紧",
+                                     "policy_domain": "animal", "event_date": "2026-13-45",
+                                     "title_cn": "脏日期政策"})
+        self.assertIn("日期异常", row)
+        self.assertNotIn("2026-13-45", row)
+
+    def test_dirty_date_record_still_in_todays_new_list_with_warning(self):
+        # 脏日期不能让今天的政策从日报里消失, 但必须打 WARN
+        import report
+        con = self.n.open_db()
+        e = self.n.fill_defaults(_source_event(event_date="2026-10-19",
+                                                effective_date="2026-10-19"))
+        e["event_date"] = "2026-13-45"      # 模拟存量脏数据(入库端现已拒收)
+        e["effective_date"] = "2026-13-45"
+        e["first_seen"] = "2026-10-19T08:00:00"
+        con.execute("INSERT OR REPLACE INTO events (event_id,payload,category,event_date,record_type) "
+                    "VALUES (?,?,?,?,?)",
+                    (e["event_id"], json.dumps(e, ensure_ascii=False), "policy",
+                     "2026-10-19", "policy"))
+        con.commit()
+        con.close()
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            data = report.collect("2026-10-19", 14)
+        self.assertEqual(len(data["new"]), 1)
+        self.assertIn("日期无法解析", buf.getvalue())
 
 
 if __name__ == "__main__":

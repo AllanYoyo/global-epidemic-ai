@@ -121,6 +121,8 @@ def slim_event(e):
         "disease_name_en": e.get("disease_name_en"), "category": e.get("category"),
         "country_cn": e.get("country_cn"), "country_en": e.get("country_en"),
         "region": e.get("region"), "event_date": e.get("event_date"),
+        # 日期异常标记: 存量脏数据入库时可能被污染, 面板上别让读者误以为是真实日期
+        "date_invalid": report.policy_date(e) == "日期异常",
         "first_seen": str(e.get("first_seen", ""))[:10],
         "published_date": e.get("published_date") or e.get("report_date") or (e.get("source") or {}).get("publish_date"),
         "quantity": e.get("quantity"), "host_species": e.get("host_species"),
@@ -158,7 +160,10 @@ def api_summary():
     covered = [e for e in all_e if str(e.get("first_seen", ""))[:10] == today]
     countries = {e.get("country_cn") for e in all_e if e.get("country_cn")}
     levels = [report.policy_impact_level(e) for e in all_e]
-    focus_now = sum(1 for e, level in zip(all_e, levels) if level == "高影响")
+    # focus_now = 关注档"立即关注"的条数(可执行口径), high = 影响等级"高影响"的条数。
+    # 2026-10-19 修正: 两者原本算的是同一个东西(focus_now 直接数"高影响"),
+    # 字段名不同值相同, 看的人会以为是两个不同指标。
+    focus_now = sum(1 for e in all_e if e.get("impact_focus") == "立即关注")
     high = sum(1 for level in levels if level == "高影响")
     constraints = sum(1 for e in all_e if e.get("impact_type") == "约束")
     opportunities = sum(1 for e in all_e if e.get("impact_type") == "机会")
@@ -444,7 +449,7 @@ function renderTable(){
   $('#tbody').innerHTML=rows.map(e=>{
     const name=e.title_cn||e.title_en||e.summary_cn||'（无标题）';
     const products=(e.products||[]).join('、')||e.disease_name_cn||'-';
-    const effective=e.effective_date||e.event_date||'-';
+    const effective=e.date_invalid?'日期异常':(e.effective_date||e.event_date||'-');
     return '<tr>'+
     '<td><b>'+esc(name)+'</b></td>'+
     '<td>'+esc(e.action_type||'-')+'</td>'+
@@ -467,7 +472,7 @@ async function loadReports(){
     const base=i.name.replace('.md','');
     const dl=items.filter(x=>x.name.startsWith(base)&&!x.name.endsWith('.md'))
       .map(x=>'<a class="dl" href="/api/report-file/'+esc(x.name)+'">'+esc(x.name.split('.').pop())+'</a>').join(' ');
-    return '<div data-name="'+esc(i.name)+'"><span>'+esc(i.name.replace('-daily-report.md',''))+'</span><span>'+dl+'</span></div>';
+    return '<div data-name="'+esc(i.name)+'"><span>'+esc(i.name.replace('-policy-report.md','').replace('-daily-report.md',''))+'</span><span>'+dl+'</span></div>';
   }).join('')||'<div>暂无日报</div>';
   $('#reportList').querySelectorAll('div[data-name]').forEach(d=>d.onclick=()=>{
     $('#reportList').querySelectorAll('div').forEach(x=>x.classList.remove('on'));

@@ -42,9 +42,17 @@ def level_of(score):
 
 
 def derive_missing(r):
-    """按数据合同补全可推导字段: 四维 -> 加权分 -> 等级 -> 关注档。"""
-    r.setdefault("dimension_scores", {})
-    dims = r["dimension_scores"]
+    """按数据合同补全可推导字段: 四维 -> 加权分 -> 等级 -> 关注档。
+
+    2026-10-19 修正: dimension_scores 可能是 None(Agent 判"无法评估"时写 null,
+    或库里记录本身是 null —— normalize 的 setdefault 不覆盖显式 null)。
+    原实现 r.setdefault("dimension_scores", {}) 对显式 null 无效, 随后
+    dims_complete(None) 抛 TypeError, --from-file 批处理时一条坏记录就让整批中断。
+    """
+    dims = r.get("dimension_scores")
+    if not isinstance(dims, dict):
+        dims = {}
+        r["dimension_scores"] = dims
     if dims_complete(dims) and dims_valid(dims) and r.get("impact_score") is None:
         r["impact_score"] = weighted_score(dims)
     if r.get("impact_level") is None and _num(r.get("impact_score")):
@@ -133,7 +141,14 @@ def main():
         items = data if isinstance(data, list) else [data]; ok = 0
         for item in items:
             result = dict(item.get("policy_impact") or item); event_id = result.pop("event_id", None) or item.get("event_id")
-            ok += bool(event_id and write_back(con, event_id, result))
+            if not event_id:
+                print("[跳过] 记录缺 event_id, 无法定位政策"); continue
+            # 单条脏数据不应中断整批写回(与 report.py 的 A3 同理): 一条崩了,
+            # 后面几条照样写, 退出码仍如实反映失败数。
+            try:
+                ok += bool(write_back(con, event_id, result))
+            except Exception as exc:
+                print("[错误] %s 写回异常: %s: %s" % (event_id, type(exc).__name__, exc))
         print("\n写回完成: %d/%d 条成功" % (ok, len(items))); return 0 if ok == len(items) else 1
     if args.event_id:
         result = {"impact_type": args.impact_type, "impact_level": args.impact_level,

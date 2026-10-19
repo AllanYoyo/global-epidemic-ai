@@ -34,11 +34,14 @@ push_report.py 原版"配了哪个发哪个, 一发全发"做不到这一点 —
 启用: 设环境变量 `REVIEW_CHANNEL=wechat`(取值 wechat / dingtalk / mail)。
 两段式流程:
   阶段 1(审阅): push_report.py --date X  → 只发审阅渠道(wechat), 写
-                data/reports/.review-pending/<日期>.flag, 不写 .pushed/
-                (此时其它渠道未推送, 二次调用默认跳过, 防误触)
+                data/reports/.review-pending/<日期>.flag(首行记录审阅渠道),
+                不写 .pushed/(此时其它渠道未推送, 二次调用默认跳过, 防误触)
   阶段 2(批准): 用户在审阅端确认 → push_report.py --date X --review-approved
                 → 把审阅渠道之外的所有已配置渠道发完, 写 .pushed/, 删
                 .review-pending/。下次调用跳过。
+  阶段 2 的审阅渠道以 .review-pending 标记为准, REVIEW_CHANNEL 只作兜底:
+  2026-10-19 修复 —— 原实现只认环境变量, 阶段 2 忘设 REVIEW_CHANNEL 时会静默
+  退化成"全量推送", 审阅渠道重复收到日报, 闸门形同虚设。
 
 典型用法(Hermes 在微信会话里复述"先发微信审"的口径):
   HERMES_RUN_CMD 不配置时, run_scan.sh cron 会退化推"待执行提醒"; 在 Hermes
@@ -114,11 +117,17 @@ def brief_text(date, data):
             sum(1 for e in data["covered"] if e.get("verification_status") == "unverified")), "",
         "**涉及国家**: %s" % ("、".join(countries[:8]) + ("等" if len(countries) > 8 else "") if countries else "—"),
     ]
-    focus = [e for e in new if e.get("impact_level") == "中影响" or e.get("action_type") == "收紧"]
-    rest = [e for e in new if e.get("event_id") not in {x["event_id"] for x in focus}]
-    focus.sort(key=lambda e: (0 if e.get("impact_level") == "中影响" else 1,
+    # 重点关注口径与 report.py 保持一致(2026-10-19 修正): 原实现只看"中影响 or 收紧",
+    # 把合同里最重的一档"高影响"漏进"其他新增" —— 用户第一眼看的 IM 卡片反而把
+    # 最该关注的政策藏起来了。排序: 高影响 > 中影响 > 收紧。
+    lv_rank = {"高影响": 0, "中影响": 1}
+    focus = [e for e in new if e.get("impact_level") in lv_rank or e.get("action_type") == "收紧"]
+    focus_ids = {x["event_id"] for x in focus}
+    rest = [e for e in new if e.get("event_id") not in focus_ids]
+    focus.sort(key=lambda e: (lv_rank.get(e.get("impact_level"), 2),
                               act.get(e.get("action_type"), 9)))
-    rest.sort(key=lambda e: (act.get(e.get("action_type"), 9), e.get("impact_level") or ""))
+    rest.sort(key=lambda e: (act.get(e.get("action_type"), 9),
+                              {"高影响": 0, "中影响": 1, "低影响": 2}.get(e.get("impact_level"), 3)))
     if focus:
         lines += ["", "**重点关注** ⚠️"]
         for e in focus:
@@ -126,7 +135,7 @@ def brief_text(date, data):
                 _title(e), (e.get("source") or {}).get("url") or "",
                 e.get("action_type") or "-", e.get("country_cn") or "-",
                 e.get("impact_type") or "未研判", e.get("impact_level") or "未研判")
-            if e.get("impact_level") == "中影响" and e.get("impact_rationale"):
+            if e.get("impact_level") in ("高影响", "中影响") and e.get("impact_rationale"):
                 line += " — " + _cut_sentence(e["impact_rationale"])
             lines.append(line)
     if rest:
@@ -209,8 +218,34 @@ def _is_pending(date):
 def _mark_pending(date, channel_name):
     os.makedirs(PENDING_DIR, exist_ok=True)
     with open(_pending_path(date), "w", encoding="utf-8") as f:
+        # 第一行是机器可读的审阅渠道, 供阶段 2 读回(见 _pending_channel);
+        # 其余是给人看的说明。旧版本写的 flag 没有这一行, 读回返回 None, 自动回退
+        # 到 REVIEW_CHANNEL 环境变量, 保持向后兼容。
+        f.write("review_channel=%s\n" % channel_name)
         f.write("%s 等待审核: 已发至 %s, 待 --review-approved 发完其它渠道\n" %
                 (biz_now(), channel_name))
+
+
+def _pending_channel(date):
+    """从待审标记里读回"阶段 1 实际发往哪个渠道"; 读不到返回 None。
+
+    2026-10-19 引入: 阶段 2 必须知道审阅渠道是谁, 才能保证"审阅渠道不重复收报"。
+    只认环境变量 REVIEW_CHANNEL 是不够的 —— 阶段 2 换个会话/换台机器执行时
+    很容易忘带这个变量, 一旦忘带, 闸门会静默退化成"全量推送", 审阅渠道重复收到
+    日报, 直接违反"反馈先在原渠道完成再扩散"的要求。
+    """
+    path = _pending_path(date)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("review_channel="):
+                    label = line.split("=", 1)[1].strip()
+                    return label or None
+    except OSError:
+        return None
+    return None
 
 
 def _clear_pending(date):
@@ -300,7 +335,11 @@ def main():
                   % (args.date, pending_note))
             return 0
 
-    data = report.collect(args.date, args.days_back, args.db_path)
+    try:
+        data = report.collect(args.date, args.days_back, args.db_path)
+    except ValueError as exc:
+        print("[错误] %s" % exc)
+        return 2
     if data is None:
         print("[提示] 政策库为空, 无可推送内容。")
         return 1
@@ -309,59 +348,85 @@ def main():
     channels = _build_channels(text, args.date, docx)
 
     # 决定本次实际推送的渠道集合
-    if review_channel:
-        # 评审核闸门模式: 按 --review-approved 区分阶段
-        review_env, review_label = REVIEW_CHANNEL_MAP[review_channel]
+    # 审阅渠道(要排除/要单独发的那个渠道)按下面优先级确定:
+    #   阶段 2(--review-approved): 待审标记里记录的渠道 > REVIEW_CHANNEL 环境变量
+    #   阶段 1(未批准):            REVIEW_CHANNEL 环境变量
+    # 2026-10-19 修正: 原实现阶段 2 只认环境变量, 忘设 REVIEW_CHANNEL 时会静默
+    # 退化成"全量推送" —— 审阅渠道重复收到日报, 闸门形同虚设(实测复现)。
+    pending_label = _pending_channel(args.date)
+    env_label = REVIEW_CHANNEL_MAP[review_channel][1] if review_channel else ""
+    if args.review_approved:
+        review_label = pending_label or env_label
+    else:
+        review_label = env_label
+
+    if review_channel and not args.review_approved:
+        review_env = REVIEW_CHANNEL_MAP[review_channel][0]
         if not os.environ.get(review_env):
             print("[失败] REVIEW_CHANNEL=%s 但 %s 未配置, 评审核闸门无法启用"
                   % (review_channel, review_env))
             return 1
+
+    if review_label:
         if args.review_approved:
             # 阶段 2: 发审阅渠道之外的所有已配渠道
             target = [c for c in channels if c[0] != review_label]
-            stage_label = "审核通过(发完剩余渠道)"
+            stage_label = "审核通过(发完剩余渠道, 已排除审阅渠道 %s)" % review_label
         else:
             # 阶段 1: 只发审阅渠道
             target = [c for c in channels if c[0] == review_label]
             if not target:
-                print("[失败] REVIEW_CHANNEL=%s 但审阅渠道未配置或环境变量名错配"
-                      % review_channel)
+                print("[失败] 审阅渠道 %s 未配置或环境变量名错配" % review_label)
                 return 1
             stage_label = "审核(仅发 %s)" % review_label
     else:
         # 普通模式: 全部渠道(向后兼容)
+        if args.review_approved:
+            # 阶段 2 却读不到审阅渠道(既无待审标记, 也无 REVIEW_CHANNEL):
+            # 只能按全量发, 但必须说明白, 别让人以为闸门生效了。
+            print("[警告] 未读到审阅渠道(无 .review-pending 标记且未设 REVIEW_CHANNEL), 按全量推送")
         target = channels
         stage_label = "全量"
 
     if not target:
         if args.dry_run:
-            print("[dry-run] 评审核闸门开启但剩余渠道无配置可发, --review-approved 视为 no-op")
+            # 2026-10-19 修正: 原来这里一律打"评审核闸门开启但剩余渠道无配置可发",
+            # 但"一个推送渠道都没配"时闸门根本没开, 这条提示会把人带偏
+            # (以为闸门挡住了, 实际是没配渠道)。
+            if review_label or args.review_approved:
+                print("[dry-run] 评审核闸门开启但剩余渠道无配置可发, --review-approved 视为 no-op")
+            else:
+                print("[dry-run] 未配置任何推送渠道(WECHAT_WEBHOOK / DINGTALK_WEBHOOK / SMTP_*), "
+                      "详见 .env.example; 无渠道可发送")
             return 0
         # 非 dry-run 阶段 2 命中: 没有任何剩余渠道要发, 视为已结束, 写终态标记
-        if review_channel and args.review_approved:
+        if review_label and args.review_approved:
             os.makedirs(PUSH_FLAG_DIR, exist_ok=True)
             with open(flag_path, "w", encoding="utf-8") as f:
                 f.write("%s 已推送(仅审阅渠道 %s, 无剩余渠道)\n" %
-                        (biz_now(), REVIEW_CHANNEL_MAP[review_channel][1]))
+                        (biz_now(), review_label))
             _clear_pending(args.date)
             print("[OK] 审阅渠道外无可发渠道, 已写终态标记并清理审核待办")
             return 0
+        if not channels:
+            print("[失败] 未配置任何推送渠道(WECHAT_WEBHOOK / DINGTALK_WEBHOOK / SMTP_*), "
+                  "详见 .env.example")
+            return 1
         print("[失败] 当前模式无目标渠道")
         return 1
 
     if args.dry_run:
         print(text)
         print("\n---")
-        if review_channel and not args.review_approved:
+        if review_label and not args.review_approved:
             print("[dry-run] 评审核闸门·阶段 1 预览: 只发 %s(REVIEW_CHANNEL=%s); "
                   "审阅通过后用 --review-approved 发完剩余渠道"
-                  % (REVIEW_CHANNEL_MAP[review_channel][1], review_channel))
-        elif review_channel and args.review_approved:
-            review_label = REVIEW_CHANNEL_MAP[review_channel][1]
+                  % (review_label, review_channel))
+        elif review_label and args.review_approved:
             remaining = [c[0] for c in channels if c[0] != review_label]
             if remaining:
-                print("[dry-run] 评审核闸门·阶段 2 预览: 审核通过, 将发送到: %s"
-                      % "、".join(remaining))
+                print("[dry-run] 评审核闸门·阶段 2 预览: 审核通过(已排除审阅渠道 %s), 将发送到: %s"
+                      % (review_label, "、".join(remaining)))
             else:
                 print("[dry-run] 评审核闸门·阶段 2 预览: 审核通过, 剩余渠道无配置可发")
         else:
@@ -381,9 +446,9 @@ def main():
 
     # 标记终态: 阶段 1 写 .review-pending, 阶段 2 写 .pushed 并清理待办
     if not args.message and ok == len(target) and target:
-        if review_channel and not args.review_approved:
-            # 阶段 1 成功: 写待审标记
-            _mark_pending(args.date, REVIEW_CHANNEL_MAP[review_channel][1])
+        if review_label and not args.review_approved:
+            # 阶段 1 成功: 写待审标记(带机器可读的 review_channel 行, 供阶段 2 读回)
+            _mark_pending(args.date, review_label)
         else:
             # 阶段 2 或全量模式: 写终态
             os.makedirs(PUSH_FLAG_DIR, exist_ok=True)

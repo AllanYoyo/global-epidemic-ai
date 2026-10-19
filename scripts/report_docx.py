@@ -120,7 +120,7 @@ def _policy_table(doc, events):
         level = report.policy_impact_level(e) or "未研判"
         vals = [title, e.get("action_type") or "-", domain,
                 "%s%s" % (e.get("country_cn") or "-", ("·" + str(e["region"])) if e.get("region") else ""),
-                subject, e.get("effective_date") or e.get("event_date") or "-",
+                subject, report.policy_date(e),
                 e.get("policy_status") or "已生效", e.get("impact_type") or "未研判",
                 level, e.get("recommended_action") or "未注明"]
         row = t.add_row().cells
@@ -135,7 +135,10 @@ def _policy_table(doc, events):
 def _build_policy(date, data=None, out_dir=None, db_path=None):
     """生成政策监测 Word 简报。"""
     if data is None:
-        data = report.collect(date, 14, db_path)
+        try:
+            data = report.collect(date, 14, db_path)
+        except ValueError as exc:
+            raise SystemExit("[错误] %s" % exc)
     if data is None:
         raise SystemExit("[提示] 政策库为空: 先运行 normalize.py 入库政策记录。")
     new, active, covered = data["new"], data["active"], data["covered"]
@@ -178,7 +181,8 @@ def _build_policy(date, data=None, out_dir=None, db_path=None):
         _bullet(doc, "发布机构/法律依据: ", "%s / %s" % (
             e.get("issuer_cn") or e.get("issuer_en") or "未注明", e.get("legal_basis") or "未注明"))
         _bullet(doc, "生效/状态: ", "%s / %s" % (
-            e.get("effective_date") or e.get("event_date") or "未注明", e.get("policy_status") or "已生效"))
+            report.policy_date(e) if (e.get("effective_date") or e.get("event_date")) else "未注明",
+            e.get("policy_status") or "已生效"))
         _bullet(doc, "对华影响: ", "%s — %s" % (
             e.get("impact_level") or "未研判", e.get("impact_rationale") or "待研判"))
         dims = report.policy_dims(e)

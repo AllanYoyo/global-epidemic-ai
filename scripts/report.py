@@ -37,6 +37,20 @@ def policy_title(policy):
     return policy.get("title_cn") or policy.get("title_en") or policy.get("summary_cn") or "（无标题）"
 
 
+def policy_date(policy):
+    """生效日期展示口径: 依次取 effective_date / event_date, 解析不了就明说"日期异常"。
+
+    2026-10-19 修正(A3 闭环): 原来直接把原始字符串塞进表格与 Excel, 库里若有
+    2026-99-99 / TBD 这类脏日期, 读者无法分辨那是脏数据还是真实日期。入库端已
+    拒收非法日期, 这里兜住**存量脏数据**: 标成"日期异常", 不静默混进日期列。
+    """
+    for key in ("effective_date", "event_date"):
+        raw = policy.get(key)
+        if raw and _date(raw) is not None:
+            return str(raw)[:10]
+    return "日期异常"
+
+
 def policy_impact_level(policy):
     return policy.get("impact_level") or "未研判"
 
@@ -66,6 +80,16 @@ def sort_key(policy):
 
 
 def collect(date, days_back, db_path=None):
+    """汇总某日日报所需的三组记录。
+
+    date 必须是合法的 YYYY-MM-DD: 解析失败直接抛 ValueError(调用方转成中文错误提示
+    并以非零码退出)。2026-10-19 修正: 原先 _date() 解析失败返回 None, 而本函数
+    拿它做日期减法, 导致 `report.py --date 2026-13-45` / `push_report.py --date ...`
+    抛裸 TypeError, 当天日报与推送一起丢(库里非空时必崩)。
+    """
+    base = _date(date)
+    if base is None:
+        raise ValueError("日期格式非法: %r(应为 YYYY-MM-DD)" % (date,))
     con = open_db(db_path)
     all_events = [e for e in load_events(con) if e.get("record_type") == "policy"]
     con.close()
@@ -73,7 +97,16 @@ def collect(date, days_back, db_path=None):
         return None
     new = [e for e in all_events if e.get("verification_status") != "merged"
            and str(e.get("first_seen", ""))[:10] == date]
-    lo, hi = _date(date) - datetime.timedelta(days=days_back), _date(date)
+    # 存量脏日期(入库端已拒收, 这里兜底): 今日新增桶里若还有解析不了的日期,
+    # 保留条目(不能因为日期坏就把今天的政策从日报里抹掉), 但明确打 WARN,
+    # 展示层标"日期异常"。
+    for e in new:
+        if policy_date(e) == "日期异常":
+            print("[WARN] 今日新增记录日期无法解析(日报中显示为「日期异常」): %s @ %s "
+                  "(event_date=%r, effective_date=%r)"
+                  % (policy_title(e), e.get("country_en") or "?",
+                     e.get("event_date"), e.get("effective_date")))
+    lo, hi = base - datetime.timedelta(days=days_back), base
     new_ids = {e["event_id"] for e in new}
     active = []
     for e in all_events:
@@ -103,7 +136,7 @@ def policy_row(index, policy):
         index, policy.get("country_cn") or "-",
         ("·" + str(policy["region"])) if policy.get("region") else "",
         ACTION_ICON.get(policy.get("action_type"), "⚪"), policy.get("action_type") or "-",
-        domain, products, policy.get("effective_date") or policy.get("event_date") or "-",
+        domain, products, policy_date(policy),
         policy.get("policy_status") or "已生效", policy_title(policy)[:40],
         policy.get("impact_type") or "未研判", policy.get("impact_level") or "未研判",
         policy.get("recommended_action") or "未注明", src_link(policy.get("source")))
@@ -170,7 +203,8 @@ def make_policy_detail(events):
                 i, p.get("country_cn") or "-", policy_title(p), p["event_id"],
                 p.get("prev_action") or "此前未注明", p.get("action_type") or "-", p.get("policy_status") or "已生效",
                 p.get("summary_cn") or "见来源", subject,
-                p.get("effective_date") or p.get("event_date") or "未注明", p.get("effective_until") or "未注明",
+                policy_date(p) if (p.get("effective_date") or p.get("event_date")) else "未注明",
+                p.get("effective_until") or "未注明",
                 p.get("impact_type") or "未研判", p.get("impact_level") or "未研判",
                 p.get("china_relevance") or "未研判",
                 ("- **四维评分**: %s\n" % policy_dims(p)) if policy_dims(p) else "",
@@ -248,7 +282,7 @@ def export_table(base_path, events):
              val(e.get("issuer_cn") or e.get("issuer_en")), "、".join(e.get("target_countries") or []) or val(None),
              "、".join(e.get("products") or []) or val(None), val(e.get("disease_name_cn") or e.get("disease_name_en")),
              val(e.get("scope")), val(e.get("published_date") or e.get("report_date") or (e.get("source") or {}).get("publish_date")),
-             val(e.get("effective_date") or e.get("event_date")), val(e.get("effective_until")), val(e.get("policy_status") or "已生效"),
+             val(policy_date(e)), val(e.get("effective_until")), val(e.get("policy_status") or "已生效"),
              val(e.get("legal_basis")), val(e.get("verification_status")), val(e.get("impact_type")), val(e.get("impact_level")),
              val(e.get("impact_focus")), val(policy_dims(e)),
              val(e.get("china_relevance")), val(e.get("recommended_action")), val(e.get("summary_cn")),
@@ -281,7 +315,12 @@ def main():
     ap.add_argument("--date", default=biz_today()); ap.add_argument("--days-back", type=int, default=14)
     ap.add_argument("--policy", action="store_true", help="(已废弃, 无效果) 政策为唯一模式, 兼容旧定时/面板命令")
     ap.add_argument("--excel", action="store_true"); ap.add_argument("--docx", action="store_true"); ap.add_argument("--db-path")
-    args = ap.parse_args(); data = collect(args.date, args.days_back, args.db_path)
+    args = ap.parse_args()
+    try:
+        data = collect(args.date, args.days_back, args.db_path)
+    except ValueError as exc:
+        print("[错误] %s" % exc)
+        return 2
     if data is None: data = {"all": [], "new": [], "active": [], "covered": []}
     new, active, covered = data["new"], data["active"], data["covered"]
     replacements = {"{{date}}": args.date, "{{generated_at}}": now(), "{{days_back}}": str(args.days_back), "{{headline}}": make_policy_headline(new, active), "{{new_table}}": make_policy_table(new), "{{active_table}}": make_policy_table(active), "{{focus_detail}}": make_policy_detail(covered), "{{impact_summary}}": make_policy_impact_summary(covered), "{{watchlist_diff}}": make_policy_watchlist_diff(covered), "{{unverified}}": make_open_items(covered), "{{stats}}": make_stats(data["all"], new, active), "{{sources}}": make_sources(covered)}

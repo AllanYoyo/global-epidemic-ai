@@ -134,8 +134,13 @@ def _title(e):
     return e.get("title_cn") or e.get("title_en") or e.get("summary_cn") or "（无标题）"
 
 
-def brief_text(date, data):
-    """政策日报 IM 卡片摘要: 重点关注(中影响/收紧) + 其他新增, 每条附原文链接。"""
+def brief_text(date, data, docx_ok=True):
+    """政策日报 IM 卡片摘要: 重点关注(中影响/收紧) + 其他新增, 每条附原文链接。
+
+    docx_ok=False 时页脚如实说明"本次无 Word 附件" —— 原来无条件写"全文见
+    Markdown / Word / Excel", 而 Word 可能压根没生成(见 report.ensure_docx 的说明),
+    用户会以为带附件却只收到正文。
+    """
     new, active = data["new"], data["active"]
     countries = sorted({e.get("country_cn") for e in new if e.get("country_cn")})
     act = {"收紧": 0, "调整": 1, "放松": 2, "恢复": 3}
@@ -177,8 +182,13 @@ def brief_text(date, data):
                 _title(e), (e.get("source") or {}).get("url") or "",
                 e.get("action_type") or "-", e.get("country_cn") or "-",
                 e.get("impact_type") or "未研判", e.get("impact_level") or "未研判"))
+    if docx_ok:
+        tail = "全文见政策 Markdown / Word / Excel 报告(面板可下载)"
+    else:
+        tail = ("全文见政策 Markdown / Excel 报告(面板可下载); "
+                "⚠️ 本次无 Word 附件(Word 日报生成失败, 已告警)")
     lines += ["", "---",
-              "全文见政策 Markdown / Word / Excel 报告(面板可下载)",
+              tail,
               "> AI 辅助生成 · 仅供情报参考 · 代码 %s" % code_fingerprint()]
     return "\n".join(lines)
 
@@ -220,11 +230,14 @@ def send_mail(subject, text, docx_path):
     msg["From"] = user
     msg["To"] = ",".join(to)
     msg.attach(MIMEText(text.replace("\n", "<br>"), "html", "utf-8"))
-    if docx_path and os.path.isfile(docx_path):
-        part = MIMEApplication(open(docx_path, "rb").read())
-        part.add_header("Content-Disposition", "attachment",
-                        filename=Header(os.path.basename(docx_path), "utf-8").encode())
-        msg.attach(part)
+    if docx_path:
+        if os.path.isfile(docx_path):
+            part = MIMEApplication(open(docx_path, "rb").read())
+            part.add_header("Content-Disposition", "attachment",
+                            filename=Header(os.path.basename(docx_path), "utf-8").encode())
+            msg.attach(part)
+        else:
+            print("[WARN] Word 附件缺失, 邮件只发正文: %s" % docx_path)
 
     if port == 465:
         srv = smtplib.SMTP_SSL(host, port, timeout=20)
@@ -252,8 +265,13 @@ def send_hermes(text, platform, docx_path=None):
     平台名用 hermes 的原生名(weixin / feishu), 裸平台名 = 发到 home channel。
     """
     body = text
-    if docx_path and os.path.isfile(docx_path):
-        body = "%s\nMEDIA:%s" % (text, docx_path)
+    if docx_path:
+        if os.path.isfile(docx_path):
+            body = "%s\nMEDIA:%s" % (text, docx_path)
+        else:
+            # 不再静默跳过(2026-10-20): 原来这里 `if docx_path and isfile(...)`
+            # 条件不满足就当作"没附件", 用户收到纯文本却以为带 Word, 事后无从查证。
+            print("[WARN] Word 附件缺失, 本次只发正文: %s" % docx_path)
     cmd = [HERMES_COMMAND, "send", "--to", platform, "--file", "-"]
     try:
         proc = subprocess.run(cmd, input=body.encode("utf-8"),
@@ -535,8 +553,18 @@ def main():
     if data is None:
         print("[提示] 政策库为空, 无可推送内容。")
         return 1
-    text = brief_text(args.date, data)
     docx = os.path.join(DATA_DIR, "reports", "%s-policy-report.docx" % args.date)
+    # 推送前确定性补齐 Word 日报(2026-10-20 加固): Word 由 Agent 照 prompt 执行
+    # `report.py --docx` 生成, 实测会漏(10-20 只出 csv/md/xlsx)。原来这里是
+    # 静默跳过附件 —— 用户收到纯文本却以为带 Word, 事后从推送记录里查不出来。
+    # 现在缺就补, 补不上就在正文里明确标注"无 Word 附件", 不再假装有。
+    docx_ok = os.path.isfile(docx) and os.path.getsize(docx) > 0
+    if not docx_ok:
+        if args.dry_run:
+            print("[WARN] Word 日报缺失(%s), 实际推送时会自动补生成" % docx)
+        else:
+            docx_ok = (report.ensure_docx(args.date, args.db_path) == 0)
+    text = brief_text(args.date, data, docx_ok=docx_ok)
     # 审阅渠道(Hermes 型)要显式纳入本次集合, 否则只发钉钉就发不到微信
     review_key = channel_key_for_label(review_label) if review_label else None
     channels = _build_channels(text, args.date, docx,

@@ -177,6 +177,31 @@
   子进程); `push_report.py` 在 `main()` 开头调用, 让任何入口的渠道集合一致。
 - 回归: 自测 142 → 143 条全绿(新增"人工 shell 场景下渠道能从 .env 补齐"一条)。
 
+#### G7 · Word 日报"生成靠 Agent 记性 + 附件缺失静默跳过" → 推送出去的可能只有正文
+- 位置: `scripts/report.py`(`ensure_docx` / `--ensure-docx`); `scripts/push_report.py`
+  (`brief_text` / `send_hermes` / `send_mail` / `main()` 日报分支); `scripts/run_scan.sh`(跑批结束兜底)
+- 现场证据(2026-10-20 端到端验证时发现): 生产 `data/reports/` 里 10-19 有
+  `.md/.xlsx/.csv/.docx` 四件套, **10-20 只有 `.md/.xlsx/.csv` —— 缺 `.docx`**。
+  追因: Word 日报由 `report.py --docx` 生成, 而这一步是 **Agent 照 prompt 执行**的
+  (`run_scan.sh` 只把 `report.py --date X --excel --docx` 写进 prompt), Agent 这次
+  漏了 `--docx`; 而推送侧是 `if docx_path and os.path.isfile(docx_path)` ——
+  **文件不存在就静默跳过附件**, 一声不吭。
+- 后果(比"少个附件"严重): 用户收到的是纯文本, 却以为带 Word; **事后从推送记录里
+  完全看不出来** —— 邮箱/Hermes 通道都没留下"附件缺失"的痕迹, 等用户发现时已经
+  过了好几天, 而且**每一次推送都这样**。
+- 修法(两道确定性兜底 + 如实标注):
+  - `report.py` 新增 `ensure_docx(date)`: Word 缺失时补生成一次, 已有则幂等不动;
+    补不上返回 1 并打 `[WARN]`。新增 `--ensure-docx` 入口供脚本调用。
+  - `run_scan.sh` 跑批结束(Hermes 执行完、推送之前)调一次 `--ensure-docx` —— 修
+    "扫描产物不完整"这个根因。
+  - `push_report.py` 推送前再兜一次 —— 覆盖手工跑、面板跑、Agent 直接跑等所有入口;
+    补不上就在正文页脚明确写「⚠️ 本次无 Word 附件」, 不再无条件宣称
+    "全文见 Markdown / Word / Excel"。
+  - `send_hermes` / `send_mail` 附件缺失时打 `[WARN]`, 不再静默。
+  - `report.py` 的 `--docx` 分支把 `ImportError` 以外的异常也接住, 优雅降级但留痕。
+- 回归: 自测 143 → 150 条全绿(新增 `ReportAttachmentTests` 7 条: 幂等/补生成/补不上/
+  推送前补齐/正文如实标注/页脚标注/渠道侧告警)。
+
 #### G3 · 诊断/更新脚本自身有三个坑, 现场第一次跑就卡住 → 全部修掉
 - 位置: `scripts/deploy_update.sh`; `scripts/diagnose_push.py`; `scripts/buildinfo.py`;
   `.gitignore`; `scripts/push_report.py`(`.pushed` 标记)

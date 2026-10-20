@@ -146,8 +146,8 @@ case "$SCOPE" in
 esac
 
 case "$MODE" in
-  am) PROMPT="生成 $SCAN_DATE 的政策监测日报: 仅检索外国政府动植物疫情管控政策变化, 完成政策抽取、核验、对华影响研判, 生成 Markdown+Excel+Word 政策日报。$PUSH_INSTRUCTION" ;;
-  pm) PROMPT="执行 $SCAN_DATE 的政策晚扫增量: 仅检索外国政府官方检疫/进出口政策变化, 对新增政策完成抽取、核验、影响研判, 并刷新当日政策日报。$PUSH_INSTRUCTION" ;;
+  am) PROMPT="生成 $SCAN_DATE 的政策监测日报: 仅检索外国政府动植物疫情管控政策变化, 完成政策抽取、核验、对华影响研判, 然后用 scripts/report.py --date $SCAN_DATE --excel --docx 生成 Markdown+Excel+Word 政策日报(两个开关都要带, 漏 --docx 就不会有 Word 简报)。$PUSH_INSTRUCTION" ;;
+  pm) PROMPT="执行 $SCAN_DATE 的政策晚扫增量: 仅检索外国政府官方检疫/进出口政策变化, 对新增政策完成抽取、核验、影响研判, 然后用 scripts/report.py --date $SCAN_DATE --excel --docx 刷新当日政策日报(两个开关都要带, 漏 --docx 就不会有 Word 简报)。$PUSH_INSTRUCTION" ;;
   policy) PROMPT="执行 $SCAN_DATE 的政策变化扫描(运行日期 $SCAN_DATE, 东八区): 用 global-policy-search 技能, 按 config/sources.yaml 的 policy_queries 检索 WTO ePing 与外国官方检疫机构的动植物检疫管控政策变化(不采集中国海关总署政策), 只收录发布时间在近 7 天内的新政策(常年挂网的历史公告页与日期不明的页面跳过, 不入库), 抽取为政策记录并完成核验与对华影响研判, 最后用 scripts/report.py --date $SCAN_DATE --excel --docx 生成政策日报。$PUSH_INSTRUCTION" ;;
   *) echo "用法: $0 [am|pm|policy] [--review-channel <渠道> | --broadcast]"; exit 2 ;;
 esac
@@ -164,6 +164,12 @@ cd "$REPO"  # agent 依赖仓库相对路径(config/sources.yaml, scripts/*)
 if [ -n "${HERMES_RUN_CMD:-}" ]; then
   eval "${HERMES_RUN_CMD/\{PROMPT\}/$PROMPT}"
   RC=$?
+  # 确定性补齐日报产物(2026-10-20 加固): Word 日报是 `report.py --docx` 生成的,
+  # 而那一步由 Agent 照 prompt 执行 —— 实测 10-20 的跑批漏掉了 --docx, 只产出
+  # csv/md/xlsx, 而推送侧当时是静默跳过附件(用户收到纯文本却以为带 Word)。
+  # 跑批结束兜底补齐一次: 已有则不动, 补不上就告警(推送会只带正文并如实标注)。
+  "$PY" "$REPO/scripts/report.py" --date "$SCAN_DATE" --ensure-docx \
+    || echo "[$(date '+%F %T')] run_scan: Word 日报补生成失败(推送将只带正文)"
   echo "[$(date '+%F %T')] run_scan mode=$MODE date=$SCAN_DATE done rc=$RC"
   exit $RC
 fi

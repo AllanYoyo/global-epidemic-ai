@@ -101,6 +101,10 @@ python -c "import sqlite3;con=sqlite3.connect('database/epidemic.db');print(con.
 - **生产数据目录**：生产 VPS 应设 `EPIDEMIC_DATA_DIR` / `EPIDEMIC_DB` 指到 repo 之外（如 `/opt/global-epidemic-ai`）；如果日报里没数据但数据目录里有文件，先确认进程实际读的是哪个路径（默认是 repo 内 `data/`、`database/`）。
 - **库损坏/误删需要重建**：`data/events/<日期>/*.json` 是入库镜像，用 `python scripts/normalize.py --input <json> --db --max-age-days 0` 逐个重放即可重建（重放的是历史镜像，必须关掉旧闻拦截）；日常请备份 `database/epidemic.db` 与 `data/`。
 - **`.pushed` 标志文件导致不推送**：确属当天已发过的记录，删除 `data/reports/.pushed/<日期>.flag` 或直接用 `--force`（推荐后者）。
+- **日报只有正文、没有 Word 附件**（2026-10-20 现场）：Word 日报由 `report.py --docx` 生成，而这一步是 **Agent 照 prompt 执行**的 —— 实测跑批漏了 `--docx`，只产出 `.md/.xlsx/.csv`；推送侧原来还会**静默跳过附件**，事后从推送记录里完全看不出来。
+  - 查产物：`ls -la data/reports/<日期>-policy-report.*`（缺 `.docx` 就是没生成）。
+  - 补生成：`python scripts/report.py --date <YYYY-MM-DD> --ensure-docx`（缺失才补，幂等）。
+  - 现在两道自动兜底：跑批结束（`run_scan.sh`）与推送前（`push_report.py`）各补一次；补不上会在正文页脚写「⚠️ 本次无 Word 附件」并在日志打 `[WARN]`。
 
 ---
 

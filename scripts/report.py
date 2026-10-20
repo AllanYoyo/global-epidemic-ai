@@ -310,12 +310,56 @@ def export_table(base_path, events):
         return path
 
 
+def ensure_docx(date, db_path=None):
+    """Word 日报缺失时补生成一次; 已存在则原样保留(幂等)。返回 0=可用, 1=仍不可用。
+
+    为什么要有这个入口(2026-10-20 生产现场发现):
+      Word 日报由 `report.py --docx` 生成, 而那一步是 **Agent 照 prompt 执行** 的
+      —— 实测 10-20 的跑批漏掉了 --docx, 只产出 csv/md/xlsx。而推送侧当时是
+      `if isfile(docx_path)` **静默跳过附件**: 用户收到的是纯文本, 以为带 Word,
+      事后从推送记录里完全看不出来(钉钉/微信都收过"缺附件"的日报)。
+
+      现在补两道确定性兜底 —— 跑批结束(run_scan.sh)与推送前(push_report.py)
+      各调本入口一次: 缺就补, 补不上就明确告警, 不再假装有附件。
+    """
+    path = os.path.join(DATA_DIR, "reports", "%s-policy-report.docx" % date)
+    if os.path.isfile(path) and os.path.getsize(path) > 0:
+        print("[OK] Word 日报已存在: %s" % path)
+        return 0
+    print("[提示] Word 日报缺失, 正在补生成: %s" % path)
+    try:
+        import report_docx
+        # 显式给 out_dir: 与上面的检查路径保持同一个目录, 避免 report_docx
+        # 用它自己导入的 DATA_DIR 写到别处去(生产上 DATA_DIR 可被环境变量改写)。
+        print("[OK] %s" % report_docx.build(date, out_dir=os.path.join(DATA_DIR, "reports"),
+                                           db_path=db_path))
+    except ImportError:
+        print("[WARN] 未安装 python-docx, 无法生成 Word 简报(推送将只带正文)")
+        return 1
+    except SystemExit as exc:
+        # report_docx 在"政策库为空"时抛的是 SystemExit(不是 Exception) ——
+        # 不接住的话会直接中断调用方(推送流程被莫名打断, 退出码还很难解释)。
+        print("[WARN] Word 简报生成中止: %s" % (exc or "未知原因"))
+        return 1
+    except Exception as exc:
+        print("[WARN] Word 简报生成失败: %s" % exc)
+        return 1
+    if os.path.isfile(path) and os.path.getsize(path) > 0:
+        return 0
+    print("[WARN] Word 简报生成后仍不可用: %s" % path)
+    return 1
+
+
 def main():
     ap = argparse.ArgumentParser(description="生成政策监测日报")
     ap.add_argument("--date", default=biz_today()); ap.add_argument("--days-back", type=int, default=14)
     ap.add_argument("--policy", action="store_true", help="(已废弃, 无效果) 政策为唯一模式, 兼容旧定时/面板命令")
     ap.add_argument("--excel", action="store_true"); ap.add_argument("--docx", action="store_true"); ap.add_argument("--db-path")
+    ap.add_argument("--ensure-docx", action="store_true",
+                    help="Word 日报缺失时才补生成一次(跑批后/推送前的兜底; 已有则不动)")
     args = ap.parse_args()
+    if args.ensure_docx:
+        return ensure_docx(args.date, args.db_path)
     try:
         data = collect(args.date, args.days_back, args.db_path)
     except ValueError as exc:
@@ -334,7 +378,9 @@ def main():
     if args.docx:
         try:
             import report_docx; print("[OK] %s" % report_docx.build(args.date, data))
-        except ImportError: print("[提示] 未安装 python-docx, 跳过 Word 简报")
+        except ImportError: print("[WARN] 未安装 python-docx, 跳过 Word 简报")
+        except SystemExit as exc: print("[WARN] Word 简报生成中止: %s" % (exc or "未知原因"))
+        except Exception as exc: print("[WARN] Word 简报生成失败: %s" % exc)
     print("\n本期: 新增 %d 条, 近期变动 %d 条(政策库共 %d 条)。" % (len(new), len(active), len(data["all"])))
     return 0
 

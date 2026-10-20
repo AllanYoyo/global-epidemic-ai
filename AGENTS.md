@@ -37,6 +37,7 @@ python scripts/collect.py --url <url> --title <标题>  # 原文存档到 data/r
 python scripts/normalize.py --input <json> --db     # 入库（支持 - 读 stdin）
 python scripts/risk.py --event-id <id> --dim trade=4 --dim biosecurity=3,...   # 影响写回
 python scripts/report.py --date YYYY-MM-DD --excel --docx   # 日报（--policy 已废弃为 no-op）
+python scripts/report.py --date YYYY-MM-DD --ensure-docx   # Word 日报缺失才补生成（幂等；跑批/推送的兜底入口）
 python scripts/push_report.py --date YYYY-MM-DD --dry-run   # 推送预览（企业微信/钉钉/SMTP）
 python scripts/push_report.py --date YYYY-MM-DD --review-channel weixin  # 只发微信会话（阶段 1，渠道会话必用；经 hermes send 投递）
 python scripts/push_report.py --date YYYY-MM-DD --review-approved  # 审核通过，发完剩余渠道（阶段 2）
@@ -74,6 +75,10 @@ bash scripts/deploy_update.sh policy                        # 生产更新（git
   - **阶段 2 无待审记录即拒绝**（原实现是"警告一下照常全量发"，又一个"忘了→发到所有渠道"的口子）。
   - **生产更新**：`bash scripts/deploy_update.sh policy`（git pull + 依赖 + 自检）。仓库只有 clone 没有更新机制，生产不 pull = 闸门加固根本没生效——这正是 10-20 事故的载体。
   - **现场诊断**：`python scripts/diagnose_push.py` 一次打印：运行代码 commit（与远端是否一致）、当日范围锁/待审/已推标记、渠道配置（自动读 `~/.hermes/.env`，只配一个渠道时会提示"先在微信审阅"跑不通）、crontab 是否显式声明范围、调度日志尾部（自动找 `cron.log`/`scan.log`，有无 `scope=` 标记＝新旧版 run_scan.sh）。推送内容尾部也带 `代码 <commit>` 指纹，`.pushed` 标记带**范围与声明来源**。
+- **Word 附件闭环（2026-10-20 现场新发现）**：Word 日报由 `report.py --docx` 生成，而这一步是 **Agent 照 prompt 执行**的——实测 10-20 的跑批漏了 `--docx`，只产出 csv/md/xlsx；而推送侧原本是 `if isfile(docx_path)` **静默跳过附件**，用户收到纯文本却以为带 Word，事后从推送记录里完全查不出。现在有两道确定性兜底 + 如实标注：
+  - `report.py --ensure-docx`：Word 缺失才补生成（幂等），补不上返回 1 并打 `[WARN]`。`run_scan.sh` 跑批结束调一次，`push_report.py` 推送前再兜一次（覆盖手工跑/面板跑/Agent 直接跑等所有入口）。
+  - 补不上就在正文页脚明确写「⚠️ 本次无 Word 附件」，不再无条件宣称"全文见 Markdown / Word / Excel"；`send_hermes` / `send_mail` 附件缺失时打 `[WARN]`。
+  - `report.py --docx` 的异常一律优雅降级但留痕（不崩、不装没看见）。
 
 ## 约定与注意事项
 

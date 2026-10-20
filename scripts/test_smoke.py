@@ -457,6 +457,8 @@ class PushReportReviewGateTests(unittest.TestCase):
                               side_effect=lambda t, title: self.calls.append(("dingtalk", t, title))),
             mock.patch.object(self.pr, "send_mail",
                               side_effect=lambda s, t, p: self.calls.append(("mail", s, t, p))),
+            # 2026-10-20: 推送前会确定性补齐 Word 日报, 测试里打桩避免真去生成文件
+            mock.patch.object(self.pr.report, "ensure_docx", return_value=0),
             mock.patch.object(self.pr.report, "collect",
                               return_value={"new": [], "active": [], "covered": []}),
         ]
@@ -861,6 +863,8 @@ class PushScopeLockTests(unittest.TestCase):
                               side_effect=lambda t: self.calls.append(("wechat", t))),
             mock.patch.object(self.pr, "send_dingtalk",
                               side_effect=lambda t, title: self.calls.append(("dingtalk", t, title))),
+            # 2026-10-20: 推送前会确定性补齐 Word 日报, 测试里打桩避免真去生成文件
+            mock.patch.object(self.pr.report, "ensure_docx", return_value=0),
             mock.patch.object(self.pr.report, "collect",
                               return_value={"new": [], "active": [], "covered": []}),
         ]
@@ -1156,6 +1160,8 @@ class PushHermesChannelTests(unittest.TestCase):
                               side_effect=self._fake_available),
             mock.patch.object(self.ps, "channel_available",
                               side_effect=self._fake_available),
+            # 2026-10-20: 推送前会确定性补齐 Word 日报, 测试里打桩避免真去生成文件
+            mock.patch.object(self.pr.report, "ensure_docx", return_value=0),
             mock.patch.object(self.pr.report, "collect",
                               return_value={"new": [], "active": [], "covered": []}),
         ]
@@ -1307,6 +1313,150 @@ class PushHermesChannelTests(unittest.TestCase):
             with self.assertRaises(RuntimeError) as ctx:
                 self._real_send_hermes("正文", "weixin", None)
         self.assertIn("投递失败", str(ctx.exception))
+
+
+class ReportAttachmentTests(unittest.TestCase):
+    """Word 附件闭环(2026-10-20 生产现场发现)。
+
+    现场事实: 10-20 的跑批**漏掉了 `report.py --docx`**(只产出 csv/md/xlsx),
+    而 push_report.py 侧是 `if isfile(docx_path)` **静默跳过附件** ——
+    用户收到纯文本, 以为带 Word, 事后从推送记录里完全看不出来。
+
+    现在: 推送前/跑批后确定性补齐(report.ensure_docx), 补不上就在正文里明确
+    标注"无 Word 附件", 渠道侧也不再静默跳过。
+    """
+
+    def setUp(self):
+        import push_report
+        import push_scope
+        import report
+        self.pr = push_report
+        self.ps = push_scope
+        self.report = report
+        self.tmp = tempfile.mkdtemp(prefix="report-attach-")
+        self.env_backup = dict(os.environ)
+        os.environ["DINGTALK_WEBHOOK"] = "https://test.example/dingtalk"
+        os.environ.pop("REVIEW_CHANNEL", None)
+
+    def tearDown(self):
+        os.environ.clear()
+        os.environ.update(self.env_backup)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    # ---- report.ensure_docx ----
+
+    def test_ensure_docx_noop_when_present(self):
+        os.makedirs(os.path.join(self.tmp, "reports"), exist_ok=True)
+        with open(os.path.join(self.tmp, "reports", "2026-10-20-policy-report.docx"), "wb") as f:
+            f.write(b"x")
+        with mock.patch.object(self.report, "DATA_DIR", self.tmp):
+            with redirect_stdout(io.StringIO()) as buf:
+                rc = self.report.ensure_docx("2026-10-20")
+        self.assertEqual(rc, 0)
+        self.assertIn("已存在", buf.getvalue())
+
+    def test_ensure_docx_generates_when_missing(self):
+        def fake_build(date, data=None, out_dir=None, db_path=None):
+            out = os.path.join(out_dir, "%s-policy-report.docx" % date)
+            os.makedirs(out_dir, exist_ok=True)
+            with open(out, "wb") as f:
+                f.write(b"docx")
+            return out
+        with mock.patch.object(self.report, "DATA_DIR", self.tmp), \
+             mock.patch.dict(sys.modules, {"report_docx": mock.Mock(build=fake_build)}):
+            with redirect_stdout(io.StringIO()) as buf:
+                rc = self.report.ensure_docx("2026-10-20")
+        self.assertEqual(rc, 0, buf.getvalue())
+        self.assertTrue(os.path.isfile(
+            os.path.join(self.tmp, "reports", "2026-10-20-policy-report.docx")))
+
+    def test_ensure_docx_reports_failure(self):
+        def boom(*a, **k):
+            raise RuntimeError("docx 炸了")
+        with mock.patch.object(self.report, "DATA_DIR", self.tmp), \
+             mock.patch.dict(sys.modules, {"report_docx": mock.Mock(build=boom)}):
+            with redirect_stdout(io.StringIO()) as buf:
+                rc = self.report.ensure_docx("2026-10-20")
+        self.assertEqual(rc, 1)
+        self.assertIn("[WARN]", buf.getvalue())
+
+    def test_ensure_docx_handles_systemexit(self):
+        # report_docx 在"政策库为空"时抛的是 SystemExit(BaseException 而非
+        # Exception), 不接住会直接打断推送流程 —— 必须降级成 WARN 而不是崩。
+        def boom(*a, **k):
+            raise SystemExit("政策库为空")
+        with mock.patch.object(self.report, "DATA_DIR", self.tmp), \
+             mock.patch.dict(sys.modules, {"report_docx": mock.Mock(build=boom)}):
+            with redirect_stdout(io.StringIO()) as buf:
+                rc = self.report.ensure_docx("2026-10-20")
+        self.assertEqual(rc, 1)
+        self.assertIn("[WARN]", buf.getvalue())
+        self.assertNotIn("Traceback", buf.getvalue())
+
+    # ---- push_report 侧 ----
+
+    def _run_push(self, args, ensure_rc=0):
+        sent = []
+
+        def fake_ensure(date, db_path=None):
+            sent.append(("ensure", date))
+            return ensure_rc
+
+        buf = io.StringIO()
+        with mock.patch.object(self.pr, "PUSH_FLAG_DIR", os.path.join(self.tmp, ".pushed")), \
+             mock.patch.object(self.pr, "PENDING_DIR", os.path.join(self.tmp, ".pending")), \
+             mock.patch.object(self.ps, "SCOPE_DIR", os.path.join(self.tmp, ".scope")), \
+             mock.patch.object(self.pr, "send_dingtalk",
+                               side_effect=lambda t, title: sent.append(("dingtalk", t, title))), \
+             mock.patch.object(self.pr.report, "collect",
+                               return_value={"new": [], "active": [], "covered": []}), \
+             mock.patch.object(self.pr.report, "ensure_docx", side_effect=fake_ensure), \
+             mock.patch("sys.argv", ["push_report.py"] + args), \
+             redirect_stdout(buf):
+            try:
+                rc = self.pr.main()
+            except SystemExit as e:
+                rc = e.code
+        return rc, buf.getvalue(), sent
+
+    def test_push_report_regenerates_docx_before_push(self):
+        # Word 缺失时, 推送前必须先补生成(确定性), 而不是静默跳过附件
+        rc, out, sent = self._run_push(["--date", "2026-12-10", "--review-channel", "dingtalk"])
+        self.assertEqual(rc, 0, out)
+        self.assertIn(("ensure", "2026-12-10"), sent)
+
+    def test_push_report_marks_missing_word_in_body(self):
+        # 补不上时, 正文必须如实标注"无 Word 附件", 不能假装有
+        rc, out, sent = self._run_push(["--date", "2026-12-11", "--review-channel", "dingtalk"],
+                                       ensure_rc=1)
+        self.assertEqual(rc, 0, out)
+        bodies = [c[1] for c in sent if c[0] == "dingtalk"]
+        self.assertEqual(len(bodies), 1, out)
+        self.assertIn("无 Word 附件", bodies[0])
+
+    def test_brief_text_marks_missing_word(self):
+        data = {"new": [], "active": [], "covered": []}
+        self.assertIn("无 Word 附件", self.pr.brief_text("2026-12-12", data, docx_ok=False))
+        self.assertNotIn("无 Word 附件", self.pr.brief_text("2026-12-12", data, docx_ok=True))
+
+    def test_send_hermes_warns_when_docx_missing(self):
+        rec = {}
+
+        def fake_run(cmd, **kw):
+            rec["input"] = kw.get("input")
+
+            class P:
+                returncode = 0
+                stdout = b"ok"
+                stderr = b""
+            return P()
+
+        missing = os.path.join(self.tmp, "不存在.docx")
+        with mock.patch.object(self.pr.subprocess, "run", fake_run), \
+                redirect_stdout(io.StringIO()) as buf:
+            self.pr.send_hermes("正文", "weixin", missing)
+        self.assertIn("附件缺失", buf.getvalue())
+        self.assertNotIn("MEDIA:", rec["input"].decode("utf-8"))
 
 
 class BriefTextFocusTests(unittest.TestCase):

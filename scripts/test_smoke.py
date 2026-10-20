@@ -1017,6 +1017,21 @@ class PushScopeLockTests(unittest.TestCase):
             "new": [], "active": [], "covered": []})
         self.assertIn("代码", text)
 
+    def test_diagnose_flags_scope_none_in_log(self):
+        # 诊断脚本要能发现"cron 上下文没识别出来 → 本轮没推送"
+        import diagnose_push
+        log = os.path.join(self.tmp, "cron.log")
+        with open(log, "w", encoding="utf-8") as f:
+            f.write("[2026-10-20 07:30:00] run_scan mode=policy date=2026-10-20 "
+                    "tz=Asia/Shanghai scope=none src=未声明(非定时任务上下文) start\n")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = diagnose_push.main(["--date", "2026-10-20", "--log", log,
+                                      "--log-tail", "50"])
+        out = buf.getvalue()
+        self.assertIn("scope=none", out)
+        self.assertNotEqual(rc, 0)
+
 
 class BriefTextFocusTests(unittest.TestCase):
     """IM 卡片"重点关注"口径必须与 report.py 一致(2026-10-19 修复)。

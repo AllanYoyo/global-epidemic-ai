@@ -126,9 +126,9 @@
     (只读)打印代码版本(与远端是否一致)/范围锁/待审与已推标记/渠道配置/crontab 是否
     显式声明范围/cron 日志尾部(有无 `scope=` 可区分新旧版 run_scan.sh);
     新增 `scripts/deploy_update.sh` 消除"生产不 pull = 加固没生效"这个根因载体。
-- 回归: `scripts/test_smoke.py::PushScopeLockTests` 新增 17 条(范围锁读写/CLI/四条拦截/
-  放行/消息路径落锁/dry-run 不落锁/编排层静态断言), `PushReportReviewGateTests` 相应改写
-  (`--broadcast` 需先有全量声明; 阶段 2 无待审记录改为拒绝); 自测 108 → 125 条全绿。
+- 回归: `scripts/test_smoke.py::PushScopeLockTests` 新增 18 条(范围锁读写/CLI/四条拦截/
+  放行/消息路径落锁/dry-run 不落锁/诊断脚本/编排层静态断言), `PushReportReviewGateTests`
+  相应改写(`--broadcast` 需先有全量声明; 阶段 2 无待审记录改为拒绝); 自测 108 → 126 条全绿。
 - **未闭环(需现场确认)**: 本地无生产环境, 无法直接证明 10-20 那次是"旧代码"还是
   "新代码 + Agent 选了 --broadcast"。两条路径都已封死, 且新增 `diagnose_push.py`
   可在 VPS 上一条命令给出答案; 另需确认生产 crontab 是否已加 `--broadcast`。

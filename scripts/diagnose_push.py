@@ -143,13 +143,13 @@ def check_crontab():
                   "建议显式写成 `run_scan.sh <模式> --broadcast`")
 
 
-def check_cron_log(tail):
+def check_cron_log(log_path, tail):
     section("5. 调度日志尾部(那次推送走的哪个分支)")
-    if not os.path.isfile(CRON_LOG):
-        print("  找不到 %s(可用 --log 指定)" % CRON_LOG)
+    if not os.path.isfile(log_path):
+        print("  找不到 %s(可用 --log 指定)" % log_path)
         return
     try:
-        with open(CRON_LOG, encoding="utf-8", errors="ignore") as f:
+        with open(log_path, encoding="utf-8", errors="ignore") as f:
             lines = f.readlines()
     except OSError as exc:
         print("  读取失败: %s" % exc)
@@ -161,21 +161,29 @@ def check_cron_log(tail):
     if not any("scope=" in ln for ln in picked):
         _warn("日志里没有 scope= 标记 —— 说明这次跑的是 2026-10-20 之前的旧版 "
               "run_scan.sh(旧版没有推送范围声明, 默认全量推送)")
+    # scope=none = 没能识别成定时任务上下文, 本轮不扩散(日报没推出去)
+    for ln in picked:
+        if "scope=none" in ln:
+            _problem("日志里出现 scope=none: 本轮被判定为非定时任务上下文, "
+                     "**没有推送**。若这行本该是 cron 调度, 说明 cron 识别失败 —— "
+                     "请在 crontab 里显式加 --broadcast(见 config/crontab.example)")
+            break
 
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser(description="推送链路现场诊断(只读)")
     ap.add_argument("--date", default=biz_today(), help="业务日期(东八区), 默认今天")
     ap.add_argument("--log", default=CRON_LOG, help="调度日志路径")
     ap.add_argument("--log-tail", type=int, default=60, help="日志尾部行数")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
+    del problems[:]   # 同一进程内重复调用时, 结论只反映本次检查
 
     print("疫见全球 · 推送链路诊断  日期=%s" % args.date)
     check_code_version()
     check_scope_state(args.date)
     check_channels()
     check_crontab()
-    check_cron_log(args.log_tail)
+    check_cron_log(args.log, args.log_tail)
 
     section("结论")
     if problems:

@@ -139,7 +139,10 @@ def main(argv=None):
                     help="声明本轮只发该渠道(wechat/dingtalk/mail, 也认中文别名)")
     ap.add_argument("--broadcast", action="store_true",
                     help="声明本轮为全量推送(仅定时任务路径用)")
-    ap.add_argument("--source", default="manual", help="声明来源(写进锁里便于审计)")
+    ap.add_argument("--source", default="",
+                    help="声明来源(写进锁里便于审计)。**全量声明必须显式给出**, "
+                         "例如 run_scan.sh:policy:cron自动识别 / manual:运维补发; "
+                         "留空会被拒绝 —— 10-20 事故就是一次'没写来源'的全量声明")
     ap.add_argument("--note", default="", help="备注(写进锁里)")
     ap.add_argument("--show", action="store_true", help="只打印当前范围锁, 不改写")
     ap.add_argument("--clear", action="store_true", help="清掉当前范围锁")
@@ -198,6 +201,15 @@ def main(argv=None):
         return 0
 
     if args.broadcast:
+        # 全量声明必须显式写来源: 10-20 事故的现场锁就是 source=manual(默认值),
+        # 说明有人/有 Agent 直接敲了 push_scope.py --broadcast 就把本轮变成全量。
+        # 来源留空 → 拒绝, 逼着声明方说清"这轮凭什么全量"。
+        if not args.source.strip():
+            print("[错误] 全量推送的范围声明必须显式给出 --source(写明依据)。")
+            print("       · 定时任务: 由 scripts/run_scan.sh <模式> --broadcast 自动声明")
+            print("       · 人工运维补发: --source manual:运维补发(人已确认扩散)")
+            print("       不写来源的声明一律拒绝 —— 10-20 事故就是一条没写来源的全量声明。")
+            return 1
         path = write_scope(args.date, "broadcast", source=args.source, note=args.note)
         print("[OK] 已写入推送范围锁: %s · 全量(定时任务) · 来源 %s"
               % (args.date, args.source))

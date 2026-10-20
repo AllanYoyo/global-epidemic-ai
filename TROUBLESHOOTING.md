@@ -71,7 +71,7 @@ python -c "import sqlite3;con=sqlite3.connect('database/epidemic.db');print(con.
 | 同一天重复执行只发了一次 | **这是幂等特性**：成功后写 `data/reports/.pushed/<日期>.flag`；确认有新内容要重发用 `--force`（渠道会话里补发用 `--force --review-channel <渠道>`，仍只发该渠道） |
 | 提示"未指定推送范围"退出码 2，日报没发出去 | **默认不扩散**：必须显式给 `--review-channel <渠道>`（渠道会话阶段 1）、`--review-approved`（阶段 2）或 `--broadcast`（定时全量）之一。这是刻意的 fail-closed，防止"忘了指定渠道"被当成"发所有渠道" |
 | 提示"审阅渠道无法识别"退出码 1 | `--review-channel` 的值认不出。合法值：`wechat` / `dingtalk` / `mail`，也认中文别名（企业微信/钉钉/邮箱）与简写（wx/wecom/email）。**认不出时脚本中止而不是发到所有渠道** |
-| 提示"--broadcast 被拒绝/被推送范围锁拒绝"退出码 1 | `--broadcast` 不再自声明：全量推送必须先由**调度路径**声明范围——`scripts/run_scan.sh <模式> --broadcast`（推荐）或 `python scripts/push_scope.py --date <日期> --broadcast --source manual`。若提示"锁为只发 X"，说明本轮已声明为渠道会话，先在原渠道确认，再用 `--review-approved` |
+| 提示"--broadcast 被拒绝/被推送范围锁拒绝"退出码 1 | `--broadcast` 不再自声明：全量推送必须先由**调度路径**声明范围——`scripts/run_scan.sh <模式> --broadcast`（推荐，**且必须在 cron 上下文里跑**）或 `python scripts/push_scope.py --date <日期> --broadcast --source manual:运维补发`（人工运维专用，`--source` 必须写明依据，留空会被拒绝）。若提示"锁为只发 X"，说明本轮已声明为渠道会话，先在原渠道确认，再用 `--review-approved` |
 | 明明只想发微信，钉钉群也收到了 | ①先跑 `python scripts/diagnose_push.py`（只读诊断）：看当日范围锁/待审标记、crontab 是否显式声明范围、调度日志有无 `scope=` 标记；②查是否用了不带 `--review-channel` 的命令（现在默认不推送，不会漏发）；③查该日期是否已有 `.review-pending` 待审标记（有则任何推送都只发审阅渠道）；④查是否走了 `--broadcast`；⑤**确认生产上跑的是新代码**：`git -C /opt/global-epidemic-ai/repo rev-parse --short HEAD`，与 `git ls-remote origin policy` 不一致就先 `bash scripts/deploy_update.sh policy` |
 | 报告说"审阅渠道 企业微信 未配置(WECHAT_WEBHOOK)" | 生产 `.env` 里**没配企业微信**。`~/.hermes/.env` 需要 `WECHAT_WEBHOOK=`（企业微信群机器人地址）。没配的话"先在微信审阅"这一步直接中止，日报只可能落到已配的渠道（通常只有钉钉） |
 | 诊断脚本报"只配了 N 个渠道" | 同上：只配一个渠道时，"先在微信审阅再扩散"的工作流**根本跑不通**。要么补 `WECHAT_WEBHOOK`，要么接受"日报只落钉钉"这个事实 |

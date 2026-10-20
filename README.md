@@ -102,8 +102,9 @@ scripts/run_scan.sh policy --broadcast   # 政策扫(建议每日 07:30): 检索
 | 场景 | 发起方式 | 效果 |
 |---|---|---|
 | 渠道会话(微信/钉钉/邮箱里提的要求) | `scripts/run_scan.sh policy --review-channel wechat` 或 `python scripts/push_report.py --date X --review-channel wechat` | 只发该渠道；用户确认后 `--review-approved` 才发其余渠道 |
-| 定时任务 | `scripts/run_scan.sh policy --broadcast` | 全量推送 |
+| 定时任务 | `scripts/run_scan.sh policy --broadcast`（**必须在 cron 上下文里跑**） | 全量推送 |
 | 都没声明 | `scripts/run_scan.sh policy` | cron 上下文自动按定时任务全量；其它上下文**不扩散**（`--broadcast` 一律拒绝） |
+| 人工运维全量补发 | `python scripts/push_scope.py --date X --broadcast --source manual:运维补发` 后再 `python scripts/push_report.py --date X --broadcast` | 全量推送，留痕可审计（`--source` 必须写明依据） |
 
 `push_report.py --broadcast` **不再自声明**：没有调度路径的全量范围声明就拒绝执行（退出码 1），避免"谁喊一声都能发到所有渠道"。
 

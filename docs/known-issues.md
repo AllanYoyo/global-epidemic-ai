@@ -157,6 +157,26 @@
     下次事故复盘能一眼定性: 定时任务广播的, 还是有人手动声明的。
 - 回归: 自测 126 → 128 条全绿(新增诊断读 .env / 自动找 scan.log 两条)。
 
+#### G4 · 全量推送的"声明"仍可被随手做掉(现场锁 source=manual 暴露)→ 声明须写明依据 + 须发生在 cron 上下文
+- 位置: `scripts/push_scope.py`(`--broadcast` 的 `--source` 校验); `scripts/run_scan.sh`
+  (`--broadcast` 的 cron 上下文校验)
+- 现场证据: 10-20 生产上当日范围锁为 `scope=broadcast · source=manual ·
+  declared_at 12:34:47`, 紧接着 12:34:48 推送落钉钉。`manual` 正是
+  `push_scope.py --source` 的**默认值** —— 说明有人/有 Agent 直接敲了
+  `push_scope.py --broadcast` 就把那一轮变成全量。
+  **G2 把"广播需要声明"做成了硬约束, 却没管住"声明本身谁都能做"**:
+  Agent 只要照着文档敲一条 `push_scope.py --broadcast`, 就能绕开闸门。
+- 修法:
+  - **全量声明必须写明依据**: `push_scope.py --broadcast` 不再接受默认来源,
+    `--source` 留空即拒绝(退出码 1), 必须写清 `run_scan.sh:policy:cron自动识别`
+    或 `manual:运维补发` 这类依据, 并落进锁里供事后审计。
+  - **全量声明必须发生在 cron 上下文**: `run_scan.sh --broadcast` 在**非 cron
+    上下文**(手动/渠道会话触发)一律拒绝并退出码 2 —— 手动补跑与 cron 共用入口,
+    允许它自称定时任务, 就等于把"谁发起的"又交回给调用方。
+    人工运维确需全量补发, 走 `push_scope.py --broadcast --source manual:运维补发`
+    + `push_report.py --broadcast` 这条**显式留痕**的路。
+- 回归: 自测 128 → 130 条全绿(全量声明缺来源被拒 / 编排层静态断言)。
+
 ### 2026-10-19 专项复审 (commit 0459442 之后)
 
 #### G1 · 评审核闸门有 5 条漏法, "只发微信"实际会发到钉钉(用户实测)→ 全部 fail-closed

@@ -902,6 +902,16 @@ class PushScopeLockTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIsNone(self.ps.read_scope("2026-10-20"))
 
+    def test_broadcast_declaration_requires_source(self):
+        # 10-20 现场的锁是 source=manual(默认值) → 说明有人随手敲了
+        # push_scope.py --broadcast。现在全量声明必须写明依据, 留空即拒绝。
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = self.ps.main(["--date", "2026-10-20", "--broadcast"])
+        self.assertEqual(rc, 1)
+        self.assertIn("--source", buf.getvalue())
+        self.assertIsNone(self.ps.read_scope("2026-10-20"))
+
     def test_push_scope_label_only(self):
         buf = io.StringIO()
         with redirect_stdout(buf):
@@ -1009,6 +1019,13 @@ class PushScopeLockTests(unittest.TestCase):
         # 取"真正调用 Hermes"那一处, 而不是文件头注释里的 HERMES_RUN_CMD
         self.assertLess(text.index("push_scope.py"),
                         text.index('if [ -n "${HERMES_RUN_CMD:-}" ]'))
+
+    def test_run_scan_broadcast_requires_cron_context(self):
+        # 显式 --broadcast 也必须发生在 cron 上下文: 手动补跑与 cron 共用入口,
+        # 允许它自称定时任务, 就等于把"谁发起的"又交回给调用方(10-20 事故形态)。
+        text = self._run_scan_text()
+        self.assertIn('_is_cron_context', text)
+        self.assertIn('SCOPE" = "broadcast" ] && ! _is_cron_context', text)
 
     def test_card_carries_code_fingerprint(self):
         # 推送内容带代码指纹: 事故现场一眼看出"跑的是哪版代码"

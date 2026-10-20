@@ -46,6 +46,9 @@ description: 生成每日动植物检疫政策监测日报(Markdown + Word 简�
      仍然只发该渠道。
    - **来自定时任务**(cron `run_scan.sh`, 非渠道会话): 走
      `scripts/run_scan.sh <模式> --broadcast`(它会先写全量范围锁), 不要自己拼 `--broadcast`。
+     注意: `run_scan.sh --broadcast` **只在 cron 上下文里成立** —— 手动/会话触发时会被
+     拒绝并退出码 2(手动补跑与 cron 共用入口, 允许它自称定时任务就等于把"谁发起的"
+     又交回给调用方, 10-20 的钉钉误推正是这么来的)。
    - **本轮范围未声明**(例如手工跑了 `scripts/run_scan.sh policy`): **不要执行 `--broadcast`**;
      若本轮确实是某个渠道的会话, 按上面阶段 1 的写法只发那个渠道; 否则只生成日报, 不推送。
 

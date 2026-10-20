@@ -205,7 +205,8 @@ description: 监测各国政府动植物检疫与进出口管控政策变化。�
 
 - **来自定时任务**(cron `run_scan.sh`, 非渠道会话)→ 走
   `scripts/run_scan.sh <模式> --broadcast`: 它先写 broadcast 范围锁, prompt 里直接给出
-  `--broadcast` 指令(确定性, 无"若是…若是…")。
+  `--broadcast` 指令(确定性, 无"若是…若是…")。**该命令只在 cron 上下文里成立**,
+  手动/会话触发会被拒绝(退出码 2) —— 不要用"我以为这是定时任务"当理由去声明全量。
 
 其它约定:
 

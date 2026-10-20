@@ -94,6 +94,21 @@ else
   SCOPE_SOURCE="显式参数"
 fi
 
+# 显式 --broadcast 也必须发生在 cron 上下文里(2026-10-20 事故后加固):
+# 手动补跑/渠道会话触发时, run_scan.sh 与 cron 走的是同一个入口 —— 允许它自称
+# 定时任务, 就等于把"谁发起的"这个判断权又交回给了调用方, 10-20 的钉钉误推
+# 正是这么来的。人工运维确需全量补发, 走 push_scope.py 显式声明(见下方报错提示)。
+if [ "$SCOPE" = "broadcast" ] && ! _is_cron_context; then
+  echo "[错误] 全量推送只能由 cron 调度声明, 本轮不是 cron 上下文(手动/渠道会话触发), 已拒绝。"
+  echo "       10-20 事故正是'手动补跑被当成定时任务'导致日报发到了钉钉。"
+  echo "       · 渠道会话(先在原渠道完成, 确认后再扩散):"
+  echo "         scripts/run_scan.sh $MODE --review-channel <渠道>"
+  echo "       · 人工运维确需全量补发(人已确认扩散):"
+  echo "         python3 scripts/push_scope.py --date $SCAN_DATE --broadcast --source manual:运维补发"
+  echo "         python3 scripts/push_report.py --date $SCAN_DATE --broadcast"
+  exit 2
+fi
+
 # ---- 声明本轮推送范围(落盘成范围锁) ----
 # push_scope.py 会校验渠道名: 认不出就报错退出, 绝不静默当成"没设闸门"。
 case "$SCOPE" in

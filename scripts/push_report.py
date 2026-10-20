@@ -62,6 +62,22 @@ push_report.py 原版"配了哪个发哪个, 一发全发"做不到这一点 —
   ③ --message 曾完全绕过闸门; ④ 待审期间 --message 仍群发 —— 现在都只发审阅渠道。
   ⑤ "没指定渠道 = 全量发" 是最大的口子: 现在默认**不推送**(退出码 2), 全量必须
      显式 --broadcast(仅定时任务用)。
+
+推送范围锁(2026-10-20 钉钉误推事故后引入, 决定性修复)
+------------------------------------------------------
+上面 5 条加固仍留着一个结构性漏洞: **"本轮是渠道会话还是定时任务"由 Agent 临场
+判断**。而 `run_scan.sh` 是 cron 与手动补跑**共用**的入口 —— 手动补跑在 prompt
+眼里就是"定时任务那条路", 于是 Agent 选了 --broadcast, 日报发到了钉钉
+(2026-10-20 实测)。更糟的是 --broadcast 是"自声明"的: 谁喊一声都能全量, 脚本
+无从判断这到底是不是定时任务。
+
+现在推送范围**由发起方声明并落盘成锁**(scripts/push_scope.py):
+  data/reports/.push-scope/<日期>.lock  →  scope=review|channel=... 或 scope=broadcast
+  · scope=review    → 本轮只允许发该渠道; --broadcast 被拒绝(退出码 1)
+  · scope=broadcast → 本轮允许全量(定时任务路径声明)
+  · 没有锁          → --broadcast 被拒绝(全量只能由调度路径声明)
+本脚本**读锁执行**, 不再采信 Agent 的临场判断; 阶段 1 自己也会写锁, 阶段 2 发完
+清理锁。锁的写入方是 run_scan.sh(定时任务)或本脚本的 --review-channel(渠道会话)。
 """
 import argparse
 import base64
@@ -80,32 +96,16 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
 import report
+from buildinfo import fingerprint as code_fingerprint
 from normalize import DATA_DIR, biz_now, biz_today
+from push_scope import (REVIEW_CHANNEL_ALIASES, REVIEW_CHANNEL_ENV,
+                        REVIEW_CHANNEL_MAP, clear_scope, describe_scope,
+                        read_scope, write_scope)
 
 PUSH_FLAG_DIR = os.path.join(DATA_DIR, "reports", ".pushed")
 PENDING_DIR = os.path.join(DATA_DIR, "reports", ".review-pending")
-# REVIEW_CHANNEL 取值 → (环境变量名, 显示名)
-REVIEW_CHANNEL_MAP = {
-    "wechat": ("WECHAT_WEBHOOK", "企业微信"),
-    "dingtalk": ("DINGTALK_WEBHOOK", "钉钉"),
-    "mail": ("SMTP_HOST", "邮箱"),
-}
-# 显示名 → 环境变量名(审阅渠道反查, 用于"该渠道到底配没配"的校验)
-REVIEW_CHANNEL_ENV = {
-    "企业微信": "WECHAT_WEBHOOK",
-    "钉钉": "DINGTALK_WEBHOOK",
-    "邮箱": "SMTP_HOST",
-}
-# 渠道别名: 允许中文与常见简写。
-# 2026-10-19 修复(闸门漏法 1): 原实现对无法识别的 REVIEW_CHANNEL 静默丢弃 → 等于
-# "没设闸门" → 走全量分支, 配置写错的后果是**发到所有渠道**而不是"报错不发"。
-# 当时最可能的触发方式就是写成中文"企业微信"或简写"wx"。现在: 别名认得的就用,
-# 认不得的**报错退出**(fail-closed), 绝不静默退化成全量。
-REVIEW_CHANNEL_ALIASES = {
-    "wechat": "wechat", "wx": "wechat", "wecom": "wechat", "企业微信": "wechat",
-    "dingtalk": "dingtalk", "ding": "dingtalk", "钉钉": "dingtalk",
-    "mail": "mail", "email": "mail", "smtp": "mail", "邮箱": "mail", "邮件": "mail",
-}
+# REVIEW_CHANNEL_MAP / REVIEW_CHANNEL_ENV / REVIEW_CHANNEL_ALIASES 的权威定义在
+# push_scope.py(范围锁与闸门共用一份, 避免两处漂移), 这里保留同名引用供外部调用。
 
 
 def _cut(text, nbytes):
@@ -175,7 +175,7 @@ def brief_text(date, data):
                 e.get("impact_type") or "未研判", e.get("impact_level") or "未研判"))
     lines += ["", "---",
               "全文见政策 Markdown / Word / Excel 报告(面板可下载)",
-              "> AI 辅助生成 · 仅供情报参考"]
+              "> AI 辅助生成 · 仅供情报参考 · 代码 %s" % code_fingerprint()]
     return "\n".join(lines)
 
 
@@ -237,6 +237,14 @@ def send_mail(subject, text, docx_path):
 
 def _pending_path(date):
     return os.path.join(PENDING_DIR, "%s.flag" % date)
+
+
+def _label_to_key(label):
+    """显示名 → 渠道键(wechat/dingtalk/mail); 认不出返回 None。"""
+    for key, (_env, name) in REVIEW_CHANNEL_MAP.items():
+        if name == label:
+            return key
+    return None
 
 
 def _is_pending(date):
@@ -349,19 +357,57 @@ def main():
               "全量推送与\"只发审阅渠道\"不能同时指定")
         return 1
 
+    # ---- 推送范围锁(2026-10-20 起): 范围由发起方声明, 本脚本只执行 ----
+    # 锁: data/reports/.push-scope/<日期>.lock, 由 run_scan.sh(定时任务)或
+    # 本脚本的 --review-channel(渠道会话)写入。目的是把"谁发起了这次请求"从
+    # Agent 的临场判断变成落盘的事实 —— 10-20 钉钉误推正是"判断权"错位造成的。
+    lock = read_scope(args.date)
+    lock_scope = (lock or {}).get("scope") or ""
+    lock_label = (lock or {}).get("channel_label") or ""
+    lock_source = (lock or {}).get("source") or "-"
+    if lock:
+        print("[范围锁] %s 本轮推送范围: %s(声明来源: %s, 声明于 %s)"
+              % (args.date, describe_scope(lock), lock_source,
+                 (lock or {}).get("declared_at") or "-"))
+
+    if args.broadcast:
+        if lock_scope == "review":
+            print("[错误] --broadcast 被推送范围锁拒绝: 本轮已声明为\"只发 %s\""
+                  "(来源 %s)。渠道会话必须先在原渠道完成反馈, 用户确认后用 "
+                  "--review-approved 发完其余渠道。" % (lock_label, lock_source))
+            return 1
+        if lock_scope != "broadcast":
+            print("[错误] --broadcast 被拒绝: 本轮没有\"全量推送\"的范围声明。")
+            print("       全量推送只能由调度路径声明, 二选一:")
+            print("         · 定时任务: scripts/run_scan.sh <am|pm|policy> --broadcast")
+            print("         · 人工声明: python scripts/push_scope.py --date %s --broadcast --source manual"
+                  % args.date)
+            print("       声明后再执行 push_report.py --date %s --broadcast。" % args.date)
+            return 1
+    elif lock_scope == "review" and review_channel and lock_label and not args.review_approved:
+        # 锁里记着审阅渠道, 命令行却指定了别的渠道 → 拒绝(防"同一轮发到两个渠道")。
+        # 阶段 2(--review-approved)不适用: 那时以待审标记为准, 参数只作兜底。
+        want_label = REVIEW_CHANNEL_MAP[review_channel][1]
+        if want_label != lock_label:
+            print("[错误] 审阅渠道与推送范围锁不一致: 锁为 %s, 本次指定 %s。"
+                  % (lock_label, want_label))
+            print("       同一轮请求不得改投其它渠道; 确需更换请先执行: "
+                  "python scripts/push_scope.py --date %s --clear" % args.date)
+            return 1
+
     # 审阅渠道(阶段 1 要单独发的那个 / 阶段 2 要排除的那个):
-    #   阶段 2(--review-approved): 待审标记里记录的渠道 > 显式指定的渠道
+    #   阶段 2(--review-approved): 待审标记里记录的渠道 > 范围锁里的渠道 > 显式指定
     #   有待审标记(未批准):        一律用标记里的渠道 —— 待审期间任何推送
     #                              (含 --force / --message)都不得扩散到其它渠道
-    #   其余:                      显式指定的渠道
+    #   其余:                      范围锁里的渠道 > 显式指定的渠道
     pending_label = _pending_channel(args.date)
     env_label = REVIEW_CHANNEL_MAP[review_channel][1] if review_channel else ""
     if args.review_approved:
-        review_label = pending_label or env_label
+        review_label = pending_label or lock_label or env_label
     elif pending_label:
         review_label = pending_label
     else:
-        review_label = env_label
+        review_label = lock_label or env_label
     if args.broadcast and pending_label and not args.review_approved:
         print("[提示] 该日期存在待审标记, --broadcast 被闸门挡下: 只发审阅渠道 %s; "
               "用户确认后用 --review-approved 发完其余渠道" % pending_label)
@@ -389,6 +435,12 @@ def main():
                 return 1
             print("[dry-run] 将发送到: %s(未实际发送)" % "、".join(c[0] for c in channels))
             return 0
+        # 自定义文本也要把范围落成锁: 否则本轮之后的一次 --broadcast 仍能自我放行
+        # (锁是"本轮范围"的唯一事实来源)。dry-run 不写(只读预演不留状态)。
+        if review_label and lock_scope != "review":
+            write_scope(args.date, "review", channel=_label_to_key(review_label),
+                        source="push_report.py:message",
+                        note="自定义消息的审阅渠道")
         ok = 0
         for name, fn in channels:
             try:
@@ -466,17 +518,23 @@ def main():
         # 现在扩散必须**显式声明**(--broadcast), 忘了就变成"不发" ——
         # "没消息"用户马上会发现, "发到所有渠道"要等别人投诉才发现。
         if args.review_approved:
-            print("[警告] 未读到审阅渠道(无 .review-pending 标记, 也未指定 --review-channel/"
-                  "REVIEW_CHANNEL), 按全量推送")
-            target = channels
-            stage_label = "全量"
+            # 2026-10-20 修复: 阶段 2 读不到审阅渠道时, 原实现"警告一下照常全量发"
+            # —— 这是又一个"忘了 → 发到所有渠道"的口子(没有待审记录却喊批准)。
+            # 现在直接拒绝: 没有待审记录就没有"批准"的对象。
+            print("[错误] 阶段 2 无审阅渠道可读(无 .review-pending 待审标记, 也没有"
+                  "推送范围锁), 已中止。")
+            print("       阶段 2 必须紧跟在阶段 1(--review-channel <渠道>)之后执行; "
+                  "若确实要全量, 请显式声明: ")
+            print("         python scripts/push_scope.py --date %s --broadcast --source manual" % args.date)
+            print("         python scripts/push_report.py --date %s --broadcast" % args.date)
+            return 1
         else:
             print("[错误] 未指定推送范围, 已中止(默认不扩散)。请明确选择其一:")
             print("       · 渠道会话(先在原渠道完成, 确认后再扩散):")
             print("         python scripts/push_report.py --date %s --review-channel wechat" % args.date)
             print("         用户确认后: python scripts/push_report.py --date %s --review-approved" % args.date)
-            print("       · 定时任务(全量):")
-            print("         python scripts/push_report.py --date %s --broadcast" % args.date)
+            print("       · 定时任务(全量, 需先由调度路径声明范围):")
+            print("         scripts/run_scan.sh <am|pm|policy> --broadcast")
             return 2
 
     if not target:
@@ -497,6 +555,8 @@ def main():
                 f.write("%s 已推送(仅审阅渠道 %s, 无剩余渠道)\n" %
                         (biz_now(), review_label))
             _clear_pending(args.date)
+            if lock_scope == "review":
+                clear_scope(args.date)
             print("[OK] 审阅渠道外无可发渠道, 已写终态标记并清理审核待办")
             return 0
         if not channels:
@@ -540,6 +600,13 @@ def main():
         if review_label and not args.review_approved:
             # 阶段 1 成功: 写待审标记(带机器可读的 review_channel 行, 供阶段 2 读回)
             _mark_pending(args.date, review_label)
+            # 同时把范围锁落成 review —— 这样本轮之后任何"忘了指定渠道"的调用
+            # (尤其是 --broadcast)都会被锁挡下, 而不是退化成全量推送。
+            # 2026-10-20 钉钉误推事故的直接教训: 闸门不能只靠"记得带参数"。
+            if lock_scope != "review":
+                write_scope(args.date, "review", channel=_label_to_key(review_label),
+                            source="push_report.py:stage1",
+                            note="阶段 1 审阅渠道")
         else:
             # 阶段 2 或全量模式: 写终态
             os.makedirs(PUSH_FLAG_DIR, exist_ok=True)
@@ -547,6 +614,10 @@ def main():
                 f.write("%s 已推送: %s\n" %
                         (biz_now(), "、".join(c[0] for c in target)))
             _clear_pending(args.date)
+            # 本轮已扩散完毕, 范围锁失效(否则同日再有人喊 --broadcast 会被误挡,
+            # 而这一轮的"扩散"已经由用户批准过了)
+            if lock_scope == "review":
+                clear_scope(args.date)
     return 0 if ok else 1
 
 

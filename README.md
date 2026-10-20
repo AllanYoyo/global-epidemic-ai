@@ -62,8 +62,8 @@ python scripts/push_report.py --date $(date +%F) --dry-run
 # 渠道会话(先在原渠道给用户看, 确认后再发其余渠道):
 python scripts/push_report.py --date $(date +%F) --review-channel wechat
 python scripts/push_report.py --date $(date +%F) --review-approved
-# 定时任务的全量推送(需显式声明):
-python scripts/push_report.py --date $(date +%F) --broadcast
+# 定时任务的全量推送(需先由调度路径声明全量范围, 见"推送范围锁"):
+scripts/run_scan.sh policy --broadcast
 # 同一天只发一次(幂等), 重发需 --force
 
 # 启动政策监测面板
@@ -90,10 +90,22 @@ python scripts/report.py --excel --docx
 ## 定时运行
 
 ```bash
-scripts/run_scan.sh policy   # 政策扫(建议每日 07:30): 检索→抽取→核验→研判→日报→推送
+scripts/run_scan.sh policy --broadcast   # 政策扫(建议每日 07:30): 检索→抽取→核验→研判→日报→全量推送
 ```
 
 扫描完成后自动用 push_report.py 推送当日日报。另有 `am`(晨扫全量, 06:30) 和 `pm`(晚扫增量, 18:00) 两档, 见 `config/crontab.example`。网页生成按钮默认执行政策日报、Word 和 Excel；自定义生成命令使用 `RADAR_POLICY_GENERATE_CMD`。
+
+### 推送范围锁(2026-10-20 起)
+
+「本轮日报允许发到哪些渠道」不再由 Agent 临场判断，而是**由发起方声明并落盘成锁**(`data/reports/.push-scope/<日期>.lock`)，`push_report.py` 读锁执行：
+
+| 场景 | 发起方式 | 效果 |
+|---|---|---|
+| 渠道会话(微信/钉钉/邮箱里提的要求) | `scripts/run_scan.sh policy --review-channel wechat` 或 `python scripts/push_report.py --date X --review-channel wechat` | 只发该渠道；用户确认后 `--review-approved` 才发其余渠道 |
+| 定时任务 | `scripts/run_scan.sh policy --broadcast` | 全量推送 |
+| 都没声明 | `scripts/run_scan.sh policy` | cron 上下文自动按定时任务全量；其它上下文**不扩散**（`--broadcast` 一律拒绝） |
+
+`push_report.py --broadcast` **不再自声明**：没有调度路径的全量范围声明就拒绝执行（退出码 1），避免"谁喊一声都能发到所有渠道"。
 
 ## 部署到 VPS
 
@@ -110,7 +122,18 @@ ln -sfn /opt/global-epidemic-ai/repo/skills/policy-verification ~/.hermes/skills
 ln -sfn /opt/global-epidemic-ai/repo/skills/daily-report ~/.hermes/skills/daily-report
 ```
 
-重启/重载 Hermes 后，使用“生成今日政策日报”触发完整链路。
+重启/重载 Hermes 后，使用"生成今日政策日报"触发完整链路。
+
+### 更新生产代码(重要)
+
+仓库在 VPS 上是 `/opt/global-epidemic-ai/repo` 这个 clone 的工作树，**不会自动更新**——不 pull 就一直跑旧逻辑(2026-10-20 钉钉误推事故排查时，生产跑的还是加固前的旧代码)。更新用：
+
+```bash
+bash scripts/deploy_update.sh policy     # git pull --ff-only + 装依赖 + 跑一遍链路自检
+python3 scripts/diagnose_push.py          # 单独诊断：代码版本/范围锁/crontab/日志
+```
+
+`diagnose_push.py` 是只读的现场诊断脚本：一次打印运行代码 commit（与远端是否一致）、当日范围锁与待审/已推标记、渠道配置、crontab 里是否显式声明了推送范围、调度日志尾部（有无 `scope=` 标记可区分新旧版 `run_scan.sh`）。
 
 ## 目录
 
@@ -130,6 +153,10 @@ scripts/risk.py                    政策影响写回
 scripts/report.py                  Markdown/Word/Excel 入口
 scripts/report_docx.py             政策 Word 简报
 scripts/push_report.py             政策推送
+scripts/push_scope.py              推送范围锁(声明本轮允许发到哪些渠道)
+scripts/diagnose_push.py           推送链路现场诊断(只读)
+scripts/deploy_update.sh           生产更新(pull + 依赖 + 自检)
+scripts/buildinfo.py               运行代码版本指纹(推送内容尾部标注 commit)
 webapp/app.py                      政策监测面板
 config/sources.yaml                情报源与政策检索模板
 ```

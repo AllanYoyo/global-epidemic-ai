@@ -180,11 +180,13 @@ description: 监测各国政府动植物检疫与进出口管控政策变化。�
 > 取当前业务日期, **不要**用 `date` 命令或自己算——生产 VPS 系统时区是 `Etc/UTC`,
 > 直接取 UTC 日期会让北京时间早间跑批错一天。
 
-## 评审核闸门(2026-10-19 引入; 2026-10-19 晚加固)
+## 评审核闸门(2026-10-19 引入; 2026-10-20 改为范围锁)
 
 用户在某渠道(微信/钉钉/邮箱)提出测试类请求时, 反复强调"反馈必须先在原渠道完成再扩散到其它渠道"。
 
-**推送前必须先判定本轮来自哪个渠道**, 判定结果决定用哪条命令:
+**推送范围由发起方声明, 不由 Agent 临场判断**(2026-10-20 钉钉误推事故的直接教训:
+`run_scan.sh` 是 cron 与手动补跑共用的入口, 早期 prompt 让 Agent 自己判断"本轮是渠道会话
+还是定时任务", 手动补跑被判成定时任务 → `--broadcast` → 日报发到了钉钉)。现在:
 
 - **来自单一渠道会话**(用户在某个渠道里发起本轮请求)→ **只能先发那个渠道**:
 
@@ -194,28 +196,30 @@ description: 监测各国政府动植物检疫与进出口管控政策变化。�
   python scripts/push_report.py --date <YYYY-MM-DD> --review-approved
   ```
 
-  首跑只发审阅渠道并写 `data/reports/.review-pending/<日期>.flag`(首行记录渠道);
-  确认后 `--review-approved` 把其余渠道(钉钉/邮箱)发完并清理待办标记。
+  首跑只发审阅渠道, 并写两份标记: `data/reports/.review-pending/<日期>.flag`(阶段 2 读回渠道)
+  与 **`data/reports/.push-scope/<日期>.lock`(推送范围锁, scope=review)**。锁会挡住本轮之后的
+  任何 `--broadcast`, 即使 Agent 判断错了也扩散不出去。
 
-  ⚠ **红线**: 未经原渠道用户确认, 不得执行 `--review-approved`, 也不得改用不带
-  `--review-channel` 的命令(那会发到所有渠道)。`--review-channel` 优先于
-  `REVIEW_CHANNEL` 环境变量, 且**渠道名认不得时脚本会报错中止**(不会静默全量)。
+  ⚠ **红线**: 未经原渠道用户确认, 不得执行 `--review-approved`, 更不得改用 `--broadcast`。
+  `--review-channel` 优先于 `REVIEW_CHANNEL` 环境变量, 且**渠道名认不得时脚本会报错中止**。
 
-- **来自定时任务**(cron `run_scan.sh`, 非渠道会话)→ 全量推送, 需**显式** `--broadcast`:
-  `python scripts/push_report.py --date <YYYY-MM-DD> --broadcast`。
+- **来自定时任务**(cron `run_scan.sh`, 非渠道会话)→ 走
+  `scripts/run_scan.sh <模式> --broadcast`: 它先写 broadcast 范围锁, prompt 里直接给出
+  `--broadcast` 指令(确定性, 无"若是…若是…")。
 
 其它约定:
 
+- **`--broadcast` 不再自声明**: 没有调度路径的全量范围声明时, `--broadcast` 会被拒绝
+  (退出码 1)。人工确需全量时先声明: `python scripts/push_scope.py --date <日期> --broadcast --source manual`。
 - 阶段 2 的审阅渠道**以 `.review-pending` 标记里记录的渠道为准**, `--review-channel`/
   `REVIEW_CHANNEL` 只作兜底: 换会话/换机器执行忘了带参数也不会让审阅渠道重复收报。
 - **待审期间**(存在 `.review-pending` 标记)的任何推送, 含 `--force` 与 `--message`,
   都只发审阅渠道, 不会扩散到其它渠道。
-- `--message` 自定义文本在**没有**待审标记、也**没有**指定审阅渠道时照常群发
-  (cron fallback 的"待执行提醒"不能被卡)。
 - **不指定范围就不推**: 日报推送必须显式给出 `--review-channel`(阶段 1)、
   `--review-approved`(阶段 2)或 `--broadcast`(定时全量)之一, 否则脚本退出码 2 不推送。
   "忘了指定"的后果是"没发"(用户马上发现), 而不是"发到所有渠道"(要等别人投诉)。
+- 现场排查用 `python scripts/diagnose_push.py`(只读): 代码版本/范围锁/待审标记/crontab/日志。
 
 为什么不能只在 chat 里强调: push_report.py 原版"配了哪个发哪个, 一发全发", 没有 review-gate
 状态机, 无论 chat 怎么强调都无效; 本工作流必须靠 `--review-channel` + `--review-approved`
-落地。详见 `scripts/push_report.py` 模块 docstring。
++ 推送范围锁三者落地。详见 `scripts/push_report.py` 模块 docstring 与 `scripts/push_scope.py`。

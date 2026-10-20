@@ -428,13 +428,18 @@ class PushReportReviewGateTests(unittest.TestCase):
 
     def setUp(self):
         import push_report
+        import push_scope
         self.pr = push_report
+        self.ps = push_scope
         self.tmp = tempfile.mkdtemp(prefix="push-gate-")
         # push_report 在 import 时已经从 normalize 锁定 DATA_DIR, 模块级常量
         # PUSH_FLAG_DIR / PENDING_DIR 也已基于旧 DATA_DIR 解析。这里把它们
         # 重新指向当前测试 tmp 目录, 让每个测试用独立的 flag/pending 状态。
         self.flag_dir = os.path.join(self.tmp, "reports", ".pushed")
         self.pending_dir = os.path.join(self.tmp, "reports", ".review-pending")
+        # 范围锁目录同样要隔离: 2026-10-20 引入推送范围锁后, 锁不隔离会让
+        # 上一条用例的"只发企业微信"漏进下一条用例, 用例之间互相污染。
+        self.scope_dir = os.path.join(self.tmp, "reports", ".push-scope")
         self.env_backup = dict(os.environ)
         os.environ["WECHAT_WEBHOOK"] = "https://test.example/wechat"
         os.environ["DINGTALK_WEBHOOK"] = "https://test.example/dingtalk"
@@ -445,6 +450,7 @@ class PushReportReviewGateTests(unittest.TestCase):
         self._patches = [
             mock.patch.object(self.pr, "PUSH_FLAG_DIR", self.flag_dir),
             mock.patch.object(self.pr, "PENDING_DIR", self.pending_dir),
+            mock.patch.object(self.ps, "SCOPE_DIR", self.scope_dir),
             mock.patch.object(self.pr, "send_wechat",
                               side_effect=lambda t: self.calls.append(("wechat", t))),
             mock.patch.object(self.pr, "send_dingtalk",
@@ -486,9 +492,21 @@ class PushReportReviewGateTests(unittest.TestCase):
                 rc = e.code
         return rc, buf.getvalue()
 
+    def _declare_broadcast(self, date):
+        """模拟定时任务路径: 由调度方先声明"本轮全量"的范围锁。
+
+        2026-10-20 起 --broadcast 不再是"谁喊一声都能全量"的自声明命令:
+        必须先有调度路径的范围声明(run_scan.sh --broadcast 或 push_scope.py),
+        否则 push_report.py 拒绝执行。
+        """
+        self.ps.write_scope(date, "broadcast", source="test:cron")
+        return date
+
     def test_backward_compat_no_review_channel_sends_all(self):
         # 2026-10-19 闸门加固: 全量推送改为**显式** --broadcast(默认不扩散),
         # 定时任务的正规入口保持"发所有渠道"。
+        # 2026-10-20 起 --broadcast 还必须有调度路径的范围声明(范围锁)。
+        self._declare_broadcast("2026-10-19")
         rc, out = self._run(["--date", "2026-10-19", "--broadcast"])
         self.assertEqual(rc, 0, out)
         channels_called = {c[0] for c in self.calls}
@@ -541,7 +559,8 @@ class PushReportReviewGateTests(unittest.TestCase):
             os.path.join(self.tmp, "reports", ".review-pending", "2026-10-19.flag")))
 
     def test_review_channel_unset_env_falls_back_to_all(self):
-        # 真的"没设"审阅渠道 + 显式 --broadcast(定时任务)→ 全量发, 向后兼容
+        # 真的"没设"审阅渠道 + 显式 --broadcast(定时任务, 已有范围声明)→ 全量发
+        self._declare_broadcast("2026-10-19")
         rc, out = self._run(["--date", "2026-10-19", "--broadcast"])
         self.assertEqual(rc, 0, out)
         channels_called = {c[0] for c in self.calls}
@@ -728,6 +747,7 @@ class PushReportReviewGateTests(unittest.TestCase):
 
     def test_broadcast_sends_all_channels_explicitly(self):
         # 定时任务的全量推送: 显式 --broadcast 仍然全量发(向后兼容的正规入口)
+        self._declare_broadcast("2026-10-30")
         self.calls.clear()
         rc, out = self._run(["--date", "2026-10-30", "--broadcast"])
         self.assertEqual(rc, 0, out)
@@ -742,13 +762,15 @@ class PushReportReviewGateTests(unittest.TestCase):
         self.assertEqual(self.calls, [], out)
 
     def test_broadcast_blocked_by_pending_gate(self):
-        # 待审期间 --broadcast 不能扩散, 只发审阅渠道(加 --force 才会真的再走一遍发送)
+        # 待审期间 --broadcast 不能扩散。
+        # 2026-10-20 起范围锁把这道门从"降级成只发审阅渠道"改成"直接拒绝":
+        # 降级会让人以为全量推送已经完成, 实际只补发了一次审阅渠道。
         self._run(["--date", "2026-10-22"], env_extra={"REVIEW_CHANNEL": "wechat"})
         self.calls.clear()
         rc, out = self._run(["--date", "2026-10-22", "--force", "--broadcast"])
-        self.assertEqual(rc, 0, out)
-        self.assertEqual({c[0] for c in self.calls}, {"wechat"}, out)
-        self.assertIn("待审标记", out)
+        self.assertNotEqual(rc, 0, out)
+        self.assertEqual(self.calls, [], out)
+        self.assertIn("范围锁", out)
 
     def test_pending_gate_blocks_resend_without_force(self):
         # 待审期间再跑一次(无 --force): 幂等早退, 一条都不发
@@ -765,17 +787,235 @@ class PushReportReviewGateTests(unittest.TestCase):
         # (以为被闸门挡住了, 实际是没配渠道)。
         os.environ.pop("WECHAT_WEBHOOK", None)
         os.environ.pop("DINGTALK_WEBHOOK", None)
+        self._declare_broadcast("2026-10-19")
         rc, out = self._run(["--date", "2026-10-19", "--broadcast", "--dry-run"])
         self.assertIn("未配置任何推送渠道", out)
         self.assertNotIn("评审核闸门开启", out)
 
-    def test_stage2_without_any_review_channel_warns(self):
-        # 阶段 2 却读不到审阅渠道(既无待审标记, 也未设 REVIEW_CHANNEL): 按全量发,
-        # 但必须打警告 —— 不能让人以为闸门生效了。
+    def test_stage2_without_any_review_channel_is_refused(self):
+        # 2026-10-20 修复: 阶段 2 读不到审阅渠道(无待审标记、无范围锁)时,
+        # 原实现只"警告一下"就照常全量发 —— 又一个"忘了 → 发到所有渠道"的口子。
+        # 现在直接拒绝: 没有待审记录就没有"批准"的对象。
         rc, out = self._run(["--date", "2026-10-19", "--review-approved"])
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("无审阅渠道", out)
+        self.assertEqual(self.calls, [], out)
+
+
+class PushScopeLockTests(unittest.TestCase):
+    """推送范围锁(2026-10-20 钉钉误推事故后引入)。
+
+    事故形态: run_scan.sh 的 prompt 把"渠道会话 vs 定时任务"交给 Agent 临场判断,
+    而 run_scan.sh 是 cron 与手动补跑**共用**的入口 —— 手动补跑在 prompt 眼里
+    就是"定时任务那条路", 于是 Agent 选了 --broadcast, 日报发到了钉钉;
+    且 run_scan.sh 里**根本没有 REVIEW_CHANNEL 传递机制**。
+
+    现在: 谁发起由发起方显式声明并落盘成范围锁, push_report.py 读锁执行。
+    """
+
+    def setUp(self):
+        import push_report
+        import push_scope
+        self.pr = push_report
+        self.ps = push_scope
+        self.tmp = tempfile.mkdtemp(prefix="push-scope-")
+        self.flag_dir = os.path.join(self.tmp, "reports", ".pushed")
+        self.pending_dir = os.path.join(self.tmp, "reports", ".review-pending")
+        self.scope_dir = os.path.join(self.tmp, "reports", ".push-scope")
+        self.env_backup = dict(os.environ)
+        os.environ["WECHAT_WEBHOOK"] = "https://test.example/wechat"
+        os.environ["DINGTALK_WEBHOOK"] = "https://test.example/dingtalk"
+        os.environ.pop("REVIEW_CHANNEL", None)
+        os.environ.pop("SMTP_HOST", None)
+
+        self.calls = []
+        self._patches = [
+            mock.patch.object(self.pr, "PUSH_FLAG_DIR", self.flag_dir),
+            mock.patch.object(self.pr, "PENDING_DIR", self.pending_dir),
+            mock.patch.object(self.ps, "SCOPE_DIR", self.scope_dir),
+            mock.patch.object(self.pr, "send_wechat",
+                              side_effect=lambda t: self.calls.append(("wechat", t))),
+            mock.patch.object(self.pr, "send_dingtalk",
+                              side_effect=lambda t, title: self.calls.append(("dingtalk", t, title))),
+            mock.patch.object(self.pr.report, "collect",
+                              return_value={"new": [], "active": [], "covered": []}),
+        ]
+        for p in self._patches:
+            p.start()
+
+    def tearDown(self):
+        for p in self._patches:
+            p.stop()
+        os.environ.clear()
+        os.environ.update(self.env_backup)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _run(self, args, env_extra=None):
+        os.environ.pop("REVIEW_CHANNEL", None)
+        if env_extra:
+            for k, v in env_extra.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        buf = io.StringIO()
+        with mock.patch("sys.argv", ["push_report.py"] + args), \
+                redirect_stdout(buf):
+            try:
+                rc = self.pr.main()
+            except SystemExit as e:
+                rc = e.code
+        return rc, buf.getvalue()
+
+    # ---- 范围锁本身 ----
+
+    def test_scope_lock_roundtrip(self):
+        self.ps.write_scope("2026-10-20", "review", channel="wechat", source="unit")
+        scope = self.ps.read_scope("2026-10-20")
+        self.assertEqual(scope["scope"], "review")
+        self.assertEqual(scope["channel"], "wechat")
+        self.assertEqual(scope["channel_label"], "企业微信")
+        self.assertEqual(self.ps.describe_scope(scope), "只发 企业微信")
+        self.assertTrue(self.ps.clear_scope("2026-10-20"))
+        self.assertIsNone(self.ps.read_scope("2026-10-20"))
+
+    def test_push_scope_cli_rejects_unknown_channel(self):
+        # 渠道名认不出 → 报错退出(fail-closed), 绝不静默当成"没设闸门"
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = self.ps.main(["--date", "2026-10-20", "--review-channel", "weixin"])
+        self.assertEqual(rc, 1)
+        self.assertIn("无法识别", buf.getvalue())
+        self.assertIsNone(self.ps.read_scope("2026-10-20"))
+
+    def test_push_scope_cli_write_show_clear(self):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = self.ps.main(["--date", "2026-10-20", "--broadcast", "--source", "unit"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.ps.read_scope("2026-10-20")["scope"], "broadcast")
+        with redirect_stdout(io.StringIO()):
+            rc = self.ps.main(["--date", "2026-10-20", "--show"])
+        self.assertEqual(rc, 0)
+        with redirect_stdout(io.StringIO()):
+            rc = self.ps.main(["--date", "2026-10-20", "--clear"])
+        self.assertEqual(rc, 0)
+        self.assertIsNone(self.ps.read_scope("2026-10-20"))
+
+    def test_push_scope_label_only(self):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = self.ps.main(["--print-label", "--review-channel", "企业微信"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(buf.getvalue().strip(), "企业微信")
+
+    # ---- 闸门执行范围锁 ----
+
+    def test_broadcast_without_scope_declaration_is_refused(self):
+        # 事故核心: --broadcast 曾是"谁喊一声都能全量"的自声明命令。
+        # 现在没有调度路径的范围声明 → 拒绝, 绝不发到所有渠道。
+        rc, out = self._run(["--date", "2026-10-20", "--broadcast"])
+        self.assertNotEqual(rc, 0, out)
+        self.assertEqual(self.calls, [], out)
+        self.assertIn("范围声明", out)
+
+    def test_broadcast_refused_when_lock_says_review_only(self):
+        # 阶段 1 已把本轮锁成"只发微信", 之后的 --broadcast 必须被拒
+        self._run(["--date", "2026-10-21", "--review-channel", "wechat"])
+        self.calls.clear()
+        rc, out = self._run(["--date", "2026-10-21", "--broadcast", "--force"])
+        self.assertNotEqual(rc, 0, out)
+        self.assertEqual(self.calls, [], out)
+        self.assertIn("范围锁", out)
+
+    def test_broadcast_allowed_with_broadcast_declaration(self):
+        # 定时任务路径(run_scan.sh --broadcast 或 push_scope.py)声明后 → 全量
+        self.ps.write_scope("2026-10-22", "broadcast", source="run_scan.sh:policy")
+        rc, out = self._run(["--date", "2026-10-22", "--broadcast"])
         self.assertEqual(rc, 0, out)
-        self.assertIn("未读到审阅渠道", out)
         self.assertEqual({c[0] for c in self.calls}, {"wechat", "dingtalk"}, out)
+
+    def test_stage1_writes_review_lock(self):
+        rc, out = self._run(["--date", "2026-10-23", "--review-channel", "wechat"])
+        self.assertEqual(rc, 0, out)
+        scope = self.ps.read_scope("2026-10-23")
+        self.assertEqual(scope["scope"], "review")
+        self.assertEqual(scope["channel"], "wechat")
+
+    def test_stage2_clears_lock_after_approval(self):
+        self._run(["--date", "2026-10-24", "--review-channel", "wechat"])
+        self.calls.clear()
+        rc, out = self._run(["--date", "2026-10-24", "--review-approved"])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual({c[0] for c in self.calls}, {"dingtalk"}, out)
+        # 本轮已扩散完毕 → 范围锁失效, 同日再喊 --broadcast 也不会被误挡
+        self.assertIsNone(self.ps.read_scope("2026-10-24"))
+
+    def test_conflicting_review_channel_with_lock_is_refused(self):
+        # 同一轮请求不得改投其它渠道: 锁是微信, 命令行却写钉钉 → 拒绝
+        self.ps.write_scope("2026-10-25", "review", channel="wechat", source="unit")
+        rc, out = self._run(["--date", "2026-10-25", "--review-channel", "dingtalk"])
+        self.assertNotEqual(rc, 0, out)
+        self.assertEqual(self.calls, [], out)
+        self.assertIn("不一致", out)
+
+    def test_message_path_respects_review_lock(self):
+        # --message 也要受范围锁约束(自定义文本不得扩散)
+        self.ps.write_scope("2026-10-26", "review", channel="wechat", source="unit")
+        rc, out = self._run(["--date", "2026-10-26", "--message", "⏰ 提醒"])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual({c[0] for c in self.calls}, {"wechat"}, out)
+
+    def test_message_path_writes_review_lock(self):
+        # 自定义文本也要把范围落成锁, 否则本轮之后一次 --broadcast 仍能自我放行
+        rc, out = self._run(["--date", "2026-10-27", "--review-channel", "wechat",
+                              "--message", "⏰ 提醒"])
+        self.assertEqual(rc, 0, out)
+        scope = self.ps.read_scope("2026-10-27")
+        self.assertEqual(scope["scope"], "review")
+        self.assertEqual(scope["channel"], "wechat")
+
+    def test_dry_run_does_not_write_lock(self):
+        # dry-run 是只读预演, 不该留状态
+        rc, out = self._run(["--date", "2026-10-28", "--review-channel", "wechat",
+                              "--dry-run"])
+        self.assertEqual(rc, 0, out)
+        self.assertIsNone(self.ps.read_scope("2026-10-28"))
+
+    # ---- 编排层(run_scan.sh)静态回归 ----
+
+    def _run_scan_text(self):
+        with open(os.path.join(REPO, "scripts", "run_scan.sh"), encoding="utf-8") as f:
+            return f.read()
+
+    def test_run_scan_no_longer_asks_agent_to_judge_channel(self):
+        # 事故的直接成因: prompt 里让 Agent 自己判断"渠道会话还是定时任务"。
+        # 这段措辞必须从 run_scan.sh 里消失。
+        text = self._run_scan_text()
+        self.assertNotIn("若本轮是用户在某个渠道发起的请求", text)
+        self.assertNotIn("才用 python scripts/push_report.py", text)
+
+    def test_run_scan_declares_scope_and_passes_review_channel(self):
+        # run_scan.sh 必须: ①写范围锁 ②把渠道真正传给下游(REVIEW_CHANNEL)
+        text = self._run_scan_text()
+        self.assertIn("push_scope.py", text)
+        self.assertIn("--review-channel", text)
+        self.assertIn("export REVIEW_CHANNEL=", text)
+
+    def test_run_scan_declares_scope_before_calling_hermes(self):
+        # 顺序回归: 范围锁必须在 HERMES_RUN_CMD 之前落盘, 否则 Agent 推第一下时
+        # 锁还不存在, --broadcast 仍能自我放行。
+        text = self._run_scan_text()
+        # 取"真正调用 Hermes"那一处, 而不是文件头注释里的 HERMES_RUN_CMD
+        self.assertLess(text.index("push_scope.py"),
+                        text.index('if [ -n "${HERMES_RUN_CMD:-}" ]'))
+
+    def test_card_carries_code_fingerprint(self):
+        # 推送内容带代码指纹: 事故现场一眼看出"跑的是哪版代码"
+        import push_report
+        text = push_report.brief_text("2026-10-20", {
+            "new": [], "active": [], "covered": []})
+        self.assertIn("代码", text)
 
 
 class BriefTextFocusTests(unittest.TestCase):

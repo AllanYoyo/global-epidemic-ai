@@ -40,10 +40,16 @@ python scripts/report.py --date YYYY-MM-DD --excel --docx   # 日报（--policy 
 python scripts/push_report.py --date YYYY-MM-DD --dry-run   # 推送预览（企业微信/钉钉/SMTP）
 python scripts/push_report.py --date YYYY-MM-DD --review-channel wechat  # 只发微信（阶段 1，渠道会话必用）
 python scripts/push_report.py --date YYYY-MM-DD --review-approved  # 审核通过，发完剩余渠道（阶段 2）
-python scripts/push_report.py --date YYYY-MM-DD --broadcast    # 显式全量（仅定时任务）
+python scripts/push_report.py --date YYYY-MM-DD --broadcast    # 显式全量（仅定时任务，且需先有全量范围声明）
+python scripts/push_scope.py --date YYYY-MM-DD --review-channel wechat  # 声明本轮只发某渠道（写范围锁）
+python scripts/push_scope.py --date YYYY-MM-DD --broadcast     # 声明本轮全量（定时任务路径）
 python scripts/push_report.py --date YYYY-MM-DD --force      # 当日已推送过，强制重发
+python scripts/diagnose_push.py                              # 推送链路现场诊断（只读）
 python webapp/app.py                                        # Flask 面板，默认 0.0.0.0:8000
 scripts/run_scan.sh policy                                  # 定时扫描入口（am|pm|policy）
+scripts/run_scan.sh policy --review-channel wechat          # 渠道会话触发的扫描：只发该渠道
+scripts/run_scan.sh policy --broadcast                      # 定时任务扫描：全量（写全量范围锁）
+bash scripts/deploy_update.sh policy                        # 生产更新（git pull + 依赖 + 自检）
 ```
 
 ## 模块边界与运行方式
@@ -59,6 +65,13 @@ scripts/run_scan.sh policy                                  # 定时扫描入口
   - **待审期间不得扩散**：存在 `.review-pending` 标记时，任何推送（含 `--force` 与 `--message`）都只发审阅渠道，`--broadcast` 会被挡下。
   - `--message` 自定义文本在**没有**待审标记、也**没有**指定审阅渠道时照常群发（cron fallback 的"待执行提醒"不能被卡）。
   - Hermes 在某渠道会话中复述"先在原渠道完成反馈"的口径时，应在该渠道对应的 `push_report.py` 调用中显式传 `--review-channel <该渠道>`；用户在原渠道确认后再以 `--review-approved` 释放剩余渠道。**不要用不带渠道参数的全量命令**。
+- **推送范围锁(2026-10-20 钉钉误推事故后引入, 决定性)**：闸门此前是"提示式"的——「本轮是渠道会话还是定时任务」交给 Agent 临场判断，而 `run_scan.sh` 是 cron 与手动补跑**共用**的入口，手动补跑在 prompt 眼里就是"定时任务那条路"，于是 Agent 选了 `--broadcast`，日报发到了钉钉；且 `run_scan.sh` 里**根本没有 REVIEW_CHANNEL 传递机制**。现在推送范围**由发起方声明并落盘成锁**：
+  - **锁文件**：`data/reports/.push-scope/<日期>.lock`（`scope=review|channel=…` 或 `scope=broadcast`），由 `scripts/push_scope.py` 写、由 `push_report.py` 读**执行**。作者：cron 路径 = `run_scan.sh <模式> --broadcast`；渠道会话 = `push_report.py --review-channel <渠道>`（阶段 1 自己会写锁）。
+  - **`--broadcast` 不再自声明**：没有 broadcast 锁 → 拒绝（退出码 1，提示走 `run_scan.sh --broadcast` 或 `push_scope.py --broadcast`）；锁是 review → 拒绝（"本轮只发 X"）；只有调度路径声明过的 broadcast 锁才放行。
+  - **run_scan.sh 不再让 Agent 二选一**：`--review-channel <渠道>` / `--broadcast` 显式参数写进 prompt（确定性指令，无"若是…若是…"），并 `export REVIEW_CHANNEL` 给下游；两者都不给时，**cron 上下文**（祖先进程含 cron/crond）自动按定时任务全量处理，**其它上下文**（手动/Agent 触发）本轮**不扩散**（`--broadcast` 一律拒绝）。
+  - **阶段 2 无待审记录即拒绝**（原实现是"警告一下照常全量发"，又一个"忘了→发到所有渠道"的口子）。
+  - **生产更新**：`bash scripts/deploy_update.sh policy`（git pull + 依赖 + 自检）。仓库只有 clone 没有更新机制，生产不 pull = 闸门加固根本没生效——这正是 10-20 事故的载体。
+  - **现场诊断**：`python scripts/diagnose_push.py` 一次打印：运行代码 commit（与远端是否一致）、当日范围锁/待审/已推标记、渠道配置、crontab 是否显式声明范围、cron 日志尾部（有无 `scope=` 标记＝新旧版 run_scan.sh）。推送内容尾部也带 `代码 <commit>` 指纹。
 
 ## 约定与注意事项
 

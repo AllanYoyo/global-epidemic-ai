@@ -2,7 +2,7 @@
 
 > 体检沉淀与工单跟踪。本文件登记代码库**已识别但未修复**的问题,按"高/中/低"分档。
 > 修复后从"未修复"移入"已修复"区,保留作为历史与回归参考。
-> 上次体检: **2026-10-19** (基于 commit 0459442 之后的专项复审)。
+> 上次体检: **2026-10-20** (基于 2026-10-19 专项复审后的推送范围锁改造与 10-20 钉钉误推事故复盘)。
 
 ---
 
@@ -81,6 +81,57 @@
 ---
 
 ## 已修复 (历史)
+
+### 2026-10-20 推送范围锁改造 (G1 加固之后)
+
+#### G2 · 推送范围由 Agent 临场判断 → 手动补跑被当成定时任务, 日报又发到钉钉(用户实测)→ 改为范围锁
+- 位置: `scripts/run_scan.sh`(参数解析/推送范围声明/prompt 组装);
+  `scripts/push_report.py`(`main()` 范围锁判定/阶段 2 早退/`brief_text` 指纹);
+  新增 `scripts/push_scope.py`(范围锁)、`scripts/buildinfo.py`(代码指纹)、
+  `scripts/diagnose_push.py`(现场诊断)、`scripts/deploy_update.sh`(生产更新);
+  `skills/daily-report/SKILL.md`; `skills/global-policy-search/SKILL.md`;
+  `AGENTS.md`; `README.md`; `TROUBLESHOOTING.md`; `ARCHITECTURE.md`; `config/crontab.example`
+- 用户实测反馈(2026-10-20): 07:30 定时扫描因 Gateway draining 失败 → 手动补跑成功
+  入库 1 条(欧盟修订高致病性禽流感受影响成员国名单)→ **又推送到钉钉**。
+  用户指认: "闸门逻辑在脚本里可能没生效, 需要在代码端检查 `run_scan.sh` 是否正确传递
+  `REVIEW_CHANNEL`"。
+- **根因(三条, 缺一不可)**:
+  1. **判断权错位**: G1 修完后闸门虽然 fail-closed, 但"本轮是渠道会话还是定时任务"
+     这个**客观事实**仍被写成 prompt 里的二选一, 交给 Agent 临场判断。而
+     `run_scan.sh` 是 cron 与手动补跑**共用**的入口 —— 手动补跑在 prompt 眼里就是
+     "定时任务那条路", 于是 Agent 选了 `--broadcast`。
+  2. **`run_scan.sh` 根本没有 REVIEW_CHANNEL 传递机制**(用户的指认属实): 渠道信息
+     只以自然语言出现在 prompt 里, 靠 Agent 照着拼命令; 脚本本身既不读也不传
+     `REVIEW_CHANNEL`, 也没有任何地方承载"本轮是谁发起的"。
+  3. **`--broadcast` 是"自声明"的**: 谁喊一声都能全量, 脚本无从判断这是不是定时任务。
+     G1 修完的只是"忘了指定就不推", 没堵住"随便指定成 broadcast 就全量"。
+- **修法(把判断权从 Agent 手里拿走)**:
+  - **推送范围锁**: 新增 `scripts/push_scope.py`, 把范围落盘成
+    `data/reports/.push-scope/<日期>.lock`(`scope=review|channel=…` 或 `scope=broadcast`)。
+    `push_report.py` **读锁执行**:
+    · lock=review → 本轮只允许发该渠道, `--broadcast` 被**拒绝**(退出码 1);
+    · lock=broadcast → 才放行全量;
+    · 没有锁 → `--broadcast` 被拒绝(全量只能由调度路径声明)。
+    阶段 1 自己写 review 锁, 阶段 2 发完清锁。
+  - **`run_scan.sh` 显式化**: 新增 `--review-channel <渠道>` / `--broadcast` 互斥参数,
+    **先写范围锁再调 Hermes**, 并 `export REVIEW_CHANNEL` 真正传给下游;
+    prompt 改成**确定性指令**(不再有"若是…若是…"), 杜绝 Agent 临场二选一。
+    两个都不给时: cron 上下文(祖先进程含 cron/crond, 刻意不含 systemd)自动按定时
+    任务处理; 其它上下文**不扩散**(`--broadcast` 一律拒绝)。`config/crontab.example`
+    同步加 `--broadcast`。
+  - **阶段 2 无待审记录即拒绝**: 原实现"警告一下照常全量发", 是又一个
+    "忘了 → 发到所有渠道"的口子。
+  - **锁与参数冲突即拒绝**: 锁是微信而命令行指定钉钉 → 拒绝(同一轮不得改投其它渠道)。
+  - **可观测**: 推送内容尾部带 `代码 <commit>` 指纹; 新增 `scripts/diagnose_push.py`
+    (只读)打印代码版本(与远端是否一致)/范围锁/待审与已推标记/渠道配置/crontab 是否
+    显式声明范围/cron 日志尾部(有无 `scope=` 可区分新旧版 run_scan.sh);
+    新增 `scripts/deploy_update.sh` 消除"生产不 pull = 加固没生效"这个根因载体。
+- 回归: `scripts/test_smoke.py::PushScopeLockTests` 新增 17 条(范围锁读写/CLI/四条拦截/
+  放行/消息路径落锁/dry-run 不落锁/编排层静态断言), `PushReportReviewGateTests` 相应改写
+  (`--broadcast` 需先有全量声明; 阶段 2 无待审记录改为拒绝); 自测 108 → 125 条全绿。
+- **未闭环(需现场确认)**: 本地无生产环境, 无法直接证明 10-20 那次是"旧代码"还是
+  "新代码 + Agent 选了 --broadcast"。两条路径都已封死, 且新增 `diagnose_push.py`
+  可在 VPS 上一条命令给出答案; 另需确认生产 crontab 是否已加 `--broadcast`。
 
 ### 2026-10-19 专项复审 (commit 0459442 之后)
 

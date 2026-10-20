@@ -78,7 +78,7 @@ flowchart TD
 |---|---|
 | report.py | 按日期聚合库中记录 → Markdown 速览（政策速览/详情/影响综述/待办/统计/来源）+ Excel 台账（缺 openpyxl 降级 CSV） |
 | report_docx.py | Word 简报（缺 python-docx 跳过） |
-| push_report.py | 企微/钉钉(加签)/SMTP 邮箱，配哪个发哪个；`--dry-run` 只打印；**同日幂等**（`data/reports/.pushed/<日期>.flag`），重发需 `--force`；摘要结构 = 重点关注(高/中影响、收紧) + 其他新增，每条附原文链接。**推送范围必须显式声明**：`--review-channel <渠道>`(渠道会话阶段 1, 只发该渠道) / `--review-approved`(阶段 2, 发完剩余渠道) / `--broadcast`(定时全量)；三者都不给则不推送(退出码 2) |
+| push_report.py | 企微/钉钉(加签)/SMTP 邮箱，配哪个发哪个；`--dry-run` 只打印；**同日幂等**（`data/reports/.pushed/<日期>.flag`），重发需 `--force`；摘要结构 = 重点关注(高/中影响、收紧) + 其他新增，每条附原文链接。**推送范围必须显式声明**：`--review-channel <渠道>`(渠道会话阶段 1, 只发该渠道) / `--review-approved`(阶段 2, 发完剩余渠道) / `--broadcast`(定时全量)；三者都不给则不推送(退出码 2)。**范围锁**：`data/reports/.push-scope/<日期>.lock` 由 `push_scope.py` 写、本脚本读**执行**——`--broadcast` 不再自声明(无调度路径的全量声明即拒绝) |
 
 ## 3. 数据库 schema 与索引策略
 
@@ -122,14 +122,16 @@ Hermes 是全流程唯一调度者；`scripts/` 只做确定性工具（校验�
 HERMES_RUN_CMD='hermes run --prompt "{PROMPT}"'
 ```
 
-- `run_scan.sh [am|pm|policy]` 把对应扫描指令整段组装成 `{PROMPT}`（policy 档的 prompt 要求：检索→抽取→核验→研判→`report.py --excel --docx`→`push_report.py`），`cd "$REPO"` 后交给 Hermes（agent 依赖仓库相对路径，勿删 cd）。
-- **未配置 `HERMES_RUN_CMD` 时的降级**：不执行扫描，改为调 `push_report.py --message` 向已配渠道发"待执行提醒"，确保漏扫可见。
+- `run_scan.sh [am|pm|policy] [--review-channel <渠道> | --broadcast]` 把对应扫描指令整段组装成 `{PROMPT}`，`cd "$REPO"` 后交给 Hermes（agent 依赖仓库相对路径，勿删 cd）。
+- **推送范围由发起方声明（2026-10-20 起）**：`run_scan.sh` 先用 `push_scope.py` 把本轮范围写进 `data/reports/.push-scope/<日期>.lock`，再把**确定性**的推送指令写进 prompt（不再让 Agent 判断"渠道会话还是定时任务"），并 `export REVIEW_CHANNEL` 给下游；`push_report.py` 读锁执行，`--broadcast` 没有调度路径的声明就拒绝。cron 上下文（祖先进程含 cron/crond）未显式声明时自动按定时任务处理，其它上下文不扩散。
+- **未配置 `HERMES_RUN_CMD` 时的降级**：不执行扫描，改为调 `push_report.py --message` 向**本轮声明范围内**的渠道发"待执行提醒"，确保漏扫可见。
 - `~/.hermes/.env` 由 `run_scan.sh` 自动加载（推送渠道、`EPIDEMIC_*`、`HERMES_RUN_CMD` 都从这里来）。
 - **技能分发**：Hermes 通过 `~/.hermes/skills/` 下的符号链接使用 `global-policy-search` / `policy-verification` / `daily-report` 三个仓库内 skill（部署见 README）。
 - **每道工序后验货**：prompt 中要求 Hermes 在每段完成后核对产出数量与出处存在性再进下一段；某段失败不阻塞整体，失败记录留在对应状态（如待核实）下轮补跑。
 - **幂等兜底**：即使同一批记录重复入库，event_id 合并策略保证核验/研判结论不被抹掉；同一天推送只发一次。
+- **生产更新与诊断**：仓库在 VPS 上是 clone 的工作树，不会自动更新 —— `bash scripts/deploy_update.sh policy` 负责 pull + 依赖 + 自检；`python scripts/diagnose_push.py` 打印代码版本/范围锁/crontab/日志，用于判断"线上跑的是哪版代码"。
 
-**cron 部署要点**（`config/crontab.example`）：服务器时区必须 Asia/Shanghai；cron 的 PATH 被精简，需在 crontab 顶部手工补 `PATH=` 行。
+**cron 部署要点**（`config/crontab.example`）：服务器时区必须 Asia/Shanghai；cron 的 PATH 被精简，需在 crontab 顶部手工补 `PATH=` 行；每行建议显式带 `--broadcast` 声明推送范围。
 
 ## 5. 代码运行时约束
 

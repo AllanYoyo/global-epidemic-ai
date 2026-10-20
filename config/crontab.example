@@ -5,12 +5,15 @@
 #   2) 环境变量写入 ~/.hermes/.env(run_scan.sh 自动加载), 尤其是 HERMES_RUN_CMD
 #   3) cron 的 PATH 精简, 建议在 crontab 顶部补一行:
 #      PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+#   4) **推送范围要显式声明**(2026-10-20 起): 每行末尾的 --broadcast 表示
+#      "这是定时任务, 允许全量推送"。不写也能跑(cron 上下文会自动识别成定时任务),
+#      但显式声明不依赖上下文识别, 行为更可预期。诊断: python3 scripts/diagnose_push.py
 
 # 06:30 晨扫(全量) + 日报 + 推送; 周一自动附加周更源(EPPO/IPPC/沙漠蝗等)
-30 6 * * * /opt/global-epidemic-ai/repo/scripts/run_scan.sh am >> /opt/global-epidemic-ai/logs/cron.log 2>&1
+30 6 * * * /opt/global-epidemic-ai/repo/scripts/run_scan.sh am --broadcast >> /opt/global-epidemic-ai/logs/cron.log 2>&1
 
 # 18:00 晚扫(增量: 官方源 + core 病害), 刷新当日日报
-0 18 * * * /opt/global-epidemic-ai/repo/scripts/run_scan.sh pm >> /opt/global-epidemic-ai/logs/cron.log 2>&1
+0 18 * * * /opt/global-epidemic-ai/repo/scripts/run_scan.sh pm --broadcast >> /opt/global-epidemic-ai/logs/cron.log 2>&1
 
 # 07:30 政策扫(各国动植物检疫/进出口管控政策变化), 产出政策日报
-30 7 * * * /opt/global-epidemic-ai/repo/scripts/run_scan.sh policy >> /opt/global-epidemic-ai/logs/cron.log 2>&1
+30 7 * * * /opt/global-epidemic-ai/repo/scripts/run_scan.sh policy --broadcast >> /opt/global-epidemic-ai/logs/cron.log 2>&1

@@ -23,10 +23,9 @@ description: 生成每日动植物检疫政策监测日报(Markdown + Word 简�
 
    产出 `data/reports/<日期>-policy-report.md` + `.xlsx`(无 openpyxl 时降级 CSV) + `.docx` 政策监测 Word 简报(无 python-docx 时跳过)。
 
-2. 推送办公渠道(**第 0 步: 先判定渠道, 不得跳过**):
+2. 推送办公渠道(**第 0 步: 先声明推送范围, 不得跳过**):
 
-   用户明确要求"反馈必须先在原渠道完成再扩散到其它渠道"。**推送前必须先回答一个问题:
-   本轮请求来自哪个渠道?**
+   用户明确要求"反馈必须先在原渠道完成再扩散到其它渠道"。**推送范围由发起方声明, 不由你临场判断**。
 
    - **来自单一渠道会话**(用户在微信/钉钉/邮箱里发起的扫描、测试或补发请求):
      **只能先发那个渠道**, 等用户在该渠道确认后, 再发其余渠道:
@@ -38,30 +37,33 @@ description: 生成每日动植物检疫政策监测日报(Markdown + Word 简�
      python scripts/push_report.py --date <YYYY-MM-DD> --review-approved
      ```
 
-     ⚠ **红线**: 未经原渠道用户确认, 不得执行阶段 2, 也不得改用不带
-     `--review-channel` 的命令 —— 那样会把日报发到所有渠道(钉钉/邮箱也会收到),
-     等于绕过"先在原渠道完成"的要求。**当日已推送过**(被幂等跳过)时, 补发要
-     `--force --review-channel <渠道>`, 仍然只发该渠道。
-   - **来自定时任务**(cron `run_scan.sh`, 非渠道会话): 全量推送, 需**显式** `--broadcast`
-     `python scripts/push_report.py --date <YYYY-MM-DD> --broadcast`。
+     阶段 1 会自动写**推送范围锁**(`data/reports/.push-scope/<日期>.lock`, scope=review),
+     本轮任何 `--broadcast` 都会被拒绝 —— 不会再扩散到钉钉/邮箱。
+
+     ⚠ **红线**: 未经原渠道用户确认, 不得执行阶段 2, 也不得改用 `--broadcast`
+     (没有调度路径的全量范围声明时, `--broadcast` 会被拒绝并退出码 1)。
+     **当日已推送过**(被幂等跳过)时, 补发要 `--force --review-channel <渠道>`,
+     仍然只发该渠道。
+   - **来自定时任务**(cron `run_scan.sh`, 非渠道会话): 走
+     `scripts/run_scan.sh <模式> --broadcast`(它会先写全量范围锁), 不要自己拼 `--broadcast`。
+   - **本轮范围未声明**(例如手工跑了 `scripts/run_scan.sh policy`): **不要执行 `--broadcast`**;
+     若本轮确实是某个渠道的会话, 按上面阶段 1 的写法只发那个渠道; 否则只生成日报, 不推送。
 
    其它用法:
 
    ```bash
    python scripts/push_report.py --date <YYYY-MM-DD> --dry-run   # 只预览, 不发送
    python scripts/push_report.py --date <YYYY-MM-DD> --force     # 当日已推送过, 强制重发
+   python scripts/diagnose_push.py                              # 推送链路现场诊断(只读)
    ```
 
    - **不指定任何范围时脚本不会推送**(退出码 2 并提示三种写法)。这是有意的:
      扩散必须显式声明, 免得"忘了指定渠道"被当成"发所有渠道"。
    - 日报当天已推送过(有 `data/reports/.pushed/<日期>.flag`)会被幂等跳过, 补发加 `--force`。
-   - `run_scan.sh` 未配 `HERMES_RUN_CMD` 时的 fallback 走 `--broadcast --message` 路径
-     (面向所有渠道的运维提醒)。但**存在待审标记时**只发审阅渠道。
+   - `run_scan.sh` 未配 `HERMES_RUN_CMD` 时的 fallback 走"待执行提醒"路径, 范围与本轮声明一致
+     (渠道会话只提醒审阅渠道; 定时任务才群发)。
    - 用户要求"发邮件给…"/"邮件通知"时, 不走本脚本: 直接调用 Hermes 的 `tuta-webmail` 技能发送
      (主题纯中文无 emoji, 正文用日报"五问"要点转纯文本; Tuta 免费版无附件, 需附件改用 SMTP 渠道)。
-
-   用户要求"发邮件给…"/"邮件通知"时, 不走本脚本: 直接调用 Hermes 的 `tuta-webmail` 技能发送
-   (主题纯中文无 emoji, 正文用日报"五问"要点转纯文本; Tuta 免费版无附件, 需附件改用 SMTP 渠道)。
 
 3. **交付前复核**(逐项确认):
    - "立即关注"事件是否都有官方来源链接与研判依据?

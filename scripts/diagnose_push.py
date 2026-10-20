@@ -145,26 +145,67 @@ def check_scope_state(date):
         print("  已推标记: 无")
 
 
+def hermes_platforms():
+    """`hermes send --list` 里可投递的平台(小写平台名)。
+
+    2026-10-20 生产现场: 用户说的"微信会话"是 Hermes 的个人微信通道,
+    脚本自己发不进去, 只有借 hermes send 才能投到那个会话。诊断必须把这条
+    路径算进去, 否则会误判"先在微信审阅跑不通"。
+    """
+    out, err = _run([push_scope.HERMES_COMMAND, "send", "--list"], timeout=25)
+    if not out:
+        return []
+    plats = []
+    for line in out.splitlines():
+        s = line.strip()
+        if not s or s.endswith(":") or ":" not in s:
+            continue
+        name = s.split(":", 1)[0].strip().lower()
+        if name and name not in plats and " " not in name:
+            plats.append(name)
+    return plats
+
+
 def check_channels():
     section("3. 推送渠道配置(哪些渠道会收到)")
     loaded = load_hermes_env()
     if loaded:
-        print("  (已从 %s 补齐渠道配置: %s)" % (HERMES_ENV, "、".join(sorted(loaded))))
-    for env, label in push_scope.REVIEW_CHANNEL_MAP.values():
+        print("  (已从 %s 补齐渠道配置: %s)"
+              % (HERMES_ENV, "、".join(sorted(k for k in loaded if "WEBHOOK" in k or "SMTP" in k) or loaded[:6])))
+    webhook_channels = []
+    for key, (env, label) in push_scope.REVIEW_CHANNEL_MAP.items():
         val = os.environ.get(env)
         if val:
+            webhook_channels.append(label)
             print("  %-8s 已配置(%s=%s...)" % (label, env, str(val)[:24]))
         else:
             print("  %-8s 未配置(%s)" % (label, env))
-    configured = [label for env, label in push_scope.REVIEW_CHANNEL_MAP.values()
-                  if os.environ.get(env)]
-    if not configured:
-        _warn("没有读到任何推送渠道配置(检查 %s 与当前 shell 的环境变量)" % HERMES_ENV)
-    elif len(configured) == 1:
-        _problem("只配了 %s 一个渠道 —— 这意味着'只发微信审阅'在工作流里根本跑不通:"
-                 "审阅渠道 企业微信 会直接报未配置并中止, 日报只可能落到 %s。"
-                 "要用'先在微信审阅再扩散', 必须把 WECHAT_WEBHOOK 配到 %s"
-                 % (configured[0], configured[0], HERMES_ENV))
+    hermes_plats = hermes_platforms()
+    if hermes_plats:
+        print("  --- 经 hermes send 投递的渠道(脚本自己 POST 发不进去, 靠它) ---")
+        for key, label in push_scope.HERMES_CHANNEL_MAP.items():
+            if key in hermes_plats:
+                print("  %-8s 可投递(hermes send --to %s)" % (label, key))
+            else:
+                print("  %-8s 不可投递(hermes 未列出该平台)" % label)
+    else:
+        print("  (hermes send 不可用: 找不到 %s 命令或没有可投递平台)"
+              % push_scope.HERMES_COMMAND)
+
+    review_ok = [c for c in webhook_channels + [k for k in push_scope.HERMES_CHANNEL_MAP
+                                                if k in hermes_plats]]
+    if not review_ok:
+        _warn("没有可用渠道: 脚本侧没配 webhook, hermes send 也不可用 —— 日报推不出去")
+    elif len(webhook_channels) == 1 and not hermes_plats:
+        _problem("只配了 %s 一个渠道, 且 hermes send 不可用 —— '只发微信审阅'在工作流里"
+                 "根本跑不通: 审阅渠道 企业微信 会直接报未配置并中止, 日报只可能落到 %s。"
+                 "要用'先在微信审阅再扩散', 二选一: 把 WECHAT_WEBHOOK 配到 %s, "
+                 "或让 hermes send 可用(个人微信通道)"
+                 % (webhook_channels[0], webhook_channels[0], HERMES_ENV))
+    elif len(webhook_channels) == 1 and hermes_plats:
+        print("  → 定时全量推送集合 = %s(微信等 Hermes 渠道默认不在全量里, "
+              "要纳入用 HERMES_PUSH_CHANNELS=weixin); '先在微信审阅'用 "
+              "--review-channel weixin 可行。" % "、".join(webhook_channels))
 
 
 def check_crontab():

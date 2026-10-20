@@ -665,7 +665,9 @@ class PushReportReviewGateTests(unittest.TestCase):
     def test_unrecognized_review_channel_fails_closed(self):
         # 漏法 1(最致命): 渠道名写错曾被静默丢弃 → 等于"没设闸门" → 全量推送。
         # 现在认不出就报错中止(中文别名与简写已纳入白名单, 见下面那条用例)。
-        for bad in ("weixin", "unknown-channel", "企业微信群", "corp-wechat"):
+        # 注意: 2026-10-20 起 "weixin" 是**合法**渠道(经 hermes send 投递的
+        # 个人微信), 不再是"拼错的名字"的样本, 换成其它手滑写法。
+        for bad in ("weixn", "unknown-channel", "企业微信群", "corp-wechat"):
             self.calls.clear()
             rc, out = self._run(["--date", "2026-10-30"],
                                 env_extra={"REVIEW_CHANNEL": bad})
@@ -676,7 +678,7 @@ class PushReportReviewGateTests(unittest.TestCase):
     def test_review_channel_accepts_chinese_alias(self):
         # 渠道名认得出就应当按中文别名工作(而不是报错或静默全量)
         # 每个别名用不同日期, 避免被"同日幂等"标记挡掉
-        aliases = [a for a in ("企业微信", "wx", "wecom", "微信")
+        aliases = [a for a in ("企业微信", "wx", "wecom")
                    if a in self.pr.REVIEW_CHANNEL_ALIASES]
         for i, alias in enumerate(aliases):
             self.calls.clear()
@@ -881,9 +883,10 @@ class PushScopeLockTests(unittest.TestCase):
 
     def test_push_scope_cli_rejects_unknown_channel(self):
         # 渠道名认不出 → 报错退出(fail-closed), 绝不静默当成"没设闸门"
+        # (注意: "weixin" 自 2026-10-20 起是合法渠道, 不再是拼错的名字)
         buf = io.StringIO()
         with redirect_stdout(buf):
-            rc = self.ps.main(["--date", "2026-10-20", "--review-channel", "weixin"])
+            rc = self.ps.main(["--date", "2026-10-20", "--review-channel", "weixn"])
         self.assertEqual(rc, 1)
         self.assertIn("无法识别", buf.getvalue())
         self.assertIsNone(self.ps.read_scope("2026-10-20"))
@@ -1085,6 +1088,202 @@ class PushScopeLockTests(unittest.TestCase):
         self.assertNotIn("钉钉       未配置", out)
         # 只配了一个渠道 → 必须提示"只发微信审阅"在当前配置下跑不通
         self.assertIn("只配了", out)
+
+
+class PushHermesChannelTests(unittest.TestCase):
+    """Hermes 投递型渠道(个人微信/飞书)—— 2026-10-20 生产现场新增。
+
+    现场事实: 生产 .env 里**没有** WECHAT_WEBHOOK(企业微信群机器人), 用户说的
+    "微信会话"是 Hermes 的个人微信通道(WEIXIN_*)。脚本自己 POST 发不进去,
+    只有借 `hermes send` 才能把日报送进用户与 Hermes 说话的那个会话。
+    """
+
+    def setUp(self):
+        import push_report
+        import push_scope
+        self.pr = push_report
+        self.ps = push_scope
+        self.tmp = tempfile.mkdtemp(prefix="push-hermes-")
+        self.flag_dir = os.path.join(self.tmp, "reports", ".pushed")
+        self.pending_dir = os.path.join(self.tmp, "reports", ".review-pending")
+        self.scope_dir = os.path.join(self.tmp, "reports", ".push-scope")
+        self.env_backup = dict(os.environ)
+        os.environ["WECHAT_WEBHOOK"] = "https://test.example/wechat"
+        os.environ["DINGTALK_WEBHOOK"] = "https://test.example/dingtalk"
+        os.environ.pop("SMTP_HOST", None)
+        os.environ.pop("REVIEW_CHANNEL", None)
+        os.environ.pop("HERMES_PUSH_CHANNELS", None)
+
+        self.calls = []
+        self.hermes_calls = []
+        # push_report 直接 from push_scope import channel_available,
+        # 所以两个模块的引用都要打桩, 否则 patch 不到实际生效的那一份。
+        self._real_send_hermes = push_report.send_hermes
+        self._patches = [
+            mock.patch.object(self.pr, "PUSH_FLAG_DIR", self.flag_dir),
+            mock.patch.object(self.pr, "PENDING_DIR", self.pending_dir),
+            mock.patch.object(self.ps, "SCOPE_DIR", self.scope_dir),
+            mock.patch.object(self.pr, "send_wechat",
+                              side_effect=lambda t: self.calls.append(("wechat", t))),
+            mock.patch.object(self.pr, "send_dingtalk",
+                              side_effect=lambda t, title: self.calls.append(("dingtalk", t, title))),
+            mock.patch.object(self.pr, "send_hermes",
+                              side_effect=self._fake_hermes),
+            mock.patch.object(self.pr, "channel_available",
+                              side_effect=self._fake_available),
+            mock.patch.object(self.ps, "channel_available",
+                              side_effect=self._fake_available),
+            mock.patch.object(self.pr.report, "collect",
+                              return_value={"new": [], "active": [], "covered": []}),
+        ]
+        for p in self._patches:
+            p.start()
+
+    def tearDown(self):
+        for p in self._patches:
+            p.stop()
+        os.environ.clear()
+        os.environ.update(self.env_backup)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _fake_hermes(self, text, platform, docx=None):
+        self.hermes_calls.append((platform, text, docx))
+        return {"ok": True}
+
+    def _fake_available(self, key):
+        # 只让 weixin 可用(feishu 没配)
+        return key == "weixin"
+
+    def _run(self, args, env_extra=None):
+        os.environ.pop("REVIEW_CHANNEL", None)
+        if env_extra:
+            for k, v in env_extra.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        buf = io.StringIO()
+        with mock.patch("sys.argv", ["push_report.py"] + args), \
+                redirect_stdout(buf):
+            try:
+                rc = self.pr.main()
+            except SystemExit as e:
+                rc = e.code
+        return rc, buf.getvalue()
+
+    # ---- 别名与解析 ----
+
+    def test_alias_weixin_variants(self):
+        for alias in ("weixin", "微信", "个人微信"):
+            self.assertEqual(self.ps.resolve_channel(alias), "weixin", alias)
+
+    def test_alias_feishu_variants(self):
+        for alias in ("feishu", "飞书", "lark"):
+            self.assertEqual(self.ps.resolve_channel(alias), "feishu", alias)
+
+    def test_enterprise_wechat_alias_unchanged(self):
+        # "企业微信"仍是群机器人(webhook 型), 与"微信"(个人微信/Hermes)不是一回事
+        self.assertEqual(self.ps.resolve_channel("企业微信"), "wechat")
+        self.assertEqual(self.ps.resolve_channel("微信"), "weixin")
+
+    def test_channel_kind_and_label(self):
+        self.assertEqual(self.ps.channel_kind("weixin"), "hermes")
+        self.assertEqual(self.ps.channel_kind("dingtalk"), "webhook")
+        self.assertEqual(self.ps.channel_label("weixin"), "微信")
+        self.assertEqual(self.ps.channel_key_for_label("微信"), "weixin")
+
+    # ---- 推送行为 ----
+
+    def test_review_channel_weixin_sends_only_weixin(self):
+        # 阶段 1 显式指定微信 → 只发微信, 钉钉一条都不发
+        rc, out = self._run(["--date", "2026-12-01", "--review-channel", "weixin"])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.calls, [], out)
+        self.assertEqual([c[0] for c in self.hermes_calls], ["weixin"], out)
+
+    def test_review_channel_weixin_writes_review_lock(self):
+        rc, out = self._run(["--date", "2026-12-02", "--review-channel", "weixin"])
+        self.assertEqual(rc, 0, out)
+        scope = self.ps.read_scope("2026-12-02")
+        self.assertEqual(scope["scope"], "review")
+        self.assertEqual(scope["channel"], "weixin")
+        self.assertEqual(scope["channel_label"], "微信")
+
+    def test_broadcast_does_not_include_weixin_by_default(self):
+        # 默认全量集合 = 已配 webhook 渠道(钉钉); 微信不被顺带发出去,
+        # 免得日报突然开始刷屏用户微信
+        self.ps.write_scope("2026-12-03", "broadcast", source="test:cron")
+        rc, out = self._run(["--date", "2026-12-03", "--broadcast"])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual({c[0] for c in self.calls}, {"wechat", "dingtalk"}, out)
+        self.assertEqual(self.hermes_calls, [], out)
+
+    def test_hermes_push_channels_env_opts_in(self):
+        # 显式打开后, 全量推送才带上微信
+        os.environ["HERMES_PUSH_CHANNELS"] = "weixin"
+        self.ps.write_scope("2026-12-04", "broadcast", source="test:cron")
+        rc, out = self._run(["--date", "2026-12-04", "--broadcast"])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual({c[0] for c in self.calls}, {"wechat", "dingtalk"}, out)
+        self.assertEqual([c[0] for c in self.hermes_calls], ["weixin"], out)
+
+    def test_stage2_after_weixin_review_sends_remaining_only(self):
+        # 阶段 1 只发微信 → 阶段 2 发完其余渠道(钉钉), 微信不重复收
+        self._run(["--date", "2026-12-05", "--review-channel", "weixin"])
+        self.calls.clear()
+        self.hermes_calls.clear()
+        rc, out = self._run(["--date", "2026-12-05", "--review-approved"])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual({c[0] for c in self.calls}, {"wechat", "dingtalk"}, out)
+        self.assertEqual(self.hermes_calls, [], out)
+
+    def test_weixin_review_blocked_when_hermes_missing(self):
+        # hermes CLI 不可用 → 审阅渠道不可用 → 报错中止, 不得退回"发所有渠道"
+        with mock.patch.object(self.pr, "channel_available", return_value=False):
+            rc, out = self._run(["--date", "2026-12-06", "--review-channel", "weixin"])
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("不可用", out)
+        self.assertEqual(self.calls, [], out)
+        self.assertEqual(self.hermes_calls, [], out)
+
+    def test_send_hermes_uses_stdin_and_attaches_docx(self):
+        # send_hermes: 走 stdin(--file -), docx 存在时正文追加 MEDIA:<path>
+        import tempfile as _tf
+        docx = os.path.join(self.tmp, "r.docx")
+        with open(docx, "wb") as f:
+            f.write(b"x")
+        rec = {}
+
+        def fake_run(cmd, **kw):
+            rec["cmd"] = cmd
+            rec["input"] = kw.get("input")
+            class P:
+                returncode = 0
+                stdout = b"ok"
+                stderr = b""
+            return P()
+
+        with mock.patch.object(self.pr.subprocess, "run", fake_run):
+            self._real_send_hermes("日报正文", "weixin", docx)
+        self.assertEqual(rec["cmd"][:2], ["hermes", "send"])
+        self.assertIn("--to", rec["cmd"])
+        self.assertEqual(rec["cmd"][rec["cmd"].index("--to") + 1], "weixin")
+        body = rec["input"].decode("utf-8")
+        self.assertIn("日报正文", body)
+        self.assertIn("MEDIA:%s" % docx, body)
+
+    def test_send_hermes_raises_on_failure(self):
+        def fake_run(cmd, **kw):
+            class P:
+                returncode = 1
+                stdout = b""
+                stderr = "投递失败".encode("utf-8")
+            return P()
+
+        with mock.patch.object(self.pr.subprocess, "run", fake_run):
+            with self.assertRaises(RuntimeError) as ctx:
+                self._real_send_hermes("正文", "weixin", None)
+        self.assertIn("投递失败", str(ctx.exception))
 
 
 class BriefTextFocusTests(unittest.TestCase):

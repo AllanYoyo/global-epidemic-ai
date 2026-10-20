@@ -191,10 +191,14 @@ description: 监测各国政府动植物检疫与进出口管控政策变化。�
 - **来自单一渠道会话**(用户在某个渠道里发起本轮请求)→ **只能先发那个渠道**:
 
   ```bash
-  python scripts/push_report.py --date <YYYY-MM-DD> --review-channel wechat   # 渠道名按实际替换
+  python scripts/push_report.py --date <YYYY-MM-DD> --review-channel weixin   # 渠道名按实际替换
   # 用户在该渠道确认"可以发"之后, 才执行:
   python scripts/push_report.py --date <YYYY-MM-DD> --review-approved
   ```
+
+  ⚠ 渠道名: **微信 = `weixin`**(用户的个人微信会话, 经 `hermes send` 投递)、
+  **企业微信 = `wechat`**(群机器人 webhook, 生产未配)。写错会报"无法识别"或
+  "未配置"并中止 —— 不会静默退化成全量。
 
   首跑只发审阅渠道, 并写两份标记: `data/reports/.review-pending/<日期>.flag`(阶段 2 读回渠道)
   与 **`data/reports/.push-scope/<日期>.lock`(推送范围锁, scope=review)**。锁会挡住本轮之后的

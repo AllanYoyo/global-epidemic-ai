@@ -31,8 +31,10 @@ description: 生成每日动植物检疫政策监测日报(Markdown + Word 简�
      **只能先发那个渠道**, 等用户在该渠道确认后, 再发其余渠道:
 
      ```bash
-     # 阶段 1: 只发审阅渠道(渠道名按实际渠道替换: wechat / dingtalk / mail, 也认中文别名)
-     python scripts/push_report.py --date <YYYY-MM-DD> --review-channel wechat
+     # 阶段 1: 只发审阅渠道(渠道名按实际渠道替换)
+     #   weixin = 用户的个人微信会话(经 hermes send 投递)
+     #   dingtalk = 钉钉群机器人 ; wechat = 企业微信群机器人 ; mail = 邮箱
+     python scripts/push_report.py --date <YYYY-MM-DD> --review-channel weixin
      # 阶段 2: 用户在原渠道确认"可以发"之后, 才发完其余渠道
      python scripts/push_report.py --date <YYYY-MM-DD> --review-approved
      ```
@@ -44,6 +46,9 @@ description: 生成每日动植物检疫政策监测日报(Markdown + Word 简�
      (没有调度路径的全量范围声明时, `--broadcast` 会被拒绝并退出码 1)。
      **当日已推送过**(被幂等跳过)时, 补发要 `--force --review-channel <渠道>`,
      仍然只发该渠道。
+     ⚠ **微信 = `weixin`**(用户的个人微信会话, 经 `hermes send` 投递),
+     **企业微信 = `wechat`**(群机器人 webhook)。生产上没配企业微信,
+     写 `--review-channel wechat` 会报"未配置"并中止。
    - **来自定时任务**(cron `run_scan.sh`, 非渠道会话): 走
      `scripts/run_scan.sh <模式> --broadcast`(它会先写全量范围锁), 不要自己拼 `--broadcast`。
      注意: `run_scan.sh --broadcast` **只在 cron 上下文里成立** —— 手动/会话触发时会被

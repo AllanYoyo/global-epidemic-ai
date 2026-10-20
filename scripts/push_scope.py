@@ -35,6 +35,7 @@
 """
 import argparse
 import os
+import shutil
 import sys
 
 from normalize import DATA_DIR, biz_now, biz_today
@@ -42,21 +43,101 @@ from normalize import DATA_DIR, biz_now, biz_today
 # 范围锁目录(与 .pushed / .review-pending 同级)
 SCOPE_DIR = os.path.join(DATA_DIR, "reports", ".push-scope")
 
-# 渠道键 → (环境变量名, 显示名)
+# ---- 渠道分两类 ----
+# ① webhook 型: 脚本自己 POST(企业微信群机器人 / 钉钉机器人 / SMTP 邮箱)
 REVIEW_CHANNEL_MAP = {
     "wechat": ("WECHAT_WEBHOOK", "企业微信"),
     "dingtalk": ("DINGTALK_WEBHOOK", "钉钉"),
     "mail": ("SMTP_HOST", "邮箱"),
 }
+# ② Hermes 投递型: 借 `hermes send` 投到已配置平台(个人微信 / 飞书)。
+#    这类是 2026-10-20 生产现场查出来的: 生产 .env 里**没有** WECHAT_WEBHOOK,
+#    用户的"微信会话"是 Hermes 的个人微信通道(WEIXIN_*), 脚本自己发不到 ——
+#    只有借 hermes send 才能把日报送进那个会话。
+HERMES_CHANNEL_MAP = {
+    "weixin": "微信",
+    "feishu": "飞书",
+}
+# hermes CLI 路径(可用环境变量覆盖)
+HERMES_COMMAND = os.environ.get("HERMES_CLI") or "hermes"
+
 # 显示名 → 环境变量名(用于"该渠道到底配没配"的校验)
 REVIEW_CHANNEL_ENV = {label: env for env, label in REVIEW_CHANNEL_MAP.values()}
+# 渠道键 → 环境变量名(webhook 型)
+CHANNEL_ENV = {key: env for key, (env, _label) in REVIEW_CHANNEL_MAP.items()}
 # 渠道别名: 中文与常见简写。认不出的**报错退出**(fail-closed), 绝不静默丢弃 ——
 # 静默丢弃等价于"没设闸门" → 全量推送, 这正是 2026-10-19/20 事故的形态。
 REVIEW_CHANNEL_ALIASES = {
+    # webhook 型
     "wechat": "wechat", "wx": "wechat", "wecom": "wechat", "企业微信": "wechat",
     "dingtalk": "dingtalk", "ding": "dingtalk", "钉钉": "dingtalk",
     "mail": "mail", "email": "mail", "smtp": "mail", "邮箱": "mail", "邮件": "mail",
+    # Hermes 投递型: "微信" 指用户与 Hermes 说话的那个个人微信会话
+    "weixin": "weixin", "微信": "weixin", "个人微信": "weixin",
+    "feishu": "feishu", "lark": "feishu", "飞书": "feishu",
 }
+
+
+def channel_label(key):
+    """渠道键 → 显示名。"""
+    if key in HERMES_CHANNEL_MAP:
+        return HERMES_CHANNEL_MAP[key]
+    item = REVIEW_CHANNEL_MAP.get(key)
+    return item[1] if item else key
+
+
+def channel_kind(key):
+    """渠道类型: webhook(脚本自己发) / hermes(借 hermes send 投递)。"""
+    return "hermes" if key in HERMES_CHANNEL_MAP else "webhook"
+
+
+def channel_key_for_label(label):
+    """显示名 → 渠道键(两类渠道都查)。"""
+    for key, (_env, name) in REVIEW_CHANNEL_MAP.items():
+        if name == label:
+            return key
+    for key, name in HERMES_CHANNEL_MAP.items():
+        if name == label:
+            return key
+    return None
+
+
+def channel_unavailable_hint(label):
+    """渠道不可用的原因说明(按类型区分, 给用户看得懂)。"""
+    key = channel_key_for_label(label)
+    if key in HERMES_CHANNEL_MAP:
+        return "hermes CLI 不可用(找不到 %s 命令, 无法投递到该平台)" % HERMES_COMMAND
+    return "未配置(%s)" % (CHANNEL_ENV.get(key) or "?")
+
+
+def channel_available(key):
+    """该渠道当前是否可用。
+
+    webhook 型看环境变量; Hermes 型看 hermes CLI 是否在 PATH。
+    """
+    if key in HERMES_CHANNEL_MAP:
+        return shutil.which(HERMES_COMMAND) is not None
+    env = CHANNEL_ENV.get(key)
+    return bool(env and os.environ.get(env))
+
+
+def hermes_broadcast_channels():
+    """参与"定时任务全量推送"的 Hermes 渠道(默认一个都不参与)。
+
+    定时全量的推送集合保持"只发已配 webhook 渠道"(钉钉), 免得日报突然开始
+    刷屏微信/飞书; 要把日报也送到那里, 用环境变量显式打开:
+        HERMES_PUSH_CHANNELS=weixin,feishu
+    """
+    raw = os.environ.get("HERMES_PUSH_CHANNELS", "") or ""
+    out = []
+    for item in raw.replace("，", ",").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        key = REVIEW_CHANNEL_ALIASES.get(item.lower())
+        if key and key in HERMES_CHANNEL_MAP and key not in out:
+            out.append(key)
+    return out
 
 
 def scope_path(date):
@@ -89,7 +170,7 @@ def write_scope(date, scope, channel=None, source="", note=""):
     lines = ["scope=%s" % scope]
     if channel:
         lines.append("channel=%s" % channel)
-        lines.append("channel_label=%s" % REVIEW_CHANNEL_MAP[channel][1])
+        lines.append("channel_label=%s" % channel_label(channel))
     lines.append("source=%s" % (source or "-"))
     lines.append("declared_at=%s" % biz_now())
     if note:
@@ -160,7 +241,7 @@ def main(argv=None):
             print("       合法取值: wechat | dingtalk | mail"
                   "(也认中文别名 企业微信 / 钉钉 / 邮箱)")
             return 1
-        print(REVIEW_CHANNEL_MAP[key][1])
+        print(channel_label(key))
         return 0
 
     if args.show:
@@ -196,7 +277,7 @@ def main(argv=None):
         path = write_scope(args.date, "review", channel=key, source=args.source,
                            note=args.note)
         print("[OK] 已写入推送范围锁: %s · 只发 %s(%s) · 来源 %s"
-              % (args.date, REVIEW_CHANNEL_MAP[key][1], key, args.source))
+              % (args.date, channel_label(key), key, args.source))
         print("     %s" % path)
         return 0
 

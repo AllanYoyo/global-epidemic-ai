@@ -135,6 +135,35 @@
 
 ### 2026-10-20 生产现场复盘 (G2 落地后)
 
+#### G5 · "只发微信审阅"在生产上根本跑不通 —— 脚本发不进用户那个微信会话 → 新增 Hermes 投递型渠道
+- 位置: `scripts/push_scope.py`(渠道表 / 别名 / 可用性判定);
+  `scripts/push_report.py`(`send_hermes` / `_build_channels` / 审阅渠道可用性判定);
+  `scripts/diagnose_push.py`(渠道报告); `skills/daily-report/SKILL.md`;
+  `skills/global-policy-search/SKILL.md`; `AGENTS.md`; `README.md`; `TROUBLESHOOTING.md`
+- 现场事实(SSH 到生产查证): `.env` 里**没有** `WECHAT_WEBHOOK`、没有 SMTP, 只有
+  `DINGTALK_WEBHOOK`; 用户与 Hermes 说话的"微信会话"是 **Hermes 的个人微信通道**
+  (`WEIXIN_TOKEN` / `WEIXIN_HOME_CHANNEL` / `WEIXIN_BASE_URL`)。也就是说:
+  **脚本自己 POST 永远发不进用户那个会话** —— `--review-channel wechat` 只会报
+  "审阅渠道 企业微信 未配置"并中止。用户反复要求"先发微信审阅"却总看到钉钉收到,
+  根子在这里: **审阅渠道本身是空的**。
+- 修法: 借 Hermes 自己的投递通道(它复用网关凭据, 不走 LLM):
+  - 新增 **Hermes 投递型渠道** `weixin`(微信)/ `feishu`(飞书), 由
+    `hermes send --to <平台> --file -` 投递(正文走 stdin; docx 存在时追加
+    `MEDIA:<path>` 顺带发 Word 报告)。
+  - **渠道名正名**: "微信" → `weixin`(个人微信/Hermes); "企业微信" → `wechat`
+    (群机器人 webhook)。原先 "weixin" 是"拼错的例子", 现在是合法渠道。
+  - **可用性判定分两类**: webhook 型看环境变量, Hermes 型看 `hermes` CLI 是否在
+    PATH; 不可用时明确报错(不再静默退回"发所有渠道")。
+  - **Hermes 渠道默认不参与定时全量**(`HERMES_PUSH_CHANNELS` 才纳入), 免得日报
+    突然开始刷屏用户微信; 但 `--review-channel weixin` 随时可用 —— 这正是"先在
+    微信审阅"要的效果。
+  - `diagnose_push.py` 改用 `hermes send --list` 判定真实可投递渠道, 不再误报
+    "先在微信审阅跑不通"。
+- 回归: `scripts/test_smoke.py::PushHermesChannelTests` 新增 12 条(别名/正名/
+  只发微信/写 review 锁/默认全量不含微信/HERMES_PUSH_CHANNELS 打开才含/
+  阶段 2 不重复发微信/hermes 缺失即中止/send_hermes 走 stdin 且带附件/失败抛错);
+  另修正 3 条老用例(把 `weixin` 当拼错名字的样本); 自测 130 → 142 条全绿。
+
 #### G3 · 诊断/更新脚本自身有三个坑, 现场第一次跑就卡住 → 全部修掉
 - 位置: `scripts/deploy_update.sh`; `scripts/diagnose_push.py`; `scripts/buildinfo.py`;
   `.gitignore`; `scripts/push_report.py`(`.pushed` 标记)

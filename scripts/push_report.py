@@ -87,6 +87,7 @@ import hmac
 import json
 import os
 import smtplib
+import subprocess
 import time
 import urllib.parse
 import urllib.request
@@ -98,9 +99,12 @@ from email.mime.text import MIMEText
 import report
 from buildinfo import fingerprint as code_fingerprint
 from normalize import DATA_DIR, biz_now, biz_today
-from push_scope import (REVIEW_CHANNEL_ALIASES, REVIEW_CHANNEL_ENV,
-                        REVIEW_CHANNEL_MAP, clear_scope, describe_scope,
-                        read_scope, write_scope)
+from push_scope import (HERMES_CHANNEL_MAP, HERMES_COMMAND, REVIEW_CHANNEL_ALIASES,
+                        REVIEW_CHANNEL_ENV, REVIEW_CHANNEL_MAP,
+                        channel_available, channel_key_for_label, channel_kind,
+                        channel_label, channel_unavailable_hint, clear_scope,
+                        describe_scope, hermes_broadcast_channels, read_scope,
+                        write_scope)
 
 PUSH_FLAG_DIR = os.path.join(DATA_DIR, "reports", ".pushed")
 PENDING_DIR = os.path.join(DATA_DIR, "reports", ".review-pending")
@@ -235,16 +239,46 @@ def send_mail(subject, text, docx_path):
     return {"ok": True}
 
 
+def send_hermes(text, platform, docx_path=None):
+    """借 `hermes send` 把消息投递到 Hermes 已配置的平台(个人微信 / 飞书)。
+
+    为什么要这条通道(2026-10-20 生产现场查证):
+      生产 `.env` 里**没有** WECHAT_WEBHOOK(企业微信群机器人), 用户说的"微信
+      会话"是 Hermes 的个人微信通道(WEIXIN_*)。脚本自己 POST 发不进去 ——
+      只有借 hermes send 才能把日报送进用户与 Hermes 说话的那个会话。
+      `hermes send` 复用网关凭据, 不走 LLM、不需要 agent 循环;
+      正文里写 `MEDIA:<path>` 可以把 Word 日报一并带过去。
+
+    平台名用 hermes 的原生名(weixin / feishu), 裸平台名 = 发到 home channel。
+    """
+    body = text
+    if docx_path and os.path.isfile(docx_path):
+        body = "%s\nMEDIA:%s" % (text, docx_path)
+    cmd = [HERMES_COMMAND, "send", "--to", platform, "--file", "-"]
+    try:
+        proc = subprocess.run(cmd, input=body.encode("utf-8"),
+                              capture_output=True, timeout=90)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError("hermes send 调用失败: %s" % exc)
+    if proc.returncode != 0:
+        err = proc.stderr.decode("utf-8", "ignore").strip()
+        out = proc.stdout.decode("utf-8", "ignore").strip()
+        raise RuntimeError("hermes send 退出码 %s: %s"
+                           % (proc.returncode, err or out or "(无输出)"))
+    return {"ok": True}
+
+
 def _pending_path(date):
     return os.path.join(PENDING_DIR, "%s.flag" % date)
 
 
 def _label_to_key(label):
-    """显示名 → 渠道键(wechat/dingtalk/mail); 认不出返回 None。"""
-    for key, (_env, name) in REVIEW_CHANNEL_MAP.items():
-        if name == label:
-            return key
-    return None
+    """显示名 → 渠道键(wechat/dingtalk/mail/weixin/feishu); 认不出返回 None。
+
+    两类渠道(企业微信群机器人/钉钉/邮箱 与 经 hermes send 投递的微信/飞书)
+    都要能反查, 否则写进范围锁的 channel 会是空的。
+    """
+    return channel_key_for_label(label)
 
 
 def _is_pending(date):
@@ -290,12 +324,22 @@ def _clear_pending(date):
         os.remove(p)
 
 
-def _build_channels(text, date, docx):
-    """按环境变量组装可推送的渠道列表 [(显示名, sender_fn), ...]。
+def _build_channels(text, date, docx, extra_keys=None):
+    """按配置组装可推送的渠道列表 [(显示名, sender_fn), ...]。
 
-    显示名与 REVIEW_CHANNEL_MAP 中的 review_label 一一对应, 用于评审核闸门的
-    渠道匹配; 因此不带动态后缀(如 SMTP_TO 邮箱地址), 避免 "邮箱(x@y)" vs "邮箱"
-    这种字符串匹配不上。
+    两类渠道(2026-10-20 生产现场新增 Hermes 投递型):
+    · webhook 型: 脚本自己 POST —— 企业微信群机器人 / 钉钉机器人 / SMTP 邮箱
+    · Hermes 投递型: 借 `hermes send` 投到已配置平台 —— 个人微信 / 飞书。
+      生产 .env 里没有 WECHAT_WEBHOOK, 用户的"微信会话"是 Hermes 的个人微信
+      通道(WEIXIN_*), 脚本自己发不进去, 只有 hermes send 能把日报送进那个会话。
+
+    显示名与 REVIEW_CHANNEL_MAP["review_label"] / HERMES_CHANNEL_MAP 中的
+    显示名一一对应, 用于评审核闸门的渠道匹配; 因此不带动态后缀(如 SMTP_TO
+    邮箱地址), 避免 "邮箱(x@y)" vs "邮箱" 这种字符串匹配不上。
+
+    extra_keys: 额外要纳入本次集合的渠道键(如阶段 1 的审阅渠道)。
+    定时全量集合 = 已配 webhook 渠道 + HERMES_PUSH_CHANNELS 指定的 Hermes 渠道
+    (默认不把微信/飞书纳入全量, 免得日报突然刷屏; 要纳入用环境变量打开)。
     """
     channels = []
     if os.environ.get("WECHAT_WEBHOOK"):
@@ -305,6 +349,11 @@ def _build_channels(text, date, docx):
     if os.environ.get("SMTP_HOST"):
         # 显示名固定为 "邮箱"(不带 SMTP_TO 邮箱地址), 与 REVIEW_CHANNEL_MAP["mail"] 一致
         channels.append(("邮箱", lambda: send_mail("疫见全球·政策监测日报 %s" % date, text, docx)))
+    wanted = set(extra_keys or []) | set(hermes_broadcast_channels())
+    for key in HERMES_CHANNEL_MAP:
+        if key in wanted and channel_available(key):
+            channels.append((HERMES_CHANNEL_MAP[key],
+                             lambda k=key: send_hermes(text, k, docx)))
     return channels
 
 
@@ -387,7 +436,7 @@ def main():
     elif lock_scope == "review" and review_channel and lock_label and not args.review_approved:
         # 锁里记着审阅渠道, 命令行却指定了别的渠道 → 拒绝(防"同一轮发到两个渠道")。
         # 阶段 2(--review-approved)不适用: 那时以待审标记为准, 参数只作兜底。
-        want_label = REVIEW_CHANNEL_MAP[review_channel][1]
+        want_label = channel_label(review_channel)
         if want_label != lock_label:
             print("[错误] 审阅渠道与推送范围锁不一致: 锁为 %s, 本次指定 %s。"
                   % (lock_label, want_label))
@@ -401,7 +450,7 @@ def main():
     #                              (含 --force / --message)都不得扩散到其它渠道
     #   其余:                      范围锁里的渠道 > 显式指定的渠道
     pending_label = _pending_channel(args.date)
-    env_label = REVIEW_CHANNEL_MAP[review_channel][1] if review_channel else ""
+    env_label = channel_label(review_channel) if review_channel else ""
     if args.review_approved:
         review_label = pending_label or lock_label or env_label
     elif pending_label:
@@ -419,7 +468,10 @@ def main():
     if args.message:
         text = args.message
         docx = None
-        channels = _build_channels(text, args.date, docx)
+        # 审阅渠道(Hermes 型)要显式纳入本次集合, 否则只发钉钉就发不到微信
+        review_key = channel_key_for_label(review_label) if review_label else None
+        channels = _build_channels(text, args.date, docx,
+                                   extra_keys=[review_key] if review_key else None)
         if review_label:
             channels = [c for c in channels if c[0] == review_label]
         if args.dry_run or not channels:
@@ -427,8 +479,8 @@ def main():
             print("\n---")
             if not channels:
                 if review_label:
-                    print("[失败] 审阅渠道 %s 未配置(%s), 详见 .env.example"
-                          % (review_label, REVIEW_CHANNEL_ENV.get(review_label, "?")))
+                    print("[失败] 审阅渠道 %s 不可用: %s"
+                          % (review_label, channel_unavailable_hint(review_label)))
                 else:
                     print("[提示] 未配置任何推送渠道(WECHAT_WEBHOOK / DINGTALK_WEBHOOK / SMTP_*), "
                       "详见 .env.example")
@@ -480,7 +532,10 @@ def main():
         return 1
     text = brief_text(args.date, data)
     docx = os.path.join(DATA_DIR, "reports", "%s-policy-report.docx" % args.date)
-    channels = _build_channels(text, args.date, docx)
+    # 审阅渠道(Hermes 型)要显式纳入本次集合, 否则只发钉钉就发不到微信
+    review_key = channel_key_for_label(review_label) if review_label else None
+    channels = _build_channels(text, args.date, docx,
+                               extra_keys=[review_key] if review_key else None)
 
     # 决定本次实际推送的渠道集合
     # 审阅渠道(review_label)已在 main() 开头解析完毕, 优先级:
@@ -488,11 +543,12 @@ def main():
     #   有待审标记(未批准):        一律用标记里的渠道(待审期间不得扩散)
     #   其余:                      显式指定的渠道(--review-channel / REVIEW_CHANNEL)
     if review_label and not args.review_approved:
-        # 审阅渠道必须真的配了, 否则"只发审阅渠道"= 一条都不发, 要报错而不是静默
-        review_env = REVIEW_CHANNEL_ENV.get(review_label)
-        if not review_env or not os.environ.get(review_env):
-            print("[失败] 审阅渠道 %s 未配置(%s), 评审核闸门无法启用"
-                  % (review_label, review_env or "?"))
+        # 审阅渠道必须真的可用(webhook 型看环境变量, Hermes 型看 hermes CLI),
+        # 否则"只发审阅渠道"= 一条都不发, 要报错而不是静默
+        review_key = channel_key_for_label(review_label)
+        if not review_key or not channel_available(review_key):
+            print("[失败] 审阅渠道 %s 不可用: %s"
+                  % (review_label, channel_unavailable_hint(review_label)))
             return 1
 
     if review_label:

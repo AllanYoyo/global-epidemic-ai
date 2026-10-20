@@ -60,7 +60,7 @@ python scripts/report.py --date $(date +%F) --excel --docx
 # 推送政策日报(企业微信/钉钉/邮箱, 配了哪个发哪个; 建议先 --dry-run 预览)
 python scripts/push_report.py --date $(date +%F) --dry-run
 # 渠道会话(先在原渠道给用户看, 确认后再发其余渠道):
-python scripts/push_report.py --date $(date +%F) --review-channel wechat
+python scripts/push_report.py --date $(date +%F) --review-channel weixin
 python scripts/push_report.py --date $(date +%F) --review-approved
 # 定时任务的全量推送(需先由调度路径声明全量范围, 见"推送范围锁"):
 scripts/run_scan.sh policy --broadcast
@@ -101,12 +101,23 @@ scripts/run_scan.sh policy --broadcast   # 政策扫(建议每日 07:30): 检索
 
 | 场景 | 发起方式 | 效果 |
 |---|---|---|
-| 渠道会话(微信/钉钉/邮箱里提的要求) | `scripts/run_scan.sh policy --review-channel wechat` 或 `python scripts/push_report.py --date X --review-channel wechat` | 只发该渠道；用户确认后 `--review-approved` 才发其余渠道 |
+| 渠道会话(微信/钉钉/邮箱里提的要求) | `scripts/run_scan.sh policy --review-channel weixin` 或 `python scripts/push_report.py --date X --review-channel weixin` | 只发该渠道；用户确认后 `--review-approved` 才发其余渠道 |
 | 定时任务 | `scripts/run_scan.sh policy --broadcast`（**必须在 cron 上下文里跑**） | 全量推送 |
 | 都没声明 | `scripts/run_scan.sh policy` | cron 上下文自动按定时任务全量；其它上下文**不扩散**（`--broadcast` 一律拒绝） |
 | 人工运维全量补发 | `python scripts/push_scope.py --date X --broadcast --source manual:运维补发` 后再 `python scripts/push_report.py --date X --broadcast` | 全量推送，留痕可审计（`--source` 必须写明依据） |
 
 `push_report.py --broadcast` **不再自声明**：没有调度路径的全量范围声明就拒绝执行（退出码 1），避免"谁喊一声都能发到所有渠道"。
+
+### 两类推送渠道
+
+| 类型 | 渠道 | 依赖 |
+|---|---|---|
+| webhook 型(脚本自己 POST) | 企业微信群机器人 / 钉钉机器人 / 邮箱 | `WECHAT_WEBHOOK` / `DINGTALK_WEBHOOK` / `SMTP_*` |
+| Hermes 投递型(借 `hermes send`) | **微信**(个人微信会话) / 飞书 | `hermes` CLI + Hermes 已配置该平台 |
+
+生产现场事实：`.env` 里**没有** `WECHAT_WEBHOOK`，用户说的"微信会话"是 Hermes 的个人微信通道（`WEIXIN_*`）——脚本自己 POST 发不进去，只有 `hermes send --to weixin` 能把日报送进那个会话（并可顺带带上 Word 报告）。因此渠道名上：**"微信"=`weixin`（个人微信/Hermes）、"企业微信"=`wechat`（群机器人 webhook）**，两者别混。
+
+Hermes 渠道**默认不参与定时全量**（免得日报突然刷屏用户微信）；要把日报也送到那里，用 `HERMES_PUSH_CHANNELS=weixin,feishu` 显式打开。
 
 ## 部署到 VPS
 

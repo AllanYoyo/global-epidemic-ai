@@ -164,6 +164,19 @@
   阶段 2 不重复发微信/hermes 缺失即中止/send_hermes 走 stdin 且带附件/失败抛错);
   另修正 3 条老用例(把 `weixin` 当拼错名字的样本); 自测 130 → 142 条全绿。
 
+#### G6 · 人工在普通 shell 里跑 push_report.py 必然"未配置任何推送渠道" → 脚本自己补齐 .env
+- 位置: `scripts/push_scope.py`(`load_hermes_env`); `scripts/push_report.py`(`main()` 开头调用);
+  `scripts/diagnose_push.py`(改用共享实现)
+- 现象(生产现场实测): `python3 scripts/push_report.py --date 2026-10-20 --broadcast --dry-run`
+  输出「未配置任何推送渠道(WECHAT_WEBHOOK / DINGTALK_WEBHOOK / SMTP_*)」——
+  **渠道配置在 `~/.hermes/.env` 里, 而只有 `run_scan.sh` 会 source 它**。
+  于是: cron 路径正常(run_scan.sh 加载过), Hermes agent 路径正常(继承网关进程环境),
+  唯独人工 shell 路径是空的 —— 白跑一趟, 还会让人误判"生产没配渠道"。
+- 修法: `push_scope.load_hermes_env()` 从 `~/.hermes/.env` 补齐**推送渠道相关**
+  变量(只补 `PUSH_ENV_KEYS` 那几个键, 已存在的同名变量不覆盖, 不把其它密钥带进
+  子进程); `push_report.py` 在 `main()` 开头调用, 让任何入口的渠道集合一致。
+- 回归: 自测 142 → 143 条全绿(新增"人工 shell 场景下渠道能从 .env 补齐"一条)。
+
 #### G3 · 诊断/更新脚本自身有三个坑, 现场第一次跑就卡住 → 全部修掉
 - 位置: `scripts/deploy_update.sh`; `scripts/diagnose_push.py`; `scripts/buildinfo.py`;
   `.gitignore`; `scripts/push_report.py`(`.pushed` 标记)

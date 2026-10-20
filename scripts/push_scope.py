@@ -140,6 +140,44 @@ def hermes_broadcast_channels():
     return out
 
 
+# 推送渠道相关变量(只补这些, 不碰其它密钥)
+PUSH_ENV_KEYS = ("WECHAT_WEBHOOK", "DINGTALK_WEBHOOK", "DINGTALK_SECRET",
+                 "SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASS", "SMTP_TO")
+HERMES_ENV_PATH = os.path.join(os.path.expanduser("~"), ".hermes", ".env")
+
+
+def load_hermes_env(keys=None):
+    """从 ~/.hermes/.env 补齐推送渠道变量(已存在的同名变量**不覆盖**)。
+
+    推送可能由任意入口触发: cron(run_scan.sh 会 source .env)、Hermes agent
+    (继承网关进程的环境)、人工 shell(**什么都不加载**)。人工直接跑
+    `python3 scripts/push_report.py ...` 时渠道变量全缺 → "未配置任何推送
+    渠道", 白跑一趟。这里补齐, 让任何入口的渠道集合一致。
+
+    只补 PUSH_ENV_KEYS 里的键, 免得把 .env 里其它密钥也带进子进程。
+    返回实际补齐的变量名列表。
+    """
+    wanted = tuple(keys) if keys else PUSH_ENV_KEYS
+    loaded = []
+    if not os.path.isfile(HERMES_ENV_PATH):
+        return loaded
+    try:
+        with open(HERMES_ENV_PATH, encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, val = line.split("=", 1)
+                key = key.strip()
+                if key not in wanted or key in os.environ:
+                    continue
+                os.environ[key] = val.strip().strip('"').strip("'")
+                loaded.append(key)
+    except OSError:
+        return loaded
+    return loaded
+
+
 def scope_path(date):
     """锁文件路径: data/reports/.push-scope/<日期>.lock"""
     return os.path.join(SCOPE_DIR, "%s.lock" % date)

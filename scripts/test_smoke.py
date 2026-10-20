@@ -803,6 +803,28 @@ class PushReportReviewGateTests(unittest.TestCase):
         self.assertIn("无审阅渠道", out)
         self.assertEqual(self.calls, [], out)
 
+    def test_push_report_loads_channels_from_hermes_env(self):
+        # 2026-10-20 生产现场: 人工在普通 shell 里跑 push_report.py 时, 渠道变量
+        # 不在环境里(只有 run_scan.sh 会 source ~/.hermes/.env) →
+        # "未配置任何推送渠道", 白跑一趟。现在脚本自己从 .env 补齐。
+        import push_scope
+        env_path = os.path.join(self.tmp, ".hermes", ".env")
+        os.makedirs(os.path.dirname(env_path), exist_ok=True)
+        with open(env_path, "w", encoding="utf-8") as f:
+            f.write("DINGTALK_WEBHOOK=https://oapi.dingtalk.com/robot/send?x=1\n")
+        os.environ.pop("DINGTALK_WEBHOOK", None)
+        os.environ.pop("WECHAT_WEBHOOK", None)
+        self.ps.write_scope("2026-10-29", "broadcast", source="unit")
+        self.calls.clear()
+        buf = io.StringIO()
+        with mock.patch.object(push_scope, "HERMES_ENV_PATH", env_path), \
+                mock.patch("sys.argv", ["push_report.py", "--date", "2026-10-29",
+                                         "--broadcast"]), \
+                redirect_stdout(buf):
+            rc = self.pr.main()
+        self.assertEqual(rc, 0, buf.getvalue())
+        self.assertEqual({c[0] for c in self.calls}, {"dingtalk"}, buf.getvalue())
+
 
 class PushScopeLockTests(unittest.TestCase):
     """推送范围锁(2026-10-20 钉钉误推事故后引入)。
@@ -1072,6 +1094,7 @@ class PushScopeLockTests(unittest.TestCase):
         # 渠道配置在 ~/.hermes/.env 里, 手动跑诊断时 shell 里没有 → 必须去读,
         # 否则会误报"渠道未配置"(10-20 现场差点据此误判)
         import diagnose_push
+        import push_scope
         env_path = os.path.join(self.tmp, ".hermes", ".env")
         os.makedirs(os.path.dirname(env_path), exist_ok=True)
         with open(env_path, "w", encoding="utf-8") as f:
@@ -1080,7 +1103,7 @@ class PushScopeLockTests(unittest.TestCase):
         os.environ.pop("DINGTALK_WEBHOOK", None)
         os.environ.pop("SMTP_HOST", None)
         buf = io.StringIO()
-        with mock.patch.object(diagnose_push, "HERMES_ENV", env_path), \
+        with mock.patch.object(push_scope, "HERMES_ENV_PATH", env_path), \
                 redirect_stdout(buf):
             diagnose_push.main(["--date", "2026-10-20"])
         out = buf.getvalue()

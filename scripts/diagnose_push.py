@@ -59,31 +59,13 @@ def _run(cmd, timeout=8):
 
 
 def load_hermes_env():
-    """把 ~/.hermes/.env 里的变量读进 os.environ(已存在的同名变量不覆盖)。
+    """把 ~/.hermes/.env 里的推送渠道变量读进 os.environ(已存在的同名变量不覆盖)。
 
     run_scan.sh 会 source 这个文件, 推送渠道配置都在里面。手动跑诊断脚本时
     shell 里往往没有这些变量, 直接看 os.environ 会得出"渠道未配置"的错误结论。
-    返回实际补齐的变量名列表。
+    共享实现见 push_scope.load_hermes_env(只补 PUSH_ENV_KEYS 里的键)。
     """
-    loaded = []
-    if not os.path.isfile(HERMES_ENV):
-        return loaded
-    try:
-        with open(HERMES_ENV, encoding="utf-8", errors="ignore") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                key, val = line.split("=", 1)
-                key = key.strip()
-                val = val.strip().strip('"').strip("'")
-                if not key or key in os.environ:
-                    continue
-                os.environ[key] = val
-                loaded.append(key)
-    except OSError:
-        return loaded
-    return loaded
+    return push_scope.load_hermes_env()
 
 
 def section(title):

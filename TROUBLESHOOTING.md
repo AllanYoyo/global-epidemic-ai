@@ -66,7 +66,7 @@ python -c "import sqlite3;con=sqlite3.connect('database/epidemic.db');print(con.
 
 | 现象 | 处理 |
 |---|---|
-| 提示"未配置推送渠道"退出码 1 | `WECHAT_WEBHOOK` / `DINGTALK_WEBHOOK` / `SMTP_*` 一个都没配；配哪个发哪个 |
+| 提示"未配置任何推送渠道"退出码 1 | `WECHAT_WEBHOOK` / `DINGTALK_WEBHOOK` / `SMTP_*` 一个都没配。配置在 `~/.hermes/.env`；`push_report.py` 会自己从该文件补齐渠道变量（人工 shell 直接跑也能用）。若仍报这个错，说明 `~/.hermes/.env` 里确实没有这些键 |
 | 钉钉发不出去 | 安全设置选"加签"时必须同时配 `DINGTALK_SECRET`；webhook 过期需在钉钉群机器人设置里重建 |
 | 同一天重复执行只发了一次 | **这是幂等特性**：成功后写 `data/reports/.pushed/<日期>.flag`；确认有新内容要重发用 `--force`（渠道会话里补发用 `--force --review-channel <渠道>`，仍只发该渠道） |
 | 提示"未指定推送范围"退出码 2，日报没发出去 | **默认不扩散**：必须显式给 `--review-channel <渠道>`（渠道会话阶段 1）、`--review-approved`（阶段 2）或 `--broadcast`（定时全量）之一。这是刻意的 fail-closed，防止"忘了指定渠道"被当成"发所有渠道" |

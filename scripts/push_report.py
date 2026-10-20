@@ -103,8 +103,8 @@ from push_scope import (HERMES_CHANNEL_MAP, HERMES_COMMAND, REVIEW_CHANNEL_ALIAS
                         REVIEW_CHANNEL_ENV, REVIEW_CHANNEL_MAP,
                         channel_available, channel_key_for_label, channel_kind,
                         channel_label, channel_unavailable_hint, clear_scope,
-                        describe_scope, hermes_broadcast_channels, read_scope,
-                        write_scope)
+                        describe_scope, hermes_broadcast_channels, load_hermes_env,
+                        read_scope, write_scope)
 
 PUSH_FLAG_DIR = os.path.join(DATA_DIR, "reports", ".pushed")
 PENDING_DIR = os.path.join(DATA_DIR, "reports", ".review-pending")
@@ -379,6 +379,11 @@ def main():
                     help="评审核闸门: 审核通过, 发完审阅渠道之外的其它渠道, "
                          "并清理 .review-pending/<日期>.flag; 与 --review-channel 配对使用")
     args = ap.parse_args()
+
+    # 渠道配置可能来自任何入口(cron / Hermes agent / 人工 shell); 只有
+    # run_scan.sh 会 source ~/.hermes/.env。人工直接跑本脚本时渠道变量全缺 →
+    # "未配置任何推送渠道", 白跑一趟。这里从 .env 补齐(已存在的变量不覆盖)。
+    load_hermes_env()
 
     flag_path = os.path.join(PUSH_FLAG_DIR, "%s.flag" % args.date)
     pending_path = _pending_path(args.date)

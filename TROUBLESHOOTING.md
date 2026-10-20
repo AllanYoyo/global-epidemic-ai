@@ -73,6 +73,8 @@ python -c "import sqlite3;con=sqlite3.connect('database/epidemic.db');print(con.
 | 提示"审阅渠道无法识别"退出码 1 | `--review-channel` 的值认不出。合法值：`wechat` / `dingtalk` / `mail`，也认中文别名（企业微信/钉钉/邮箱）与简写（wx/wecom/email）。**认不出时脚本中止而不是发到所有渠道** |
 | 提示"--broadcast 被拒绝/被推送范围锁拒绝"退出码 1 | `--broadcast` 不再自声明：全量推送必须先由**调度路径**声明范围——`scripts/run_scan.sh <模式> --broadcast`（推荐）或 `python scripts/push_scope.py --date <日期> --broadcast --source manual`。若提示"锁为只发 X"，说明本轮已声明为渠道会话，先在原渠道确认，再用 `--review-approved` |
 | 明明只想发微信，钉钉群也收到了 | ①先跑 `python scripts/diagnose_push.py`（只读诊断）：看当日范围锁/待审标记、crontab 是否显式声明范围、调度日志有无 `scope=` 标记；②查是否用了不带 `--review-channel` 的命令（现在默认不推送，不会漏发）；③查该日期是否已有 `.review-pending` 待审标记（有则任何推送都只发审阅渠道）；④查是否走了 `--broadcast`；⑤**确认生产上跑的是新代码**：`git -C /opt/global-epidemic-ai/repo rev-parse --short HEAD`，与 `git ls-remote origin policy` 不一致就先 `bash scripts/deploy_update.sh policy` |
+| 报告说"审阅渠道 企业微信 未配置(WECHAT_WEBHOOK)" | 生产 `.env` 里**没配企业微信**。`~/.hermes/.env` 需要 `WECHAT_WEBHOOK=`（企业微信群机器人地址）。没配的话"先在微信审阅"这一步直接中止，日报只可能落到已配的渠道（通常只有钉钉） |
+| 诊断脚本报"只配了 N 个渠道" | 同上：只配一个渠道时，"先在微信审阅再扩散"的工作流**根本跑不通**。要么补 `WECHAT_WEBHOOK`，要么接受"日报只落钉钉"这个事实 |
 | 群里只有"待执行提醒"，没有日报 | `HERMES_RUN_CMD` 未配置或 `~/.hermes/.env` 没配；`run_scan.sh` 降级路径只发提醒不发日报 |
 | 想先看效果再发 | `python scripts/push_report.py --date <日期> --dry-run` 只打印不发送 |
 | 邮件没到 | `SMTP_PORT` 默认 465 走 SSL；Tuta 等网页邮箱不经本脚本，由 Hermes 直接调用其 webmail 技能 |
@@ -92,7 +94,9 @@ python -c "import sqlite3;con=sqlite3.connect('database/epidemic.db');print(con.
 
 - **日报日期错位/扫描时间不对**：cron 服务器时区必须是 Asia/Shanghai（`timedatectl` 核对）；cron 精简的 PATH 可能找不到 `python3`，在 crontab 顶部手工补 `PATH=` 行。
 - **生产代码没更新**（10-20 事故的头号嫌疑）：VPS 上是 `/opt/global-epidemic-ai/repo` 这个 clone 的工作树，**不会自动 pull**。核对 `git -C /opt/global-epidemic-ai/repo rev-parse --short HEAD` 与 `git ls-remote origin policy`；不一致就 `bash scripts/deploy_update.sh policy`。推送内容尾部的 `代码 <commit>` 就是现场版本指纹。
+  - 更新脚本只拦**已跟踪文件**的改动；未跟踪文件（`data/geocache.json` 等运行时缓存）只提示，不阻塞。
 - **crontab 里的推送范围声明**：`run_scan.sh` 在 cron 上下文会自动按定时任务全量处理，但**建议显式写** `run_scan.sh <模式> --broadcast`（`config/crontab.example` 已更新）——显式声明后行为不依赖上下文识别。`python scripts/diagnose_push.py` 会检查这一点。
+- **生产日志文件名**：`diagnose_push.py` 会自动在 `/opt/global-epidemic-ai/logs/` 里找 `cron.log` / `scan.log` / `run_scan.log`；用 `--log <路径>` 可指定。
 - **生产数据目录**：生产 VPS 应设 `EPIDEMIC_DATA_DIR` / `EPIDEMIC_DB` 指到 repo 之外（如 `/opt/global-epidemic-ai`）；如果日报里没数据但数据目录里有文件，先确认进程实际读的是哪个路径（默认是 repo 内 `data/`、`database/`）。
 - **库损坏/误删需要重建**：`data/events/<日期>/*.json` 是入库镜像，用 `python scripts/normalize.py --input <json> --db --max-age-days 0` 逐个重放即可重建（重放的是历史镜像，必须关掉旧闻拦截）；日常请备份 `database/epidemic.db` 与 `data/`。
 - **`.pushed` 标志文件导致不推送**：确属当天已发过的记录，删除 `data/reports/.pushed/<日期>.flag` 或直接用 `--force`（推荐后者）。

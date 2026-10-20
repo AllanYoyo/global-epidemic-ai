@@ -10,6 +10,10 @@ logs/
 .selftest/
 personal/
 
+# 运行时产物(不入库)
+data/geocache.json        # 地理编码缓存, 每次面板访问都在变
+scripts/_audit*.py        # 临时排查脚本
+
 # Python
 __pycache__/
 *.pyc

@@ -30,11 +30,19 @@ fi
 
 echo "--- 更新前状态 ---"
 git rev-parse --short HEAD
-git status --porcelain | head -20
-if [ -n "$(git status --porcelain)" ]; then
-  echo "[错误] 工作区有未提交改动, 先处理再更新(避免把现场改动覆盖掉):"
-  git status --short
+# 只有**已跟踪文件的改动**会阻塞更新。未跟踪文件(data/geocache.json 等运行时
+# 缓存、临时脚本)不该卡住部署 —— 否则 geocache 一生成, 更新就永远做不成,
+# 闸门加固也就永远落不到生产。未跟踪文件只提示, 由人决定是否处理。
+TRACKED_DIRTY="$(git status --porcelain --untracked-files=no)"
+UNTRACKED="$(git status --porcelain | grep '^??' || true)"
+if [ -n "$TRACKED_DIRTY" ]; then
+  echo "[错误] 已跟踪文件有未提交改动, 先处理再更新(避免把现场改动覆盖掉):"
+  echo "$TRACKED_DIRTY"
   exit 1
+fi
+if [ -n "$UNTRACKED" ]; then
+  echo "[提示] 工作区有未跟踪文件(不阻塞更新, 确认是否要一起纳入版本管理):"
+  echo "$UNTRACKED"
 fi
 
 echo "--- 拉取 $BRANCH ---"

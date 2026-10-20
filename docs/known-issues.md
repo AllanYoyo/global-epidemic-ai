@@ -133,6 +133,30 @@
   "新代码 + Agent 选了 --broadcast"。两条路径都已封死, 且新增 `diagnose_push.py`
   可在 VPS 上一条命令给出答案; 另需确认生产 crontab 是否已加 `--broadcast`。
 
+### 2026-10-20 生产现场复盘 (G2 落地后)
+
+#### G3 · 诊断/更新脚本自身有三个坑, 现场第一次跑就卡住 → 全部修掉
+- 位置: `scripts/deploy_update.sh`; `scripts/diagnose_push.py`; `scripts/buildinfo.py`;
+  `.gitignore`; `scripts/push_report.py`(`.pushed` 标记)
+- 现场: 10-20 在生产 VPS 上第一次跑 `bash scripts/deploy_update.sh policy` +
+  `python3 scripts/diagnose_push.py`, 暴露三个问题:
+  | # | 现象 | 后果 |
+  |---|---|---|
+  | ① | 更新脚本用 `git status --porcelain` 判脏, **未跟踪文件也算** | `data/geocache.json` 是运行时缓存, 永远未跟踪 → 更新**永远做不成** → 闸门加固永远落不到生产(这正是 G2 的根因载体, 差点自己复发) |
+  | ② | 诊断脚本只查 `cron.log`, 生产实际日志叫 `scan.log` | 关键证据(日志里的 scope 标记)读不到, 等于没诊断 |
+  | ③ | 诊断脚本只看当前 shell 的环境变量, 不读 `~/.hermes/.env` | 手动跑时误报"企业微信未配置" —— 差点据此误判生产配置 |
+- 修法:
+  - 更新脚本只拦**已跟踪文件**的改动(`--untracked-files=no`), 未跟踪文件仅提示;
+    `data/geocache.json`、`scripts/_audit*.py` 补进 `.gitignore`。
+  - 诊断脚本按候选名自动找日志(`cron.log` / `scan.log` / `run_scan.log`),
+    `--log` 可显式指定; 并自动读取 `~/.hermes/.env` 补齐渠道配置(已存在的同名
+    变量不覆盖), 报告里区分"当前 shell"与".env 补齐"。
+  - `buildinfo.is_dirty()` 只看已跟踪文件(否则 geocache 让版本指纹永远"+脏"),
+    新增 `untracked_files()` 单独列示。
+  - `.pushed` 标记补记**范围与声明来源**(`范围=全量(定时任务) · 声明来源=...`),
+    下次事故复盘能一眼定性: 定时任务广播的, 还是有人手动声明的。
+- 回归: 自测 126 → 128 条全绿(新增诊断读 .env / 自动找 scan.log 两条)。
+
 ### 2026-10-19 专项复审 (commit 0459442 之后)
 
 #### G1 · 评审核闸门有 5 条漏法, "只发微信"实际会发到钉钉(用户实测)→ 全部 fail-closed

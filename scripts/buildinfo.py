@@ -43,9 +43,21 @@ def git_branch():
 
 
 def is_dirty():
-    """工作区是否有未提交改动; 取不到返回 False。"""
-    out = _git(["status", "--porcelain"])
+    """已跟踪文件是否有未提交改动; 取不到返回 False。
+
+    只看已跟踪文件: 未跟踪的运行时产物(data/geocache.json 之类)每次跑都在变,
+    算进去会让版本指纹永远显示"+脏", 现场反而看不出真实状态。
+    """
+    out = _git(["status", "--porcelain", "--untracked-files=no"])
     return bool(out)
+
+
+def untracked_files():
+    """未跟踪文件列表(不阻塞部署, 只作提示)。"""
+    out = _git(["status", "--porcelain"])
+    if not out:
+        return []
+    return [ln[3:].strip() for ln in out.splitlines() if ln.startswith("??")]
 
 
 def fingerprint():
@@ -66,5 +78,6 @@ def describe():
         "commit_full": git_commit(short=False),
         "branch": git_branch(),
         "dirty": is_dirty(),
+        "untracked": untracked_files(),
         "fingerprint": fingerprint(),
     }

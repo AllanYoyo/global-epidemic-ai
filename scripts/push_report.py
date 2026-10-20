@@ -608,11 +608,15 @@ def main():
                             source="push_report.py:stage1",
                             note="阶段 1 审阅渠道")
         else:
-            # 阶段 2 或全量模式: 写终态
+            # 阶段 2 或全量模式: 写终态。
+            # 带上"范围是怎么来的"(锁的声明来源), 下次事故复盘时能一眼看出
+            # 是定时任务路径广播的, 还是有人手动声明的 —— 10-20 就是靠这个定的性。
             os.makedirs(PUSH_FLAG_DIR, exist_ok=True)
             with open(flag_path, "w", encoding="utf-8") as f:
-                f.write("%s 已推送: %s\n" %
-                        (biz_now(), "、".join(c[0] for c in target)))
+                f.write("%s 已推送: %s · 范围=%s · 声明来源=%s\n" %
+                        (biz_now(), "、".join(c[0] for c in target),
+                         describe_scope(lock) if lock else "未声明(直接指定渠道)",
+                         lock_source))
             _clear_pending(args.date)
             # 本轮已扩散完毕, 范围锁失效(否则同日再有人喊 --broadcast 会被误挡,
             # 而这一轮的"扩散"已经由用户批准过了)

@@ -71,7 +71,7 @@ bash scripts/deploy_update.sh policy                        # 生产更新（git
   - **run_scan.sh 不再让 Agent 二选一**：`--review-channel <渠道>` / `--broadcast` 显式参数写进 prompt（确定性指令，无"若是…若是…"），并 `export REVIEW_CHANNEL` 给下游；两者都不给时，**cron 上下文**（祖先进程含 cron/crond）自动按定时任务全量处理，**其它上下文**（手动/Agent 触发）本轮**不扩散**（`--broadcast` 一律拒绝）。
   - **阶段 2 无待审记录即拒绝**（原实现是"警告一下照常全量发"，又一个"忘了→发到所有渠道"的口子）。
   - **生产更新**：`bash scripts/deploy_update.sh policy`（git pull + 依赖 + 自检）。仓库只有 clone 没有更新机制，生产不 pull = 闸门加固根本没生效——这正是 10-20 事故的载体。
-  - **现场诊断**：`python scripts/diagnose_push.py` 一次打印：运行代码 commit（与远端是否一致）、当日范围锁/待审/已推标记、渠道配置、crontab 是否显式声明范围、cron 日志尾部（有无 `scope=` 标记＝新旧版 run_scan.sh）。推送内容尾部也带 `代码 <commit>` 指纹。
+  - **现场诊断**：`python scripts/diagnose_push.py` 一次打印：运行代码 commit（与远端是否一致）、当日范围锁/待审/已推标记、渠道配置（自动读 `~/.hermes/.env`，只配一个渠道时会提示"先在微信审阅"跑不通）、crontab 是否显式声明范围、调度日志尾部（自动找 `cron.log`/`scan.log`，有无 `scope=` 标记＝新旧版 run_scan.sh）。推送内容尾部也带 `代码 <commit>` 指纹，`.pushed` 标记带**范围与声明来源**。
 
 ## 约定与注意事项
 

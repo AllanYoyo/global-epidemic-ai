@@ -1032,6 +1032,43 @@ class PushScopeLockTests(unittest.TestCase):
         self.assertIn("scope=none", out)
         self.assertNotEqual(rc, 0)
 
+    def test_diagnose_finds_scan_log_by_default(self):
+        # 生产实际的日志叫 scan.log(不是早期文档里的 cron.log), 默认要能找到
+        import diagnose_push
+        log_dir = os.path.join(self.tmp, "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        with open(os.path.join(log_dir, "scan.log"), "w", encoding="utf-8") as f:
+            f.write("[2026-10-20 23:30:00] run_scan mode=policy date=2026-10-20 "
+                    "scope=broadcast src=显式参数 start\n")
+        buf = io.StringIO()
+        with mock.patch.object(diagnose_push, "LOG_DIR", log_dir), \
+                redirect_stdout(buf):
+            diagnose_push.main(["--date", "2026-10-20", "--log-tail", "50"])
+        out = buf.getvalue()
+        self.assertIn("scan.log", out)
+        self.assertIn("scope=broadcast", out)
+
+    def test_diagnose_reads_hermes_env_for_channel_config(self):
+        # 渠道配置在 ~/.hermes/.env 里, 手动跑诊断时 shell 里没有 → 必须去读,
+        # 否则会误报"渠道未配置"(10-20 现场差点据此误判)
+        import diagnose_push
+        env_path = os.path.join(self.tmp, ".hermes", ".env")
+        os.makedirs(os.path.dirname(env_path), exist_ok=True)
+        with open(env_path, "w", encoding="utf-8") as f:
+            f.write("DINGTALK_WEBHOOK=https://oapi.dingtalk.com/robot/send?x=1\n")
+        os.environ.pop("WECHAT_WEBHOOK", None)
+        os.environ.pop("DINGTALK_WEBHOOK", None)
+        os.environ.pop("SMTP_HOST", None)
+        buf = io.StringIO()
+        with mock.patch.object(diagnose_push, "HERMES_ENV", env_path), \
+                redirect_stdout(buf):
+            diagnose_push.main(["--date", "2026-10-20"])
+        out = buf.getvalue()
+        self.assertIn("钉钉", out)
+        self.assertNotIn("钉钉       未配置", out)
+        # 只配了一个渠道 → 必须提示"只发微信审阅"在当前配置下跑不通
+        self.assertIn("只配了", out)
+
 
 class BriefTextFocusTests(unittest.TestCase):
     """IM 卡片"重点关注"口径必须与 report.py 一致(2026-10-19 修复)。

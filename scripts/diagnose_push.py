@@ -21,7 +21,7 @@ import sys
 
 import buildinfo
 import push_scope
-from normalize import DATA_DIR, biz_today
+from normalize import DATA_DIR, REPO, biz_today
 
 PUSH_FLAG_DIR = os.path.join(DATA_DIR, "reports", ".pushed")
 PENDING_DIR = os.path.join(DATA_DIR, "reports", ".review-pending")
@@ -211,6 +211,21 @@ def check_crontab():
                   "建议显式写成 `run_scan.sh <模式> --broadcast`")
 
 
+def _current_run_scan_has_scope():
+    """当前仓库的 scripts/run_scan.sh 是否已带推送范围声明(scope=)。
+
+    用来区分两种"日志里没有 scope= 标记":
+      · 当前代码也没有 → 生产确实在跑旧版, 该报警;
+      · 当前代码有, 只是最近那次跑批发生在部署之前 → 预期内, 不该报警。
+    """
+    path = os.path.join(REPO, "scripts", "run_scan.sh")
+    try:
+        with open(path, encoding="utf-8", errors="ignore") as f:
+            return "scope=" in f.read()
+    except OSError:
+        return False
+
+
 def check_cron_log(log_path, tail):
     section("5. 调度日志尾部(那次推送走的哪个分支)")
     # 显式指定的路径优先; 否则在 LOG_DIR 里按候选名逐个找(生产的日志叫
@@ -240,8 +255,16 @@ def check_cron_log(log_path, tail):
             print("  %s" % ln)
         # 重点看有没有 scope= 标记(run_scan.sh 2026-10-20 起会打)
         if not any("scope=" in ln for ln in picked):
-            _warn("%s 里没有 scope= 标记 —— 说明这次跑的是 2026-10-20 之前的旧版 "
-                  "run_scan.sh(旧版没有推送范围声明, 默认全量推送)" % path)
+            # 判据要看**当前代码**有没有范围声明, 而不是历史日志里有没有:
+            # 日志是累积的, 最近一次跑批很可能发生在本次部署之前 —— 那时缺
+            # scope= 是预期的, 不是"生产没更新"(2026-10-20 误报: 部署完自检
+            # 就报"跑的是旧版", 让人以为闸门没生效)。
+            if _current_run_scan_has_scope():
+                print("  (说明) 当前 run_scan.sh 已带范围声明(scope=); 日志里没有该标记"
+                      "只说明**最近那次跑批发生在本次部署之前**, 下一次跑批起就会有")
+            else:
+                _warn("%s 里没有 scope= 标记 —— 当前 run_scan.sh 也没有范围声明(旧版), "
+                      "默认全量推送" % path)
         # scope=none = 没能识别成定时任务上下文, 本轮不扩散(日报没推出去)
         for ln in picked:
             if "scope=none" in ln:

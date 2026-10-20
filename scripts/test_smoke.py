@@ -1094,6 +1094,36 @@ class PushScopeLockTests(unittest.TestCase):
         self.assertIn("scan.log", out)
         self.assertIn("scope=broadcast", out)
 
+    def test_diagnose_no_false_alarm_when_code_has_scope(self):
+        # 当前代码已带范围声明时, 日志里没有 scope= 只能说明"最近那次跑批早于本次
+        # 部署" —— 属预期, 不该报成"生产在跑旧版"(2026-10-20 部署完自检误报)。
+        import diagnose_push
+        log = os.path.join(self.tmp, "cron.log")
+        with open(log, "w", encoding="utf-8") as f:
+            f.write("[2026-10-20 07:30:00] run_scan mode=policy date=2026-10-20 "
+                    "tz=Asia/Shanghai start\n")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            diagnose_push.main(["--date", "2026-10-20", "--log", log, "--log-tail", "50"])
+        out = buf.getvalue()
+        self.assertNotIn("旧版 run_scan.sh", out)
+        self.assertIn("下一次跑批起就会有", out)
+
+    def test_diagnose_warns_when_code_lacks_scope(self):
+        # 反面: 当前代码确实没有范围声明(生产真的在跑旧版) → 必须报警
+        import diagnose_push
+        log = os.path.join(self.tmp, "cron.log")
+        with open(log, "w", encoding="utf-8") as f:
+            f.write("[2026-10-20 07:30:00] run_scan mode=policy date=2026-10-20 start\n")
+        buf = io.StringIO()
+        with mock.patch.object(diagnose_push, "_current_run_scan_has_scope", return_value=False), \
+                redirect_stdout(buf):
+            rc = diagnose_push.main(["--date", "2026-10-20", "--log", log, "--log-tail", "50"])
+        out = buf.getvalue()
+        self.assertIn("[警告]", out)
+        self.assertIn("旧版", out)
+        self.assertNotEqual(rc, 0)
+
     def test_diagnose_reads_hermes_env_for_channel_config(self):
         # 渠道配置在 ~/.hermes/.env 里, 手动跑诊断时 shell 里没有 → 必须去读,
         # 否则会误报"渠道未配置"(10-20 现场差点据此误判)

@@ -84,6 +84,10 @@ EXTRA_HINTS = (
 )
 # 明显不是措施变化的关键词(纯背景/通报性质), 命中则降权。
 NEGATIVE_HINTS = ("comment", "consultation", "notification of", "circular", "news")
+# 行式列表里的文号(G/SPS/N/...)与日期。行式产物形状会随 Agent 的解析写法漂移,
+# 所以按内容判定而不是固定下标(2026-10-22 生产实机验证的教训)。
+_SYM_RE = re.compile(r"^((?:G/[A-Z]+/N/|N/)[^\s]+)(?:\s+(.*))?$", re.S)
+_DATE_RE = re.compile(r"\b(\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}/\d{4})\b")
 
 
 def _fold(s):
@@ -160,19 +164,21 @@ def _kw(rec):
 def _is_action(rec):
     """是否疑似措施变化。
 
-    kw(WTO 英文分类词) 与 标题(各成员本国语言) 分开判:
-    - NEGATIVE_HINTS 只在**没有**硬动作词时才否决(纯"评议期通知"不算措施变化);
-    - EXTRA_HINTS 只看标题, 避免把 kw 的英文词面误当多语言线索。
+    判定顺序:
+    1. 否定词(评议期/通知/通函类)且不含硬动作词 → 排除;
+    2. 命中动作词(英文词面) → 候选;
+    3. 命中多语言词族(只在标题上) → 候选。
+
+    第 2 步同时看 kw 与标题: 行式列表**没有关键词列**(kw 为空),
+    只看 kw 的话标题里的 "Import ban" / "Establishes ..." 会被漏掉。
     """
     kw = _fold(_kw(rec))
     title = _fold(_first(rec, "title", "title_cn", "description", "desc") or "")
     hard = ("ban", "suspension", "emergency", "withdrawal", "restriction")
-    # 否定词同时看 kw 与标题: 10-21 的行式列表**没有关键词列**,
-    # 只看 kw 的话"评议期通知"会被当成措施变化混进候选。
     hay = kw + " " + title
     if any(h in hay for h in NEGATIVE_HINTS) and not any(h in hay for h in hard):
         return False
-    if any(h in kw for h in ACTION_HINTS):
+    if any(h in hay for h in ACTION_HINTS):
         return True
     return any(h in title for h in EXTRA_HINTS)
 
@@ -204,10 +210,20 @@ def _from_json(path):
 
 
 def _from_text(path):
-    """行式文本: 成员 | 日期 | 文号 | 标题 | [关键词] | 直链。
+    """行式文本: 10-21 生产实测形状。
 
-    尾部字段形状不固定(10-21 的 sps_list.txt 是 5 段、无关键词),
-    所以按内容判定: 带 http 的那段是直链, 其余非空段并入关键词。
+    真实产物 `sps_list.txt`(2026-10-21, 26 行)每一行是:
+        序号 | 成员 | 日期 | 文号+标题 | 直链
+    例:
+        0 | Colombia | 21/10/2026 | G/SPS/N/COL/396/Add.1 Resolución ICA 00020296 ... | https://members.wto.org/crnattachments/2026/SPS/COL/26_05465_00_s.pdf
+
+    两处与旧文档不一致的地方(2026-10-22 生产实机验证才发现, 旧实现全军覆没):
+    1. **行首有序号列**, 成员在第 2 段而不是第 1 段;
+    2. **文号与标题合并在一段里**(空格分隔), 没有独立标题列;
+       而且日期段可能有**两个**日期 —— 第一个是发布日(dist), 第二个通常是
+       生效日(如 Costa Rica "20/10/2026 19/12/2026"), 对抽取 effective_date 有用。
+
+    所以按内容判定每个字段, 不按固定下标。
     """
     out = []
     with open(path, encoding="utf-8", errors="ignore") as f:
@@ -218,22 +234,46 @@ def _from_text(path):
             parts = [p.strip() for p in line.split("|")]
             if len(parts) < 3:
                 continue
-            member, dist, sym = parts[0], parts[1], parts[2]
-            title = parts[3] if len(parts) > 3 else ""
             url = ""
-            kw_parts = []
-            for p in parts[4:]:
+            dates = []
+            sym = ""
+            title = ""
+            rest = []
+            for p in parts:
                 if not p:
                     continue
-                if "http://" in p.lower() or "https://" in p.lower():
+                low = p.lower()
+                if "http://" in low or "https://" in low:
                     url = url or p
-                else:
-                    kw_parts.append(p)
-            rec = {"member": member, "dist": dist, "sym": sym, "title": title,
-                   "kw": " / ".join(kw_parts), "url": url}
-            rec["dist"] = _dist(rec)
+                    continue
+                m = _SYM_RE.match(p)
+                if m:
+                    sym = m.group(1)
+                    title = (m.group(2) or "").strip()
+                    continue
+                found = _DATE_RE.findall(p)
+                if found:
+                    if not dates:
+                        dates = found
+                    continue
+                rest.append(p)
+            # rest: 纯数字是序号, 第一个非数字段是成员, 其余是标题(旧 5 段形状)
+            member = ""
+            title_parts = []
+            for p in rest:
+                if not member and not p.isdigit():
+                    member = p
+                    continue
+                if member:
+                    title_parts.append(p)
+            if not title:
+                title = " ".join(title_parts)
+            rec = {"member": member or "-", "sym": sym or "-", "title": title,
+                   "dates": dates, "url": url}
+            rec["dist"] = _dist({"dist": dates[0]}) if dates else None
             out.append({"member": rec["member"], "dist": rec["dist"], "sym": rec["sym"],
-                        "title": rec["title"], "kw": rec["kw"], "url": rec["url"], "raw": rec})
+                        "title": rec["title"], "kw": "", "url": rec["url"],
+                        "dates": dates, "raw": rec})
     return out
 
 

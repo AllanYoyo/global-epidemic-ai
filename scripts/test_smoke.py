@@ -2416,16 +2416,68 @@ class ParseEpingTests(unittest.TestCase):
         self.assertIn("crnattachments", filtered[0]["url"])
 
     def test_text_rows_split_keyword_and_url_columns(self):
-        # 6 段格式(有关键词列): 关键词与直链要分开
+        # 6 段格式(多一段关键词): 关键词列会并入标题, 动作判定照样命中
+        # (生产真实形状是 5 段, 这里覆盖"多一列也不会漏判")
         text = ("Nowland | 2026-10-20 | G/SPS/N/Y/2 | titulo | Import ban | "
                 "https://members.wto.org/crnattachments/2026/SPS/Y/1.pdf\n")
         path = self._write("rows2.txt", text)
         code, out = self._run(path)
         self.assertEqual(code, 0)
+        self.assertIn("疑似措施变化 1 条", out)
         filtered = self._read_filtered(path)
         self.assertEqual(len(filtered), 1)
-        self.assertEqual(filtered[0]["kw"], "Import ban")
+        self.assertIn("Import ban", filtered[0]["title"])
         self.assertIn("crnattachments", filtered[0]["url"])
+
+    # ---- 生产真实形状(2026-10-22 实机验证才发现) ----
+    def test_real_production_row_shape_is_parsed(self):
+        """10-21 真实产物 sps_list.txt 的行形状。
+
+        真实行 = 序号 | 成员 | 日期 | 文号+标题 | 直链
+        (行首有**序号列**、**文号与标题合并在一段**、日期段可能有两个日期)
+        —— 与旧文档描述的 5 段格式不同, 旧实现按固定下标解析会全军覆没。
+        """
+        text = (
+            "0 | Colombia | 21/10/2026 | G/SPS/N/COL/396/Add.1 Resolucion ICA 00020296, "
+            "Por la cual se levanta la medida temporal de suspension | "
+            "https://members.wto.org/crnattachments/2026/SPS/COL/26_05465_00_s.pdf\n"
+            "2 | Costa Rica | 20/10/2026 19/12/2026 | G/SPS/N/CRI/371 Proyecto de Resolucion "
+            "N.o 025-2026-CV-ARP-SFE. El Servicio Fitosanitario del Estado, Departamento de "
+            "Cuarentena Vegetal | "
+            "https://members.wto.org/crnattachments/2026/SPS/CRI/26_05437_00_s.pdf\n"
+        )
+        path = self._write("real.txt", text)
+        code, out = self._run(path)
+        self.assertEqual(code, 0)
+        self.assertIn("共解析 2 条", out)
+        self.assertIn("窗口(2026-10-15 ~ 2026-10-22)内 2 条", out)
+        filtered = self._read_filtered(path)
+        self.assertEqual(len(filtered), 2)
+        # 成员不能是序号
+        self.assertEqual(filtered[0]["member"], "Colombia")
+        # 文号与标题各归其位
+        self.assertEqual(filtered[0]["sym"], "G/SPS/N/COL/396/Add.1")
+        self.assertIn("levanta la medida", filtered[0]["title"])
+        # 日期: 第一个是发布日, 两个日期都要留住(第二个通常是生效日)
+        self.assertEqual(filtered[0]["dist"], "2026-10-21")
+        self.assertEqual(filtered[0]["dates"], ["21/10/2026"])
+        self.assertEqual(filtered[1]["member"], "Costa Rica")
+        self.assertEqual(filtered[1]["dist"], "2026-10-20")
+        self.assertEqual(filtered[1]["dates"], ["20/10/2026", "19/12/2026"])
+        # 直链
+        self.assertIn("crnattachments", filtered[0]["url"])
+
+    def test_real_shape_member_is_not_the_index(self):
+        """序号列不能被当成成员(否则整批的 country 都错, 入库就全废)。"""
+        text = ("0 | Colombia | 21/10/2026 | G/SPS/N/COL/1 levy the temporary suspension "
+                "measure | https://x/a.pdf\n"
+                "1 | Peru | 20/10/2026 | G/SPS/N/PER/2 phytosanitary requirements for import "
+                "| https://x/b.pdf\n")
+        path = self._write("idx.txt", text)
+        code, out = self._run(path)
+        self.assertEqual(code, 0)
+        filtered = self._read_filtered(path)
+        self.assertEqual([r["member"] for r in filtered], ["Colombia", "Peru"])
 
     # ---- 业务时区: 默认日期走 biz_today(东八区), 不依赖宿主机 TZ ----
     def test_default_date_uses_business_timezone(self):

@@ -190,7 +190,23 @@ trap 'exit 143' INT TERM
 case "$MODE" in
   am) PROMPT="生成 $SCAN_DATE 的政策监测日报: 仅检索外国政府动植物疫情管控政策变化, 完成政策抽取、核验、对华影响研判, 然后用 scripts/report.py --date $SCAN_DATE --excel --docx 生成 Markdown+Excel+Word 政策日报(两个开关都要带, 漏 --docx 就不会有 Word 简报)。$PUSH_INSTRUCTION" ;;
   pm) PROMPT="执行 $SCAN_DATE 的政策晚扫增量: 仅检索外国政府官方检疫/进出口政策变化, 对新增政策完成抽取、核验、影响研判, 然后用 scripts/report.py --date $SCAN_DATE --excel --docx 刷新当日政策日报(两个开关都要带, 漏 --docx 就不会有 Word 简报)。$PUSH_INSTRUCTION" ;;
-  policy) PROMPT="执行 $SCAN_DATE 的政策变化扫描(运行日期 $SCAN_DATE, 东八区): 用 global-policy-search 技能, 按 config/sources.yaml 的 policy_queries 检索 WTO ePing 与外国官方检疫机构的动植物检疫管控政策变化(不采集中国海关总署政策), 只收录发布时间在近 7 天内的新政策(常年挂网的历史公告页与日期不明的页面跳过, 不入库), 抽取为政策记录并完成核验与对华影响研判, 最后用 scripts/report.py --date $SCAN_DATE --excel --docx 生成政策日报。$PUSH_INSTRUCTION" ;;
+  policy)
+    # 2026-10-22 重写(实机证据驱动): 原 prompt 让 Agent 先把检索做完、最后统一抽取入库出报,
+    # 而单轮工具预算约 90 次调用 —— 实测它确实取到了 49 条合格候选, 但预算耗尽前
+    # collect.py / normalize.py / risk.py / report.py **一步都没跑**, 结果一条没入库、
+    # 日报没出, 跑批判失败。改为「有硬预算 + 边检索边入库 + 无条件收尾」。
+    PROMPT="执行 $SCAN_DATE 的政策变化扫描(运行日期 $SCAN_DATE, 东八区)。这是**有硬预算的单轮作业**, 按下面的顺序做, 不要自由发挥。
+【总原则】宁可少收, 也必须交卷。检索最多用 18 分钟或 40 次工具调用, 到了就无条件进入收尾。
+【节奏】每找到 1-3 条合格候选就**立刻**走完 存档→入库→写回, 不要攒到最后一起做。
+1) 先读 config/sources.yaml 的 policy_watch_countries 取当天必扫档与轮转档, 再读 skills/global-policy-search/SKILL.md 的取数工具纪律。
+2) 取数优先级固定: collect.py 直抓已知官方入口 > web_fetch > 浏览器。web_search 单轮不超过 15 次; 同一工具失败 2 次就换下一个; 浏览器失败就放弃浏览器。
+3) WTO ePing 只走列表页。拿到行式列表后立刻用 python3 scripts/parse_eping.py <列表文件> --days 7 预筛, 只对清单内的条目下载存档(最多 6 个 PDF), 窗口外的一律不下。
+4) 每条合格候选立刻执行: python3 scripts/collect.py --url <直链> --title <标题>; 记录追加到 data/raw/$SCAN_DATE/extracted-policy.json 后执行 python3 scripts/normalize.py --input data/raw/$SCAN_DATE/extracted-policy.json --out data/events/$SCAN_DATE/ --db --max-age-days 7。只收发布时间在近 7 天内的政策, 旧闻跳过不入库。
+5) 对已入库的 verified 记录逐条写回对华影响: python3 scripts/risk.py --event-id <id> --impact-type <约束|机会|中性> --china-relevance <...> --action <...> --rationale <...> --dim trade=N --dim biosecurity=N --dim response=N --dim alignment=N。
+6) 写 data/raw/$SCAN_DATE/search-log.md(每个通道一条状态, 取不到的通道写明本轮不可用及原因)与 policy-findings.md。
+7) 收尾(无论前面取到几条, 都必须执行): python3 scripts/report.py --date $SCAN_DATE --excel --docx。若确实 0 条入库也要执行, 让日报存在; 但**不得为了让日报好看而入库旧闻或第三方站点**。
+【红线】严禁 --broadcast; 严禁逐条穷举下载 PDF; 严禁把第三方站点当 tier=1 入库; 严禁在步骤 7 之前停下来汇报进度。
+$PUSH_INSTRUCTION" ;;
   *) echo "用法: $0 [am|pm|policy] [--review-channel <渠道> | --broadcast]"; exit 2 ;;
 esac
 

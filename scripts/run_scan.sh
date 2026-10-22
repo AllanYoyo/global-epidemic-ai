@@ -246,6 +246,13 @@ if [ -n "${HERMES_RUN_CMD:-}" ]; then
     review)    _fresh "$PENDING_FLAG" || MISSING="$MISSING 审阅待审标记(.review-pending)" ;;
     none)      : ;;   # 本轮不扩散, 只要求日报产物
   esac
+  # 存档量上限(2026-10-22): 正常一轮只存 2 个文件(10-21 实测); 存了 20+ 个说明
+  # Agent 在穷举下载(逐条下 WTO 通报 PDF 核发布日期)—— 10-22 就是这么跑的,
+  # 40 分钟没完。这道终检兜住"绕过 collect.py 直接往 raw 目录倾倒"的情况。
+  RAW_N="$(find "$REPO/data/raw/$SCAN_DATE" -maxdepth 1 -type f ! -name '*.meta.json' 2>/dev/null | wc -l | tr -d ' ')"
+  if [ "${RAW_N:-0}" -gt 12 ]; then
+    MISSING="$MISSING 存档量超限(当轮 ${RAW_N} 个文件 > 12, 疑似穷举下载)"
+  fi
   if [ -n "$MISSING" ]; then
     echo "[失败] 本轮扫描未完成, 缺少:$MISSING"
     echo "       (Agent 放弃时退出码仍是 0, 不能只看 rc; 产物必须是这一轮新生成的)"

@@ -25,6 +25,12 @@ UA = os.environ.get("HTTP_USER_AGENT") or \
 # 北京时间早间归档落到前一天目录。与 normalize.biz_today 同口径。
 BIZ_TZ_OFFSET_HOURS = 8
 
+# 单轮存档量上限(2026-10-22 加固): 10-22 实测 Agent 逐条下载 WTO 通报 PDF 核
+# 发布日期, 存了 23+ 个文件、跑了 40 分钟没完(正常一轮只存 2 个)。这里做**代码
+# 强制**的上限, 不依赖 Agent 自律: 触顶即拒绝, 并提示"窗口外的条目不该存档、
+# 留待下一轮"。可用 --max-files-per-day 调整, 0 = 不限。
+DEFAULT_MAX_FILES_PER_DAY = 12
+
 
 def biz_now():
     """业务时间(东八区) ISO8601。"""
@@ -52,6 +58,8 @@ def main():
     ap.add_argument("--title", help="标题, 用于文件名与 meta")
     ap.add_argument("--date", default=biz_now()[:10], help="归档日期目录, 默认今天(东八区)")
     ap.add_argument("--kind", choices=["html", "txt"], help="保存扩展名(默认: 有 --file 为 txt, 否则 html)")
+    ap.add_argument("--max-files-per-day", type=int, default=DEFAULT_MAX_FILES_PER_DAY,
+                    help="当日存档文件数上限(触顶即拒绝新增), 默认 12; 0 = 不限")
     args = ap.parse_args()
 
     if not args.url and not args.file:
@@ -59,10 +67,32 @@ def main():
     if args.file and not os.path.isfile(args.file):
         ap.error("文件不存在: %s" % args.file)
 
-    body = open(args.file, encoding="utf-8", errors="replace").read() if args.file else fetch(args.url)
-
+    # 当日存档量上限(2026-10-22): 触顶即拒绝 —— 防止"逐条下载核日期"式穷举
+    # 把一轮扫描拖到几十分钟(10-22 实测 23+ 个文件 / 40 分钟没完)。
+    # 放在**抓取之前**判断: 否则先把内容下载下来再拒绝, 白费带宽。
     out_dir = os.path.join(DATA_DIR, "raw", args.date)
     os.makedirs(out_dir, exist_ok=True)
+    existing = len(os.listdir(out_dir))
+    if args.max_files_per_day and existing >= args.max_files_per_day:
+        print("[拒绝] %s 已有 %d 个存档文件(上限 %d), 本轮不再新增。"
+              % (args.date, existing, args.max_files_per_day))
+        print("       10-22 实测: 逐条下载 WTO 通报 PDF 核发布日期, 存了 23+ 个文件、")
+        print("       跑了 40 分钟没完(正常一轮只存 2 个)。**窗口外的条目不该存档**。")
+        print("       把本轮剩下的通道标进 search-log.md, 留待下一轮。")
+        return 1
+
+    body = open(args.file, encoding="utf-8", errors="replace").read() if args.file else fetch(args.url)
+
+    # 当日存档量上限(2026-10-22): 触顶即拒绝 —— 防止"逐条下载核日期"式穷举
+    # 把一轮扫描拖到几十分钟(10-22 实测 23+ 个文件 / 40 分钟没完)。
+    existing = len(os.listdir(out_dir))
+    if args.max_files_per_day and existing >= args.max_files_per_day:
+        print("[拒绝] %s 已有 %d 个存档文件(上限 %d), 本轮不再新增。"
+              % (args.date, existing, args.max_files_per_day))
+        print("       10-22 实测: 逐条下载 WTO 通报 PDF 核发布日期, 存了 23+ 个文件、")
+        print("       跑了 40 分钟没完(正常一轮只存 2 个)。**窗口外的条目不该存档**。")
+        print("       把本轮剩下的通道标进 search-log.md, 留待下一轮。")
+        return 1
     slug = re.sub(r"[^\w\u4e00-\u9fff-]+", "-", args.title or args.url or "record").strip("-")[:40] or "record"
     seq = 1 + sum(1 for f in os.listdir(out_dir) if f.endswith(".meta.json"))
     ext = args.kind or ("txt" if args.file else "html")

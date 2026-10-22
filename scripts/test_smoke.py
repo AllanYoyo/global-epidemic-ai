@@ -1666,6 +1666,41 @@ class ScanFailureGuardTests(unittest.TestCase):
         self.assertIn("搜索预算", text)
         self.assertIn("collect.py", text)
 
+    def test_skill_pins_eping_to_browse_path(self):
+        # 10-22 实测: Agent 自己撞了 ePing 的 API, 拉回 142KB 不带筛选的全量包,
+        # 再逐条下 PDF 核日期(23+ 个文件 / 40 分钟没完)。skill 必须把路径钉死:
+        # 只 browse 列表页、窗口外不下载、单轮有硬上限。
+        with open(os.path.join(REPO, "skills", "global-policy-search", "SKILL.md"),
+                  encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn("固定走「列表页」", text)
+        self.assertIn("不许拉 API 包", text)
+        self.assertIn("下载 PDF ≤ 6", text)
+
+    def test_collect_enforces_daily_archive_cap(self):
+        # 存档量上限必须是**代码强制**(不依赖 Agent 自律), 且在抓取之前就拒绝
+        import collect
+        raw_dir = os.path.join(self.tmp, "raw", "2026-10-22")
+        os.makedirs(raw_dir, exist_ok=True)
+        for i in range(12):
+            with open(os.path.join(raw_dir, "%02d-x.html" % i), "w", encoding="utf-8") as f:
+                f.write("x")
+        buf = io.StringIO()
+        with mock.patch.object(collect, "DATA_DIR", self.tmp), \
+             mock.patch("sys.argv", ["collect.py", "--url", "https://example.com/1",
+                                     "--title", "测试", "--date", "2026-10-22"]), \
+             redirect_stdout(buf):
+            rc = collect.main()
+        self.assertEqual(rc, 1)
+        self.assertIn("[拒绝]", buf.getvalue())
+        # 触顶后不应新增文件
+        self.assertEqual(len(os.listdir(raw_dir)), 12)
+
+    def test_run_scan_checks_archive_volume(self):
+        # 终检: 绕过 collect.py 直接往 raw 目录倾倒也要被识破
+        text = self._run_scan_text()
+        self.assertIn("存档量超限", text)
+
 
 class BriefTextFocusTests(unittest.TestCase):
     """IM 卡片"重点关注"口径必须与 report.py 一致(2026-10-19 修复)。

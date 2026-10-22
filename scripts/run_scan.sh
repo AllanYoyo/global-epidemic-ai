@@ -57,7 +57,21 @@ MODE="${MODE:-am}"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 PY="${PYTHON_BIN:-python3}"
 
+# 调用方显式给的值**优先于** ~/.hermes/.env(后者只是默认配置源)。
+# 10-22 实测踩到: source .env 会把外部传入的 HERMES_RUN_CMD 等覆盖掉,
+# 于是"用空跑批验证一下"实际上启动了真扫描(两个 Agent 抢资源)。
+# 所以先记下调用方给的值, source 之后再还原。
+_caller_run_cmd="${HERMES_RUN_CMD-__unset__}"
+_caller_health="${HERMES_HEALTH_CMD-__unset__}"
+_caller_timeout="${SCAN_TIMEOUT-__unset__}"
+_caller_gw_wait="${GATEWAY_WAIT-__unset__}"
+_caller_tz="${SCAN_TZ-__unset__}"
 [ -n "${HOME:-}" ] && [ -f "$HOME/.hermes/.env" ] && . "$HOME/.hermes/.env"
+[ "$_caller_run_cmd" = "__unset__" ] || export HERMES_RUN_CMD="$_caller_run_cmd"
+[ "$_caller_health" = "__unset__" ] || export HERMES_HEALTH_CMD="$_caller_health"
+[ "$_caller_timeout" = "__unset__" ] || export SCAN_TIMEOUT="$_caller_timeout"
+[ "$_caller_gw_wait" = "__unset__" ] || export GATEWAY_WAIT="$_caller_gw_wait"
+[ "$_caller_tz" = "__unset__" ] || export SCAN_TZ="$_caller_tz"
 
 # 生产 VPS 系统时区是 Etc/UTC, 而 cron 按 Asia/Shanghai 触发。若不显式固定,
 # `date +%F` 取到 UTC 日期, 北京时间早间跑批会整体错一天(2026-10 实测: 10-15
@@ -183,7 +197,7 @@ if [ -n "${HERMES_RUN_CMD:-}" ]; then
     GATEWAY_WAIT="${GATEWAY_WAIT:-180}"
     WAITED=0
     while :; do
-      GW_LINE="$(timeout 20 $HEALTH_CMD 2>&1 | grep -E 'Gateway:' | head -1)"
+      GW_LINE="$(timeout -k 5 20 $HEALTH_CMD 2>&1 | grep -E 'Gateway:' | head -1)"
       if [ -z "$GW_LINE" ]; then
         echo "[$(date '+%F %T')] 网关状态无法解析, 跳过预检继续"
         break

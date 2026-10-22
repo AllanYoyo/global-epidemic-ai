@@ -109,6 +109,7 @@ python -c "import sqlite3;con=sqlite3.connect('database/epidemic.db');print(con.
   - 先看跑批日志尾部：`tail -40 /opt/global-epidemic-ai/logs/scan.log`；再看网关日志 `journalctl -u hermes-gateway --since '<今天 07:00>'`。
   - 典型征兆：`web_search ... 50 times ... runaway search loop` + `CDP supervisor ... connect failed (attempt n/5)`。
   - **现在跑批会自己报失败**：产物校验不过 → `[失败] 本轮扫描未完成` + 退出码 1（2026-10-22 之前是 rc=0 假成功，故障静默一整天）。
+  - **存档有了却 0 入库**（拆段后的新形态，10-22 晚实测 3 轮）：取数段在写 `candidates.json` 前耗尽工具预算，加工段"文件不存在→跳过"空转。已修：取数段边存边写 + `run_scan.sh` 每轮取数结束后跑 `scripts/synth_candidates.py` 从 meta.json 无损合成候选清单。旧的失败现场可手工补：`python scripts/synth_candidates.py --date <日期>` 后跑 `scripts/run_scan.sh policy --stage process`（只加工不推送）。
   - 手工重跑：**默认不推送**（手动上下文 = 非 cron → `scope=none`），只生成日报；要推送见上一节的闸门流程。
 - **网关不就绪 / `Gateway draining` / 浏览器 CDP 连不上**：`hermes status` 看 Gateway 行。系统级与用户级**不要同时启用**（用户级拿不到 `/root/.hermes/gateway.lock` 会陷入 `activating (auto-restart)` 崩溃循环，每几秒空转一次）。CDP 端口残留（`connect failed` 的端口上无监听）需要**重启网关**才能清掉，单纯杀 `browser_harness` 守护进程没用（它们 RSS 接近 0，不是内存大头）。
 

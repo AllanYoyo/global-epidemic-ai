@@ -206,11 +206,11 @@ case "$MODE" in
 1) 先读 config/sources.yaml 的 policy_watch_countries 取当天必扫档与轮转档, 再读 skills/global-policy-search/SKILL.md 的取数工具纪律。
 2) 优先级固定: collect.py 直抓已知官方入口 > web_fetch > 浏览器。web_search 单轮不超过 15 次; 同一工具失败 2 次就换下一个; 浏览器失败就放弃浏览器, 不要反复重连。
 3) WTO ePing 只走列表页。拿到行式列表后立刻用 python3 scripts/parse_eping.py <列表文件> --days 7 预筛, 只对清单内、发布日期在近 7 天内的条目下载存档, 窗口外一律不下。PDF 直链就在列表行里(members.wto.org/crnattachments/...), 不要自己拼。
-4) 每找到一条就**立刻**存档: python3 scripts/collect.py --url <直链> --title <标题>。当日存档文件数上限 12(含 .meta.json 约等于 6 条), 触顶就停, 剩下的留待下一轮。
+4) 每找到一条就**立刻**做两件事, 边存边写、绝不留到收尾: ①存档 python3 scripts/collect.py --url <直链> --title <标题>; ②存档成功后**马上**把该条追加写入 data/raw/$SCAN_DATE/candidates.json 并在 search-log.md 记一行。理由: 10-22 三轮实测, 每轮都在存档完成后、写候选清单前耗尽工具预算 —— 收尾才写 = 白干。当日存档文件数上限 12(含 .meta.json 约等于 6 条), 触顶就停, 剩下的留待下一轮。
 【本阶段必须交付的三个文件】
 A) 存档: data/raw/$SCAN_DATE/ 下每条一个 html + 一个 meta.json。
-B) data/raw/$SCAN_DATE/candidates.json —— 数组, 每条含 title/url/country_en/publish_date/source_name/brief(一句话说明这是什么措施)与 topics(动植物/产品/病害关键词)。**哪怕一条都没取到也要写这个文件**(空数组), 下一阶段靠它判断有没有东西可做。
-C) data/raw/$SCAN_DATE/search-log.md —— 逐通道状态: 本通道取到几条 / 不可用(附原因, 如 403 封禁、页面结构不匹配、搜索额度用尽)。
+B) data/raw/$SCAN_DATE/candidates.json —— 数组, 每条含 title/url/country_en/publish_date/source_name/brief(一句话说明这是什么措施)与 topics(动植物/产品/病害关键词)。**增量维护**: 每存档一条立即追加一条, 不是收尾时一次性写; 哪怕一条都没取到也要创建这个文件(空数组), 下一阶段靠它判断有没有东西可做。
+C) data/raw/$SCAN_DATE/search-log.md —— 逐通道状态, 同样**边扫边记**: 本通道取到几条 / 不可用(附原因, 如 403 封禁、页面结构不匹配、搜索额度用尽)。
 【红线】严禁 --broadcast; 严禁逐条穷举下载 PDF; 严禁把第三方站点当 tier=1; 时间到了就**立刻交卷**, 不要为了多找一条而超时。"
     PROMPT_PROCESS="执行 $SCAN_DATE 的政策变化**加工阶段**(运行日期 $SCAN_DATE, 东八区)。取数阶段已完成, 你的输入是**本地文件, 不要联网检索**。
 1) 先读 data/raw/$SCAN_DATE/candidates.json 与 data/raw/$SCAN_DATE/ 下已存档的 html。candidates.json 为空数组或不存在时, 直接跳到第 5 步(仍要出报)。
@@ -311,6 +311,13 @@ if [ -n "${HERMES_RUN_CMD:-}" ]; then
     else
       echo "[$(date '+%F %T')] 指定 --stage process: 跳过取数, 直接用 data/raw/$SCAN_DATE/ 已有存档加工"
     fi
+    # 确定性兜底(2026-10-22): 取数段 Agent 每轮都在写 candidates.json 前耗尽工具
+    # 预算, 加工段按"文件不存在就跳过"直接空转 —— 6 条已存档原文一条没进库。
+    # 现在取数段结束后(无论成败, --stage process 补跑同样)从 meta.json 无损合成
+    # 最小版候选清单, 保证加工段永远拿得到存档 url/title; 语义字段由加工段照
+    # 抽取规则从原文补齐。脚本幂等、不联网、不编造(见 synth_candidates.py)。
+    "$PY" "$REPO/scripts/synth_candidates.py" --date "$SCAN_DATE" || \
+      echo "[WARN] synth_candidates 失败(不影响继续, 加工段将看不到候选清单兜底)"
     echo "[$(date '+%F %T')] 阶段 2/2 加工出报(上限 ${PROCESS_TIMEOUT}s)"
     _run_agent "$PROCESS_TIMEOUT" "$PROMPT_PROCESS"
     RC=$?

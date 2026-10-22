@@ -201,23 +201,29 @@ case "$MODE" in
     # run4: 加了"硬预算 + 边检索边入库"prompt, 落了 3 份存档, 但仍没走到入库与出报。
     # 结论: 单轮作业装不下"跨国检索 + 抽取 + 核验 + 研判 + 出报", 且 prompt 里的
     # 自然语言预算约束不住模型。所以取数与加工分成两段, 中间以 data/raw/<日期>/ 断点。
-    PROMPT_FETCH="执行 $SCAN_DATE 的政策变化**取数阶段**(运行日期 $SCAN_DATE, 东八区)。本阶段只做一件事: 上网找政策并把原文**存档到本地**。**不要抽取、不要入库、不要出报、不要写对华影响研判** —— 那是下一阶段的事。
+    #
+    # 2026-10-22 深夜再修: 拆段后加工段冷启动要重读全部存档原文(~12 万 token 上下文),
+    # 900s 预算当晚三轮实测全超时(旧单轮流程 10-11~10-21 每轮全程仅 3-7 分钟)。
+    # 拆段把抽取成本转移成了"冷读全部原文"。恢复旧流程快的根本原因 —— 搜到一条、
+    # 趁原文在手就地抽取: 取数段边存边写 extracted-policy.json, 加工段降级为轻收尾
+    # (补漏 → 入库 → 研判 → 出报 → 推送)。
+    PROMPT_FETCH="执行 $SCAN_DATE 的政策变化**取数阶段**(运行日期 $SCAN_DATE, 东八区)。本阶段做两件事: 上网找政策存档, 并趁原文在手**就地抽取**。**不要入库、不要出报、不要写对华影响研判** —— 那是下一阶段的事。
 【取数纪律】
 1) 先读 config/sources.yaml 的 policy_watch_countries 取当天必扫档与轮转档, 再读 skills/global-policy-search/SKILL.md 的取数工具纪律。
 2) 优先级固定: collect.py 直抓已知官方入口 > web_fetch > 浏览器。web_search 单轮不超过 15 次; 同一工具失败 2 次就换下一个; 浏览器失败就放弃浏览器, 不要反复重连。
 3) WTO ePing 只走列表页。拿到行式列表后立刻用 python3 scripts/parse_eping.py <列表文件> --days 7 预筛, 只对清单内、发布日期在近 7 天内的条目下载存档, 窗口外一律不下。PDF 直链就在列表行里(members.wto.org/crnattachments/...), 不要自己拼。
-4) 每找到一条就**立刻**做两件事, 边存边写、绝不留到收尾: ①存档 python3 scripts/collect.py --url <直链> --title <标题>; ②存档成功后**马上**把该条追加写入 data/raw/$SCAN_DATE/candidates.json 并在 search-log.md 记一行。理由: 10-22 三轮实测, 每轮都在存档完成后、写候选清单前耗尽工具预算 —— 收尾才写 = 白干。当日存档文件数上限 12(含 .meta.json 约等于 6 条), 触顶就停, 剩下的留待下一轮。
-【本阶段必须交付的三个文件】
+4) 每找到一条就**立刻**做三件事, 边存边写、绝不留到收尾: ①存档 python3 scripts/collect.py --url <直链> --title <标题>; ②存档成功后**马上**把该条追加写入 data/raw/$SCAN_DATE/candidates.json 并在 search-log.md 记一行; ③趁原文还在手上, 按 prompts/policy-extraction.md 把该条抽成 policy 记录, **立即追加**到 data/raw/$SCAN_DATE/extracted-policy.json。理由: 10-22 实测, 收尾才写 = 白干; 而把抽取留给加工段 = 冷启动重读全部原文(12 万 token), 必超时 —— 取数时就地抽取是零成本, 这正是拆段前单轮流程 3-7 分钟能跑完全程的原因。就地抽取要求: 每条必须有 source.url 与 source.quote(≤120 字, 摘自刚抓到的原文); source.publish_date 用该页面自己的发布日期, 不得用抓取日冒充; 原文没有的信息填 null, **严禁编造**; 旧闻(超 7 天)与第三方站点不写入, 只在 search-log.md 记为线索。当日存档文件数上限 12(含 .meta.json 约等于 6 条), 触顶就停, 剩下的留待下一轮。
+【本阶段必须交付的四个文件】
 A) 存档: data/raw/$SCAN_DATE/ 下每条一个 html + 一个 meta.json。
 B) data/raw/$SCAN_DATE/candidates.json —— 数组, 每条含 title/url/country_en/publish_date/source_name/brief(一句话说明这是什么措施)与 topics(动植物/产品/病害关键词)。**增量维护**: 每存档一条立即追加一条, 不是收尾时一次性写; 哪怕一条都没取到也要创建这个文件(空数组), 下一阶段靠它判断有没有东西可做。
-C) data/raw/$SCAN_DATE/search-log.md —— 逐通道状态, 同样**边扫边记**: 本通道取到几条 / 不可用(附原因, 如 403 封禁、页面结构不匹配、搜索额度用尽)。
+C) data/raw/$SCAN_DATE/extracted-policy.json —— 数组, **每存档一条立即追加一条就地抽取的 policy 记录**(同 B 的边存边写纪律); 哪怕 0 条也要创建空数组。这是下一阶段的主输入, 加工段只补漏、不再重读全部原文。
+D) data/raw/$SCAN_DATE/search-log.md —— 逐通道状态, 同样**边扫边记**: 本通道取到几条 / 不可用(附原因, 如 403 封禁、页面结构不匹配、搜索额度用尽)。
 【红线】严禁 --broadcast; 严禁逐条穷举下载 PDF; 严禁把第三方站点当 tier=1; 时间到了就**立刻交卷**, 不要为了多找一条而超时。"
-    PROMPT_PROCESS="执行 $SCAN_DATE 的政策变化**加工阶段**(运行日期 $SCAN_DATE, 东八区)。取数阶段已完成, 你的输入是**本地文件, 不要联网检索**。
-1) 先读 data/raw/$SCAN_DATE/candidates.json 与 data/raw/$SCAN_DATE/ 下已存档的 html。candidates.json 为空数组或不存在时, 直接跳到第 5 步(仍要出报)。
-2) 抽取: 按 prompts/policy-extraction.md 把每条合格政策抽成 policy 记录, 汇总写入 data/raw/$SCAN_DATE/extracted-policy.json。每条必须有 source.url 与 source.quote(原文关键段, 120 字以内); 原文没有的信息填 null, **严禁编造**。source.publish_date 必须是该 URL 自己的页面级发布日期, 不得用抓取日或目录页条目日期冒充。
-3) 入库: python3 scripts/normalize.py --input data/raw/$SCAN_DATE/extracted-policy.json --out data/events/$SCAN_DATE/ --db --max-age-days 7。tier=1 只认官方域名; 第三方站点整条拒收, 只在 search-log.md 记为线索。
-4) 研判: 对已入库的 verified 记录逐条写回四维与结论(脚本用法见 prompts/policy-impact.md): python3 scripts/risk.py --event-id <id> --impact-type <约束|机会|中性> --china-relevance <...> --action <...> --rationale <...> --dim trade=N --dim biosecurity=N --dim response=N --dim alignment=N。先用 --list-pending 看还有哪些没写回。
-5) 出报(无论前面取到几条, **都必须执行**): python3 scripts/report.py --date $SCAN_DATE --excel --docx。再补写 data/raw/$SCAN_DATE/policy-findings.md。
+    PROMPT_PROCESS="执行 $SCAN_DATE 的政策变化**加工阶段**(运行日期 $SCAN_DATE, 东八区)。取数阶段已存档并就地抽取, 你的输入是**本地文件, 不要联网检索**; 本阶段是轻收尾, 正常几分钟内完成。
+1) 读 data/raw/$SCAN_DATE/extracted-policy.json(主输入, 取数段已边存边写生成)。对照 candidates.json 找出「已存档但未抽取」的漏条: 先看 search-log.md 是否已把它记为线索或判为不合格(第三方/旧闻), 确实漏抽的才读对应 html 原文、按 prompts/policy-extraction.md 补抽并追加进 extracted-policy.json —— **不要重读已抽取条目的原文**。extracted-policy.json 与 candidates.json 都为空数组或不存在时, 直接跳到第 4 步(仍要出报)。
+2) 入库: python3 scripts/normalize.py --input data/raw/$SCAN_DATE/extracted-policy.json --out data/events/$SCAN_DATE/ --db --max-age-days 7。tier=1 只认官方域名; 第三方站点整条拒收, 只在 search-log.md 记为线索。
+3) 研判: 对已入库的 verified 记录逐条写回四维与结论(脚本用法见 prompts/policy-impact.md): python3 scripts/risk.py --event-id <id> --impact-type <约束|机会|中性> --china-relevance <...> --action <...> --rationale <...> --dim trade=N --dim biosecurity=N --dim response=N --dim alignment=N。先用 --list-pending 看还有哪些没写回。
+4) 出报(无论前面取到几条, **都必须执行**): python3 scripts/report.py --date $SCAN_DATE --excel --docx。再补写 data/raw/$SCAN_DATE/policy-findings.md。
 【红线】严禁 --broadcast; 严禁为了让日报好看而入库旧闻; 严禁编造 quote。**不要在这一步做新的联网检索**, 你只看本地文件。
 $PUSH_INSTRUCTION"
     PROMPT="$PROMPT_PROCESS" ;;

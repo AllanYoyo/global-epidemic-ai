@@ -102,6 +102,15 @@ description: 监测各国政府动植物检疫与进出口管控政策变化。�
      >   `regulation.eaeunion.org` 或中文聚合站, 不在 ePing 的成员列表里。
      > - **单轮硬上限: 下载 PDF ≤ 6 个、存档文件 ≤ 12 个**(10-21 实际只存了 2 个)。
      >   触顶就在 `search-log.md` 标「本轮不穷举, 留待下一轮」并继续下一通道。
+     > - **预筛用现成脚本, 不要自己写解析代码**(2026-10-22 新增):
+     >   列表页拿到的行式文本或 JSON, 一条命令完成「日期窗口 + 措施动作」预筛:
+     >   ```bash
+     >   python scripts/parse_eping.py <列表数据.json|列表数据.txt> --days 7
+     >   ```
+     >   它会按 `dist`(发布日期)圈窗口、按措施关键词挑疑似政策动作、
+     >   自动挑出 WTO 存档 PDF 直链, 并把精简结果另存为 `<数据>.filtered.json`。
+     >   **然后只对清单里的条目下载存档**, 不要逐条把全部通报都下下来。
+     >   脚本支持多语言标题(西/葡/法)与音标折叠, 纯「评议期通知」类会被自动排除。
    - **每日必扫**:`priority_1` → `regional` → `priority_2`(含欧盟 SANTE 与 WTO ePing);
    - **当天轮转条目**:`border_neighbours` / `export_partners` / `state_level` 中 `shard` 含当天星期的条目,
      以及 `weekly_shards[当天].scan` 里的整档;

@@ -2291,5 +2291,172 @@ class DirtyDateGuardTests(unittest.TestCase):
         self.assertIn("日期无法解析", buf.getvalue())
 
 
+class ParseEpingTests(unittest.TestCase):
+    """scripts/parse_eping.py: ePing 通报预筛器(2026-10-22 新增)。
+
+    背景: 10-22 的 Agent 拉回 ePing 全量 JSON 后**没有用 dist/kw 预筛**,
+    逐条下载 PDF 核发布日期, 存了 23+ 个文件、跑了 40 分钟没完。
+    本类锁住"预筛器必须自己完成预筛"这条不变量。
+    """
+
+    def setUp(self):
+        import parse_eping
+        self.p = parse_eping
+        self.tmp = tempfile.mkdtemp(prefix="radar-eping-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def _write(self, name, content):
+        path = os.path.join(self.tmp, name)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+        return path
+
+    def _read_filtered(self, path):
+        """读脚本产出的 <数据>.filtered.json。"""
+        out = path.rsplit(".", 1)[0] + ".filtered.json"
+        with open(out, encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def _run(self, path, **kw):
+        """跑一次脚本, 返回 (退出码, stdout)。"""
+        argv = ["parse_eping.py", path, "--date", "2026-10-22", "--days", "7"]
+        for k, v in kw.items():
+            argv += ["--" + k] if v is True else ["--" + k, str(v)]
+        old = sys.argv
+        sys.argv = argv
+        buf = io.StringIO()
+        try:
+            with redirect_stdout(buf):
+                code = self.p.main()
+        finally:
+            sys.argv = old
+        return code, buf.getvalue()
+
+    # ---- 直链优先级: 必须取 WTO 存档 PDF, 不能取成员国的附件下载页 ----
+    def test_pdf_prefers_wto_archive_over_member_attachment_page(self):
+        rec = {"crn": "<a href='https://www.ica.gov.co/getattachment/7b0dc/2026R00020296.aspx'>doc</a>, "
+                      "<a href='https://members.wto.org/crnattachments/2026/SPS/COL/26_05465_00_s.pdf'>doc</a>"}
+        url = self.p._pdf(rec)
+        self.assertEqual(url, "https://members.wto.org/crnattachments/2026/SPS/COL/26_05465_00_s.pdf")
+
+    def test_pdf_falls_back_to_any_pdf_then_attachment_page(self):
+        self.assertEqual(self.p._pdf({"crn": "<a href='https://x.gov/a/b.pdf'>d</a>"}),
+                         "https://x.gov/a/b.pdf")
+        self.assertEqual(self.p._pdf({"crn": "<a href='https://x.gov/getattachment/1/a.aspx'>d</a>"}),
+                         "https://x.gov/getattachment/1/a.aspx")
+        self.assertEqual(self.p._pdf({"crn": "no link here"}), "")
+
+    # ---- 动作预筛: 纯通知类要排除, 多语言标题要命中 ----
+    def test_comment_period_only_is_not_an_action(self):
+        self.assertFalse(self.p._is_action({"kw": ["Comment", "Consultation"],
+                                            "title": "comment period notice"}))
+        # 硬动作词优先于否定词
+        self.assertTrue(self.p._is_action({"kw": ["Comment", "Withdrawal of the measure"],
+                                           "title": "comment period notice"}))
+
+    def test_accented_non_english_titles_are_matched(self):
+        # 西语带音标: 不折叠音标就漏检(10-22 预筛的隐性漏检点)
+        self.assertTrue(self.p._is_action(
+            {"kw": [], "title": "Resolucion ICA levanta la medida temporal de suspension"}))
+        # 葡语: fitossanitarios / requisitos
+        self.assertTrue(self.p._is_action(
+            {"kw": [], "title": "Requisitos fitossanitarios para importacao"}))
+        # 法语
+        self.assertTrue(self.p._is_action(
+            {"kw": [], "title": "Revision des mesures d'importation"}))
+        # 无关标题不误报
+        self.assertFalse(self.p._is_action({"kw": [], "title": "Notification of the annual report"}))
+
+    # ---- 日期窗口 ----
+    def test_dist_normalizes_iso_and_slash_formats(self):
+        self.assertEqual(self.p._dist({"dist": "2026-10-21"}), "2026-10-21")
+        self.assertEqual(self.p._dist({"dist": "21/10/2026"}), "2026-10-21")
+        self.assertEqual(self.p._dist({"dist": "2026-10-21T08:00:00Z"}), "2026-10-21")
+        self.assertIsNone(self.p._dist({"dist": "not a date"}))
+        self.assertIsNone(self.p._dist({}))
+
+    def test_out_of_window_rows_are_dropped(self):
+        rows = [
+            {"id": "1", "sym": "G/SPS/N/A/1", "dist": "2026-10-21", "member": "A",
+             "title": "import ban on fresh beef", "kw": ["Import ban"],
+             "crn": "<a href='https://members.wto.org/crnattachments/x.pdf'>d</a>"},
+            {"id": "2", "sym": "G/SPS/N/B/2", "dist": "2026-09-01", "member": "B",
+             "title": "old notification", "kw": ["Comment"],
+             "crn": "<a href='https://members.wto.org/crnattachments/y.pdf'>d</a>"},
+            {"id": "3", "sym": "G/SPS/N/C/3", "dist": "2026-10-20", "member": "C",
+             "title": "comment period notice", "kw": ["Comment", "Consultation"],
+             "crn": "<a href='https://members.wto.org/crnattachments/z.pdf'>d</a>"},
+        ]
+        path = self._write("rows.json", json.dumps(rows, ensure_ascii=False))
+        code, out = self._run(path)
+        self.assertEqual(code, 0)
+        self.assertIn("共解析 3 条", out)
+        self.assertIn("窗口(2026-10-15 ~ 2026-10-22)内 2 条", out)
+        self.assertIn("疑似措施变化 1 条", out)
+        self.assertIn("G/SPS/N/A/1", out)
+        self.assertNotIn("G/SPS/N/B/2", out)
+        self.assertNotIn("G/SPS/N/C/3", out)
+
+    # ---- 行式文本路径(10-21 的 sps_list.txt 形状) ----
+    def test_text_rows_parse_url_and_filter_by_window(self):
+        # 5 段格式(无关键词列): 直链必须落到 url 而不是被当成关键词
+        text = (
+            "Colombia | 2026-10-21 | G/SPS/N/COL/396/Add.1 | Revisa de requisitos | "
+            "https://members.wto.org/crnattachments/2026/SPS/COL/26_05465_00_s.pdf\n"
+            "Oldland | 2026-09-01 | G/SPS/N/X/1 | muy antiguo | https://x/old.pdf\n"
+        )
+        path = self._write("rows.txt", text)
+        code, out = self._run(path)
+        self.assertEqual(code, 0)
+        self.assertIn("共解析 2 条", out)
+        self.assertIn("疑似措施变化 1 条", out)
+        self.assertIn("crnattachments", out)
+        filtered = self._read_filtered(path)
+        self.assertEqual(len(filtered), 1)
+        self.assertIn("crnattachments", filtered[0]["url"])
+
+    def test_text_rows_split_keyword_and_url_columns(self):
+        # 6 段格式(有关键词列): 关键词与直链要分开
+        text = ("Nowland | 2026-10-20 | G/SPS/N/Y/2 | titulo | Import ban | "
+                "https://members.wto.org/crnattachments/2026/SPS/Y/1.pdf\n")
+        path = self._write("rows2.txt", text)
+        code, out = self._run(path)
+        self.assertEqual(code, 0)
+        filtered = self._read_filtered(path)
+        self.assertEqual(len(filtered), 1)
+        self.assertEqual(filtered[0]["kw"], "Import ban")
+        self.assertIn("crnattachments", filtered[0]["url"])
+
+    # ---- 业务时区: 默认日期走 biz_today(东八区), 不依赖宿主机 TZ ----
+    def test_default_date_uses_business_timezone(self):
+        import normalize
+        self.assertEqual(self.p.biz_today(), normalize.biz_today())
+
+    # ---- 失败路径 ----
+    def test_missing_file_returns_2(self):
+        code, out = self._run(os.path.join(self.tmp, "nope.json"))
+        self.assertEqual(code, 2)
+        self.assertIn("文件不存在", out)
+
+    def test_bad_date_returns_2(self):
+        path = self._write("rows.json", "[]")
+        old = sys.argv
+        sys.argv = ["parse_eping.py", path, "--date", "2026-13-45"]
+        buf = io.StringIO()
+        try:
+            with redirect_stdout(buf):
+                code = self.p.main()
+        finally:
+            sys.argv = old
+        self.assertEqual(code, 2)
+        self.assertIn("YYYY-MM-DD", buf.getvalue())
+
+    def test_empty_input_returns_1(self):
+        path = self._write("empty.json", "[]")
+        code, out = self._run(path)
+        self.assertEqual(code, 1)
+        self.assertIn("没有解析出条目", out)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

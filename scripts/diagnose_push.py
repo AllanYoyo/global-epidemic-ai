@@ -265,13 +265,20 @@ def check_cron_log(log_path, tail):
             else:
                 _warn("%s 里没有 scope= 标记 —— 当前 run_scan.sh 也没有范围声明(旧版), "
                       "默认全量推送" % path)
-        # scope=none = 没能识别成定时任务上下文, 本轮不扩散(日报没推出去)
+        # scope=none = 没能识别成定时任务上下文, 本轮不扩散(日报没推出去)。
+        # 但**手动/渠道会话触发的 scope=none 是正确的**(非 cron → 不扩散, 正是
+        # 10-20 事故后要的行为)。只有"来源自称定时任务却判成 none"才是矛盾
+        # —— 2026-10-22 误报: 手动补跑的日志被报成"cron 识别失败"。
         for ln in picked:
             if "scope=none" in ln:
-                _problem("%s 里出现 scope=none: 本轮被判定为非定时任务上下文, "
-                         "**没有推送**。若这行本该是 cron 调度, 说明 cron 识别失败 —— "
-                         "请在 crontab 里显式加 --broadcast(见 config/crontab.example)"
-                         % path)
+                if "src=未声明" in ln:
+                    print("  (说明) 出现 scope=none: 那一轮是**手动/渠道会话**触发"
+                          "(非 cron 上下文), 本轮不扩散是正确的行为, 不是异常")
+                else:
+                    _problem("%s 里出现 scope=none: 本轮被判定为非定时任务上下文, "
+                             "**没有推送**。若这行本该是 cron 调度, 说明 cron 识别失败 —— "
+                             "请在 crontab 里显式加 --broadcast(见 config/crontab.example)"
+                             % path)
                 break
         # 推送范围声明的痕迹: 谁声明了全量
         for ln in picked:

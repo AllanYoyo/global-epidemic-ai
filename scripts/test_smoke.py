@@ -1064,12 +1064,14 @@ class PushScopeLockTests(unittest.TestCase):
         self.assertIn("代码", text)
 
     def test_diagnose_flags_scope_none_in_log(self):
-        # 诊断脚本要能发现"cron 上下文没识别出来 → 本轮没推送"
+        # 诊断脚本要能发现"cron 上下文没识别出来 → 本轮没推送"。
+        # 注意样本必须是**自称定时任务**的来源(src=显式参数/cron自动识别);
+        # 手动触发的 scope=none 是正确行为, 另有一条用例守着。
         import diagnose_push
         log = os.path.join(self.tmp, "cron.log")
         with open(log, "w", encoding="utf-8") as f:
             f.write("[2026-10-20 07:30:00] run_scan mode=policy date=2026-10-20 "
-                    "tz=Asia/Shanghai scope=none src=未声明(非定时任务上下文) start\n")
+                    "tz=Asia/Shanghai scope=none src=显式参数 start\n")
         buf = io.StringIO()
         with redirect_stdout(buf):
             rc = diagnose_push.main(["--date", "2026-10-20", "--log", log,
@@ -1122,6 +1124,35 @@ class PushScopeLockTests(unittest.TestCase):
         out = buf.getvalue()
         self.assertIn("[警告]", out)
         self.assertIn("旧版", out)
+        self.assertNotEqual(rc, 0)
+
+    def test_diagnose_manual_scope_none_is_not_a_problem(self):
+        # 手动/渠道会话触发的 scope=none 是**正确行为**(非 cron → 不扩散),
+        # 不能报成"cron 识别失败"(2026-10-22 误报)
+        import diagnose_push
+        log = os.path.join(self.tmp, "cron.log")
+        with open(log, "w", encoding="utf-8") as f:
+            f.write("[2026-10-22 08:49:08] run_scan mode=policy date=2026-10-22 "
+                    "tz=Asia/Shanghai scope=none src=未声明(非定时任务上下文) start\n")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            diagnose_push.main(["--date", "2026-10-22", "--log", log, "--log-tail", "50"])
+        out = buf.getvalue()
+        self.assertIn("不扩散是正确的行为", out)
+        self.assertNotIn("cron 识别失败", out)
+
+    def test_diagnose_cron_scope_none_is_still_flagged(self):
+        # 反面: 来源自称定时任务却判成 none → 仍是矛盾, 必须报警
+        import diagnose_push
+        log = os.path.join(self.tmp, "cron.log")
+        with open(log, "w", encoding="utf-8") as f:
+            f.write("[2026-10-22 07:30:01] run_scan mode=policy date=2026-10-22 "
+                    "tz=Asia/Shanghai scope=none src=显式参数 start\n")
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = diagnose_push.main(["--date", "2026-10-22", "--log", log, "--log-tail", "50"])
+        out = buf.getvalue()
+        self.assertIn("cron 识别失败", out)
         self.assertNotEqual(rc, 0)
 
     def test_diagnose_reads_hermes_env_for_channel_config(self):

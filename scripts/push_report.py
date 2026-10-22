@@ -554,6 +554,16 @@ def main():
             # "今天没推", 与"推送成功"无法区分。WARN 前缀便于告警脚本 grep。
             print("[WARN] %s 日报已推送过(标记: %s), 本次未推送; 需重发请加 --force"
                   % (args.date, flag_path))
+            # 刷新标记 mtime: "已推送过"是本轮的**合法终态**(当日全渠道已完成),
+            # 不是失败。config/crontab.example 有三条每日调度都带 --broadcast,
+            # 若不刷新, run_scan.sh 的产物新鲜度检查(mtime >= 跑批开始)会把
+            # 每天第 2、3 轮判成"缺少推送标记"并退出 1 —— 即 2/3 的定时跑批恒红,
+            # 而日报其实早就推出去了。2026-10-22 审计发现。
+            try:
+                os.utime(flag_path, None)
+                print("[OK] 推送标记已刷新(本轮以\"当日已推送\"为终态)")
+            except OSError as exc:
+                print("[WARN] 刷新推送标记失败(%s), 本轮可能被 run_scan.sh 判为未推送" % exc)
             return 0
         # 审核阶段标记: 只发过审阅渠道, 等 --review-approved
         if os.path.isfile(pending_path) and not args.review_approved:

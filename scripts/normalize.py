@@ -363,6 +363,17 @@ def check_source_domain(e):
     host = _source_host(url)
     tier = src.get("tier")
 
+    # 主机取不到(缺 scheme / 相对路径 / 畸形 URL)时, 下面两处判定都会被 host 真值短路:
+    # 第三方黑名单查不到、官方域校验也查不到 —— 结果是 `tbtsps.cn/x.html` 这种
+    # **无 scheme** 的拉黑源能以 tier=1 + verified 直接入库(2026-10-22 审计实测复现)。
+    # 抽取时 URL 被截断是常见失误, 校验必须对此 fail-closed 而不是放行。
+    if not host:
+        errs.append(
+            "source.url 无法解析出主机名(%r): 必须带 scheme 的绝对 URL, 如 https://host/path; "
+            "缺 scheme 会同时绕过第三方黑名单与官方域校验, 一律拒收" % url)
+        e["source"] = src
+        return errs, e
+
     # 聚合/目录/历史归档页: 自身没有页面级发布日期, 把页面内条目日期当 event_date
     # 是误读。整页不可作为单条政策的来源, 须点入页面内具体条目原 URL 后再抽取入库。
     # 2026-10-19 引入: 复现 fsvps /vse-soobshcheniya 把 2026-07-31 历史条目误读为新政策

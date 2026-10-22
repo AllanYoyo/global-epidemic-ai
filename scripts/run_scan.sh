@@ -73,6 +73,13 @@ _caller_tz="${SCAN_TZ-__unset__}"
 [ "$_caller_gw_wait" = "__unset__" ] || export GATEWAY_WAIT="$_caller_gw_wait"
 [ "$_caller_tz" = "__unset__" ] || export SCAN_TZ="$_caller_tz"
 
+# 数据根目录: 与 normalize.py / report.py / push_*.py 保持同一来源。
+# 2026-10-22 审计发现: 产物校验曾把路径写死成 "$REPO/data/reports/...", 而其余脚本
+# 一律读 EPIDEMIC_DATA_DIR。README 教生产设 EPIDEMIC_DATA_DIR=/opt/global-epidemic-ai/data,
+# 一旦照做, Agent 的日报落在 $EPIDEMIC_DATA_DIR 而校验盯着 repo 内 —— 跑批**必然**报
+# "缺少: 日报Markdown" 并退出 1, 即 100% 失败。现在统一走 DATA_DIR。
+DATA_DIR="${EPIDEMIC_DATA_DIR:-$REPO/data}"
+
 # 生产 VPS 系统时区是 Etc/UTC, 而 cron 按 Asia/Shanghai 触发。若不显式固定,
 # `date +%F` 取到 UTC 日期, 北京时间早间跑批会整体错一天(2026-10 实测: 10-15
 # 的扫描产出 2026-10-14-* 报告, 且 report.py 缺 --date 时回退到 UTC 今天)。
@@ -132,6 +139,8 @@ case "$SCOPE" in
     unset REVIEW_CHANNEL
     "$PY" "$REPO/scripts/push_scope.py" --date "$SCAN_DATE" --broadcast \
       --source "run_scan.sh:$MODE:$SCOPE_SOURCE" || exit 1
+    # 锁已写下: 从这一刻起, 任何非正常退出都要靠 EXIT trap 把它撤掉。
+    _BROADCAST_ARMED=1
     PUSH_INSTRUCTION="推送: 执行 python3 scripts/push_report.py --date $SCAN_DATE --broadcast (本轮是定时任务, 全量范围已声明并写入范围锁; 不要自行判断渠道, 不要改用 --review-channel)。"
     ;;
   review)
@@ -158,6 +167,25 @@ case "$SCOPE" in
     PUSH_INSTRUCTION="推送: 本轮未声明推送范围, **严禁 --broadcast**(全量推送只能由定时任务路径声明)。若本轮由用户在某个渠道发起, 只能发那个渠道: 执行 python3 scripts/push_report.py --date $SCAN_DATE --review-channel <渠道>; 若本轮与任何渠道会话无关, 就只生成日报, 不要推送。"
     ;;
 esac
+
+# ---- 广播锁生命周期: 只有本轮真正跑完才保留 ----
+# 10-22 审计发现(红线): 撤销逻辑原先只挂在"产物校验 MISSING"这一条分支上。
+# 于是**其它所有提前退出**都会把 broadcast 锁留在盘上, 且它 60 分钟内一直放行全量推送:
+#   · 网关预检不就绪直接 exit 1(run_scan.sh 的 GATEWAY_WAIT 分支)
+#   · 脚本被 SIGTERM/SIGKILL/OOM 杀掉
+#   · 任何以后新增的 exit 1 分支
+# 这正是 10-20 钉钉误推事故的重演路径, 只是触发点从"跑批没跑完"换成"网关抖动"。
+# 现在改成 EXIT trap: 只要本轮没走到"done", 退出(含超时/信号/预检失败)一律撤销。
+_BROADCAST_ARMED=0
+_revoke_broadcast_lock() {
+  if [ "$SCOPE" = "broadcast" ] && [ "$_BROADCAST_ARMED" = "1" ]; then
+    if "$PY" "$REPO/scripts/push_scope.py" --date "$SCAN_DATE" --clear >/dev/null 2>&1; then
+      echo "[$(date '+%F %T')] run_scan: 本轮未正常完成, 已撤销全量声明(不留残锁)"
+    fi
+  fi
+}
+trap _revoke_broadcast_lock EXIT
+trap 'exit 143' INT TERM
 
 case "$MODE" in
   am) PROMPT="生成 $SCAN_DATE 的政策监测日报: 仅检索外国政府动植物疫情管控政策变化, 完成政策抽取、核验、对华影响研判, 然后用 scripts/report.py --date $SCAN_DATE --excel --docx 生成 Markdown+Excel+Word 政策日报(两个开关都要带, 漏 --docx 就不会有 Word 简报)。$PUSH_INSTRUCTION" ;;
@@ -236,9 +264,9 @@ if [ -n "${HERMES_RUN_CMD:-}" ]; then
   # Agent 放弃时退出码仍是 0(10-22 实测: 检索卡死 44 分钟, Agent 自行放弃, rc=0),
   # run_scan.sh 直接透传 → cron 记成功 → **没有任何告警**, 故障静默一整天。
   # 所以跑完必须核对这一轮到底产出了什么, 且产物必须是"这一轮新生成"的。
-  REPORT_MD="$REPO/data/reports/$SCAN_DATE-policy-report.md"
-  PUSH_FLAG="$REPO/data/reports/.pushed/$SCAN_DATE.flag"
-  PENDING_FLAG="$REPO/data/reports/.review-pending/$SCAN_DATE.flag"
+  REPORT_MD="$DATA_DIR/reports/$SCAN_DATE-policy-report.md"
+  PUSH_FLAG="$DATA_DIR/reports/.pushed/$SCAN_DATE.flag"
+  PENDING_FLAG="$DATA_DIR/reports/.review-pending/$SCAN_DATE.flag"
   MISSING=""
   _fresh "$REPORT_MD" || MISSING="$MISSING 日报Markdown"
   case "$SCOPE" in
@@ -249,7 +277,7 @@ if [ -n "${HERMES_RUN_CMD:-}" ]; then
   # 存档量上限(2026-10-22): 正常一轮只存 2 个文件(10-21 实测); 存了 20+ 个说明
   # Agent 在穷举下载(逐条下 WTO 通报 PDF 核发布日期)—— 10-22 就是这么跑的,
   # 40 分钟没完。这道终检兜住"绕过 collect.py 直接往 raw 目录倾倒"的情况。
-  RAW_N="$(find "$REPO/data/raw/$SCAN_DATE" -maxdepth 1 -type f ! -name '*.meta.json' 2>/dev/null | wc -l | tr -d ' ')"
+  RAW_N="$(find "$DATA_DIR/raw/$SCAN_DATE" -maxdepth 1 -type f ! -name '*.meta.json' 2>/dev/null | wc -l | tr -d ' ')"
   if [ "${RAW_N:-0}" -gt 12 ]; then
     MISSING="$MISSING 存档量超限(当轮 ${RAW_N} 个文件 > 12, 疑似穷举下载)"
   fi
@@ -273,6 +301,8 @@ if [ -n "${HERMES_RUN_CMD:-}" ]; then
   # 校验已确认 Markdown 存在, 此时补出来的 Word 才是真日报(而不是空壳)。
   "$PY" "$REPO/scripts/report.py" --date "$SCAN_DATE" --ensure-docx \
     || echo "[$(date '+%F %T')] run_scan: Word 日报补生成失败(推送将只带正文)"
+  # 产物校验通过 = 本轮真的跑完了, 广播声明可以保留给之后的推送/补跑。
+  _BROADCAST_ARMED=0
   echo "[$(date '+%F %T')] run_scan mode=$MODE date=$SCAN_DATE done rc=0 (产物校验通过)"
   exit 0
 fi

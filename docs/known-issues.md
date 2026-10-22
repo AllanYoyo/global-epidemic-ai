@@ -309,6 +309,26 @@
   全量 179 → **181 条全绿**。生产实机复验: 26 条全部正确解析, 收敛出 17 条候选,
   **零 PDF 下载**。
 
+#### G13 · `run_scan.sh` 产物校验路径写死 `repo/data`, 与其余脚本的 `EPIDEMIC_DATA_DIR` 不同源
+- 位置: `scripts/run_scan.sh`(`REPORT_MD` / `PUSH_FLAG` / `PENDING_FLAG` / `RAW_N` 四处)
+- **不一致的证据(10-22 审计实测)**: 全仓库只有 `collect.py` 与 `normalize.py` 读
+  `EPIDEMIC_DATA_DIR` / `EPIDEMIC_DB`; `report.py` / `report_docx.py` / `push_report.py` /
+  `push_scope.py` / `diagnose_push.py` 都 `from normalize import DATA_DIR`(同源, 没问题);
+  **只有 `run_scan.sh` 的产物校验绕开了它, 直接拼 `$REPO/data/...`**。
+- **后果**: `README.md:129-130` 明确教生产设 `EPIDEMIC_DATA_DIR=/opt/global-epidemic-ai/data`。
+  一旦照做, Agent 的日报落在 `$EPIDEMIC_DATA_DIR/reports/`, 而校验盯的是
+  `$REPO/data/reports/` → 跑批**每一轮**都判 `缺少: 日报Markdown` 并退出 1, 即 100% 失败,
+  且失败信息指向错误原因。生产现在**只是因为恰好没设这两个变量**(数据落在 repo 内)才没炸。
+- **现场佐证**: 生产 `~/.hermes/.env` 里没有 `EPIDEMIC_*`, 而 repo 外
+  `/opt/global-epidemic-ai/database/epidemic.db`(24KB, 0 行, 连 `first_seen` 列都没有)
+  与 `/opt/global-epidemic-ai/data/raw|reports`(停在 09 月)就是**当年设过、后来被撤**留下的孤儿数据。
+  两个路径都存在且内容分叉, 正是这个不一致的历史后果。
+- **修法**: `run_scan.sh` 统一 `DATA_DIR="${EPIDEMIC_DATA_DIR:-$REPO/data}"`, 四处校验全走它。
+- **配套(同日发现, 环境层)**: 生产 crontab 被写成 `30 23 * * *` 且带一行
+  `SCAN_TIMEOUT=900` —— 与文档/`run_scan.sh` 头注释的 07:30 不符, 且该变量会**静默把
+  所有定时跑批压到 15 分钟**上限(历史成功轮约 5 分钟, 慢一点就必超时)。
+  已改回 `30 7 * * *` 并删除该行; crontab 里不再放任何 `SCAN_*` / `HERMES_*`。
+
 #### G3 · 诊断/更新脚本自身有三个坑, 现场第一次跑就卡住 → 全部修掉
 - 位置: `scripts/deploy_update.sh`; `scripts/diagnose_push.py`; `scripts/buildinfo.py`;
   `.gitignore`; `scripts/push_report.py`(`.pushed` 标记)

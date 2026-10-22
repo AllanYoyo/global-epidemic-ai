@@ -140,6 +140,18 @@ class SourceDomainTests(unittest.TestCase):
     def test_official_domain_tier1_passes(self):
         self.assertEqual(self.n.validate(dict(self.base)), [])
 
+    def test_url_without_scheme_rejected(self):
+        """2026-10-22 审计红线: 缺 scheme 的 URL 取不到 host, 会同时短路
+        「第三方黑名单」与「tier=1 必须官方域」两处判定 —— 拉黑的 tbtsps.cn 写成
+        `tbtsps.cn/x.html` 就能以 tier=1 + verified 直接入库。必须 fail-closed。"""
+        for url in ("tbtsps.cn/x.html", "freyrsolutions.com/notice/1", "https://"):
+            e = _source_event(
+                source={"tier": 1, "name": "n", "url": url, "quote": "q"},
+                verification_status="verified")
+            errs = self.n.validate(dict(e))
+            self.assertTrue(errs, "缺 scheme 的 URL 竟被放行: %s" % url)
+            self.assertTrue(any("scheme" in m for m in errs), errs)
+
     def test_third_party_host_rejected(self):
         # 2026-10-19 文案修正: 行为不变(第三方来源整条拒收不入库), 只是把错误文案
         # 改成与实现一致 —— 原文案写"[线索] ... 已将 tier 降为 3", 让人以为会入库。

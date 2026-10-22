@@ -34,6 +34,7 @@
   python scripts/push_scope.py --print-label --review-channel wechat   # 只打印显示名
 """
 import argparse
+import datetime
 import os
 import shutil
 import sys
@@ -42,6 +43,20 @@ from normalize import DATA_DIR, biz_now, biz_today
 
 # 范围锁目录(与 .pushed / .review-pending 同级)
 SCOPE_DIR = os.path.join(DATA_DIR, "reports", ".push-scope")
+
+# 全量声明锁的有效期(分钟)。超过即视为"过期声明", 不再放行 --broadcast。
+#
+# 为什么必须有有效期(2026-10-22 生产现场):
+#   cron 在跑批**开始**时就写下 broadcast 锁, 但那一轮可能根本没跑完 ——
+#   10-22 实测: 检索阶段卡死 44 分钟, Agent 自行放弃, rc=0 假成功, 推送从未发生;
+#   而锁仍留在盘上, 于是当天任何时候 `push_report.py --broadcast` 都会被它放行 →
+#   日报群发到钉钉。**这正是 10-20 事故的重演路径**, 且 cron 上下文校验拦不住
+#   (锁是 cron 自己写的, 来源看着就合法)。
+#   加有效期后: 过期声明不再放行, 必须重新声明(人工运维要写明依据并留痕)。
+#   60 分钟 = 跑批硬上限(SCAN_TIMEOUT 40 分钟) + 推送余量; 覆盖"这一轮还在进行"
+#   的合法窗口, 又不会让"早上那轮没跑完"的残锁在下午继续放行。
+#   另一道兜底在 run_scan.sh: 那一轮没推成就**当场撤销声明**, 锁不留到第二天。
+SCOPE_MAX_AGE_MINUTES = 60
 
 # ---- 渠道分两类 ----
 # ① webhook 型: 脚本自己 POST(企业微信群机器人 / 钉钉机器人 / SMTP 邮箱)
@@ -200,6 +215,38 @@ def read_scope(date):
     except OSError:
         return None
     return data or None
+
+
+def scope_age_minutes(scope):
+    """锁声明至今过了多少分钟; 解析不出 declared_at 返回 None。
+
+    锁里的 declared_at 是 biz_now() 写的东八区时间戳, 这里按同一口径相减,
+    不做时区换算(避免服务器本地时区是 UTC 时算偏 8 小时)。
+    """
+    if not scope:
+        return None
+    raw = (scope.get("declared_at") or "").strip()
+    if not raw:
+        return None
+    try:
+        declared = datetime.datetime.strptime(raw[:19], "%Y-%m-%dT%H:%M:%S")
+    except (ValueError, TypeError):
+        return None
+    now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
+    return (now - declared).total_seconds() / 60.0
+
+
+def scope_is_stale(scope, max_minutes=None):
+    """锁是否已过期(声明太久之前, 多半是"那轮没跑完"留下的残锁)。
+
+    解析不出声明时间时**不判过期** —— 旧格式锁(没有 declared_at)继续按原逻辑走,
+    不因为加了这个校验就把历史锁全作废。
+    """
+    limit = SCOPE_MAX_AGE_MINUTES if max_minutes is None else max_minutes
+    age = scope_age_minutes(scope)
+    if age is None:
+        return False
+    return age > limit
 
 
 def write_scope(date, scope, channel=None, source="", note=""):

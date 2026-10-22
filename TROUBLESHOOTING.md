@@ -103,8 +103,14 @@ python -c "import sqlite3;con=sqlite3.connect('database/epidemic.db');print(con.
 - **`.pushed` 标志文件导致不推送**：确属当天已发过的记录，删除 `data/reports/.pushed/<日期>.flag` 或直接用 `--force`（推荐后者）。
 - **日报只有正文、没有 Word 附件**（2026-10-20 现场）：Word 日报由 `report.py --docx` 生成，而这一步是 **Agent 照 prompt 执行**的 —— 实测跑批漏了 `--docx`，只产出 `.md/.xlsx/.csv`；推送侧原来还会**静默跳过附件**，事后从推送记录里完全看不出来。
   - 查产物：`ls -la data/reports/<日期>-policy-report.*`（缺 `.docx` 就是没生成）。
-  - 补生成：`python scripts/report.py --date <YYYY-MM-DD> --ensure-docx`（缺失才补，幂等）。
+  - 补生成：`python scripts/report.py --date <YYYY-MM-DD> --ensure-docx`（缺失才补，幂等；**同源 md 都没有则不补** —— 补出来是空壳，只会掩盖失败）。
   - 现在两道自动兜底：跑批结束（`run_scan.sh`）与推送前（`push_report.py`）各补一次；补不上会在正文页脚写「⚠️ 本次无 Word 附件」并在日志打 `[WARN]`。
+- **跑批检索失败 / 报"成功"却什么都没产出**（2026-10-22 现场）：`rc=0` 但库里没记录、`data/raw/<日期>/` 不存在、报告只剩一个兜底生成的 docx。
+  - 先看跑批日志尾部：`tail -40 /opt/global-epidemic-ai/logs/scan.log`；再看网关日志 `journalctl -u hermes-gateway --since '<今天 07:00>'`。
+  - 典型征兆：`web_search ... 50 times ... runaway search loop` + `CDP supervisor ... connect failed (attempt n/5)`。
+  - **现在跑批会自己报失败**：产物校验不过 → `[失败] 本轮扫描未完成` + 退出码 1（2026-10-22 之前是 rc=0 假成功，故障静默一整天）。
+  - 手工重跑：**默认不推送**（手动上下文 = 非 cron → `scope=none`），只生成日报；要推送见上一节的闸门流程。
+- **网关不就绪 / `Gateway draining` / 浏览器 CDP 连不上**：`hermes status` 看 Gateway 行。系统级与用户级**不要同时启用**（用户级拿不到 `/root/.hermes/gateway.lock` 会陷入 `activating (auto-restart)` 崩溃循环，每几秒空转一次）。CDP 端口残留（`connect failed` 的端口上无监听）需要**重启网关**才能清掉，单纯杀 `browser_harness` 守护进程没用（它们 RSS 接近 0，不是内存大头）。
 
 ---
 

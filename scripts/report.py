@@ -326,6 +326,14 @@ def ensure_docx(date, db_path=None):
     if os.path.isfile(path) and os.path.getsize(path) > 0:
         print("[OK] Word 日报已存在: %s" % path)
         return 0
+    # 同源的 Markdown 都没有 → 整份日报根本没生成, 补一个 Word 只会造出"空壳日报"
+    # 掩盖真实失败(10-22 实测: 检索全废、一条没入库, 却兜底生成了 62KB 的 Word,
+    # 看上去像"报告已出", 实际当天 0 条记录 —— 比缺文件更坏)。这种情况报失败。
+    md_path = os.path.join(DATA_DIR, "reports", "%s-policy-report.md" % date)
+    if not (os.path.isfile(md_path) and os.path.getsize(md_path) > 0):
+        print("[WARN] 当日日报未生成(缺 %s), 不补 Word 日报 —— "
+              "补出来会是空壳, 掩盖真实失败。" % os.path.basename(md_path))
+        return 1
     print("[提示] Word 日报缺失, 正在补生成: %s" % path)
     try:
         import report_docx

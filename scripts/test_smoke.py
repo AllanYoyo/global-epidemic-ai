@@ -1392,6 +1392,11 @@ class ReportAttachmentTests(unittest.TestCase):
             with open(out, "wb") as f:
                 f.write(b"docx")
             return out
+        # Word 是 Markdown 的同源产物: md 在才补 docx(md 都没有 → 补出来是空壳)
+        os.makedirs(os.path.join(self.tmp, "reports"), exist_ok=True)
+        with open(os.path.join(self.tmp, "reports", "2026-10-20-policy-report.md"), "w",
+                  encoding="utf-8") as f:
+            f.write("# 日报")
         with mock.patch.object(self.report, "DATA_DIR", self.tmp), \
              mock.patch.dict(sys.modules, {"report_docx": mock.Mock(build=fake_build)}):
             with redirect_stdout(io.StringIO()) as buf:
@@ -1399,6 +1404,17 @@ class ReportAttachmentTests(unittest.TestCase):
         self.assertEqual(rc, 0, buf.getvalue())
         self.assertTrue(os.path.isfile(
             os.path.join(self.tmp, "reports", "2026-10-20-policy-report.docx")))
+
+    def test_ensure_docx_not_generated_without_md(self):
+        # 整份日报都没生成(检索全废)时补 Word = 造空壳掩盖失败(10-22 实测:
+        # 兜底生成了 62KB 的空 Word, 看着像"报告已出", 实际当天 0 条记录)
+        with mock.patch.object(self.report, "DATA_DIR", self.tmp):
+            with redirect_stdout(io.StringIO()) as buf:
+                rc = self.report.ensure_docx("2026-10-22")
+        self.assertEqual(rc, 1)
+        self.assertIn("不补 Word", buf.getvalue())
+        self.assertFalse(os.path.exists(os.path.join(
+            self.tmp, "reports", "2026-10-22-policy-report.docx")))
 
     def test_ensure_docx_reports_failure(self):
         def boom(*a, **k):
@@ -1487,6 +1503,137 @@ class ReportAttachmentTests(unittest.TestCase):
             self.pr.send_hermes("正文", "weixin", missing)
         self.assertIn("附件缺失", buf.getvalue())
         self.assertNotIn("MEDIA:", rec["input"].decode("utf-8"))
+
+
+class ScanFailureGuardTests(unittest.TestCase):
+    """扫描失败的守门(2026-10-22 生产现场)。
+
+    10-22 实测: 检索阶段卡死 44 分钟, Agent 自行放弃, **rc=0 假成功** ——
+    一条没入库、一份日报没出, 监控完全看不出来; 而 cron 早上留下的 broadcast 锁
+    还留在盘上, 当天任何时候 `push_report.py --broadcast` 都会被它放行 → 群发到
+    钉钉(**10-20 事故的重演路径**, 且 cron 上下文校验拦不住: 锁是 cron 写的)。
+    """
+
+    def setUp(self):
+        import push_report
+        import push_scope
+        import report
+        self.pr = push_report
+        self.ps = push_scope
+        self.report = report
+        self.tmp = tempfile.mkdtemp(prefix="scan-guard-")
+        self.env_backup = dict(os.environ)
+        os.environ["DINGTALK_WEBHOOK"] = "https://test.example/dingtalk"
+        os.environ.pop("REVIEW_CHANNEL", None)
+        self.sent = []
+        self._patches = [
+            mock.patch.object(self.pr, "PUSH_FLAG_DIR", os.path.join(self.tmp, ".pushed")),
+            mock.patch.object(self.pr, "PENDING_DIR", os.path.join(self.tmp, ".pending")),
+            mock.patch.object(self.ps, "SCOPE_DIR", os.path.join(self.tmp, ".scope")),
+            mock.patch.object(self.pr, "send_dingtalk",
+                              side_effect=lambda t, title: self.sent.append(("dingtalk", t))),
+            mock.patch.object(self.pr.report, "collect",
+                              return_value={"new": [], "active": [], "covered": []}),
+            mock.patch.object(self.pr.report, "ensure_docx", return_value=0),
+        ]
+        for p in self._patches:
+            p.start()
+
+    def tearDown(self):
+        for p in self._patches:
+            p.stop()
+        os.environ.clear()
+        os.environ.update(self.env_backup)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write_lock(self, date, scope, declared_at, source="run_scan.sh:policy"):
+        """直接写锁文件(可以指定 declared_at, 用来造"过期残锁")。"""
+        os.makedirs(self.ps.SCOPE_DIR, exist_ok=True)
+        with open(self.ps.scope_path(date), "w", encoding="utf-8") as f:
+            f.write("scope=%s\nsource=%s\ndeclared_at=%s\n" % (scope, source, declared_at))
+
+    def _write_lock_aged(self, date, scope, minutes):
+        """按 biz_now() 回拨 N 分钟造锁 —— 不依赖真实时刻, 测试稳定。"""
+        dt = (datetime.datetime.utcnow() + datetime.timedelta(hours=8)
+              - datetime.timedelta(minutes=minutes))
+        self._write_lock(date, scope, dt.strftime("%Y-%m-%dT%H:%M:%S"))
+
+    def _run_push(self, args):
+        buf = io.StringIO()
+        with mock.patch("sys.argv", ["push_report.py"] + args), \
+                redirect_stdout(buf):
+            try:
+                rc = self.pr.main()
+            except SystemExit as e:
+                rc = e.code
+        return rc, buf.getvalue()
+
+    # ---- 残留广播锁(红线) ----
+
+    def test_stale_broadcast_lock_is_refused(self):
+        # cron 早上声明、那一轮其实没跑完 → 锁留在盘上; 它不得放行全量推送
+        self._write_lock_aged("2026-10-22", "broadcast", 180)
+        rc, out = self._run_push(["--date", "2026-10-22", "--broadcast"])
+        self.assertNotEqual(rc, 0, out)
+        self.assertEqual(self.sent, [], out)
+        self.assertIn("过期", out)
+
+    def test_lock_within_window_is_allowed(self):
+        # "这一轮还在进行"的合法窗口内, 锁仍要放行(否则定时任务自己会被卡住)
+        self._write_lock_aged("2026-10-22", "broadcast", 5)
+        rc, out = self._run_push(["--date", "2026-10-22", "--broadcast"])
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(self.sent, out)
+
+    def test_fresh_broadcast_lock_is_allowed(self):
+        self.ps.write_scope("2026-10-22", "broadcast", source="unit")
+        rc, out = self._run_push(["--date", "2026-10-22", "--broadcast"])
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(self.sent, out)
+
+    def test_scope_age_and_stale(self):
+        from normalize import biz_now
+        fresh = {"declared_at": biz_now()}
+        self.assertLess(self.ps.scope_age_minutes(fresh), 1)
+        self.assertFalse(self.ps.scope_is_stale(fresh))
+        # 解析不出声明时间的旧格式锁不判过期(不因加校验把历史锁全作废)
+        self.assertIsNone(self.ps.scope_age_minutes({"scope": "broadcast"}))
+        self.assertFalse(self.ps.scope_is_stale({"scope": "broadcast"}))
+
+    # ---- 编排层静态回归 ----
+
+    def _run_scan_text(self):
+        with open(os.path.join(REPO, "scripts", "run_scan.sh"), encoding="utf-8") as f:
+            return f.read()
+
+    def test_run_scan_validates_artifacts(self):
+        # 退出码不能信(Agent 放弃时 rc=0) → 必须核对产物, 且产物得是这一轮新生成的
+        text = self._run_scan_text()
+        self.assertIn("产物校验", text)
+        self.assertIn("_fresh", text)
+        self.assertIn("本轮扫描未完成", text)
+
+    def test_run_scan_has_timeout_watchdog(self):
+        # 10-22 白烧 44 分钟 → 跑批必须有硬上限
+        text = self._run_scan_text()
+        self.assertIn("SCAN_TIMEOUT", text)
+        self.assertIn("timeout -k 30", text)
+
+    def test_run_scan_prechecks_gateway(self):
+        # 10-20 实测: 撞上网关重启(Gateway draining)时整轮扫描直接废掉
+        text = self._run_scan_text()
+        self.assertIn("HERMES_HEALTH_CMD", text)
+        self.assertIn("网关健康预检", text)
+
+    def test_skill_has_tool_discipline(self):
+        # 10-22 的直接教训: 取数要有降级顺序与搜索预算, 否则 50 次打转到撞上限
+        with open(os.path.join(REPO, "skills", "global-policy-search", "SKILL.md"),
+                  encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn("取数工具纪律", text)
+        self.assertIn("失败 2 次就换", text)
+        self.assertIn("搜索预算", text)
+        self.assertIn("collect.py", text)
 
 
 class BriefTextFocusTests(unittest.TestCase):

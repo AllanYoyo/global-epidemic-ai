@@ -217,6 +217,60 @@
 - 回归: 自测 151 → 153 条全绿(新增"当前代码有 scope= 不误报"与"当前代码没有
   scope= 仍报警"两条)。
 
+### 2026-10-22 检索失败事故 (G9)
+
+#### G9 · 跑批"假成功" + 残留广播锁放行全量推送 + 取数无降级顺序
+- 位置: `scripts/run_scan.sh`(看门狗 / 产物校验 / 网关预检 / 失败即撤销声明);
+  `scripts/push_scope.py`(`SCOPE_MAX_AGE_MINUTES` / `scope_age_minutes` / `scope_is_stale`);
+  `scripts/push_report.py`(`--broadcast` 过期校验); `scripts/report.py`(`ensure_docx` 语义);
+  `skills/global-policy-search/SKILL.md`(取数工具纪律)
+- **现场事实(10-22 07:30 定时跑批)**: 检索阶段卡死 44 分钟, Agent 自行放弃, 但
+  **rc=0** —— 一条没入库、一份日报没出(raw 目录都没有), 监控完全看不出来。
+  日志只有一行 `I stopped retrying because I kept running web_search 50 times`。
+  网关日志同时段: `CDP supervisor ... connect failed (attempt 1..5/5): Connect call
+  failed ('127.0.0.1', 37149)` ×4 组, 随后 `Blocked web_search: this turn has
+  already made 50 web searches ... runaway search loop`。
+- **四个代码缺陷(缺一不可)**:
+  | # | 缺陷 | 后果 |
+  |---|---|---|
+  | ① | `run_scan.sh` 直接透传 Agent 退出码, **不校验产物** | Agent 放弃也是 rc=0 → cron 记成功 → **故障静默一整天** |
+  | ② | cron 早上写下的 broadcast 锁**没有有效期** | 那一轮没推成, 锁留在盘上 → 当天任何时候 `push_report.py --broadcast` 都被放行 → 群发钉钉(**10-20 事故重演**, 且 cron 上下文校验拦不住: 锁是 cron 写的) |
+  | ③ | 取数**没有降级顺序与搜索预算**(skill 未约束) | CDP 连不上就死磕同一工具, 50 次打转到撞上限, 白烧 44 分钟 |
+  | ④ | `--ensure-docx` 在**整份日报都没生成**时也补 Word | 补出 62KB **空壳日报**, 看着像"报告已出", 实际当天 0 条记录 —— 比缺文件更坏 |
+- **修法**:
+  - `run_scan.sh`: 跑批加 `timeout` 硬上限(默认 2400s); 跑完**校验产物**
+    (日报 md + 按范围锁决定的推送/待审标记, 且必须是"这一轮新生成"的, 用 mtime 判定);
+    校验不过 → `[失败]` + 退出码 1(不再假成功); 校验通过才补 Word。
+    另加**网关健康预检**(`hermes status`, 最多等 180s): 10-20 实测撞上网关重启
+    (`Gateway draining`)时整轮扫描 8 秒就废了。
+  - **失败即撤销声明**: 那一轮没推成 → `run_scan.sh` 当场 `push_scope.py --clear`。
+  - `push_scope.py`: 广播锁加 `SCOPE_MAX_AGE_MINUTES=60`(跑批硬上限 40 分钟 + 推送余量);
+    `scope_is_stale()` 判定过期; 解析不出 `declared_at` 的旧锁不判过期(不误伤历史锁)。
+  - `push_report.py`: `--broadcast` 遇过期锁 → 拒绝并提示重新声明(写明依据)。
+  - `report.py`: `ensure_docx` 改为**同源 md 缺失就不补**(补出来是空壳, 掩盖失败)。
+  - `skills/global-policy-search/SKILL.md`: 新增「取数工具纪律」——
+    优先级 `collect.py` 直抓 > `web_fetch` > 浏览器(**sources.yaml 里已���官方入口 URL,
+    不要用搜索去找官网**); 同一工具失败 2 次就换; 单轮 `web_search` ≤ 15 次;
+    浏览器失败就放弃浏览器; 宁可少收也不要卡死。
+- **回归**: 自测 153 → 162 条全绿(新增 `ScanFailureGuardTests` 9 条: 过期锁拒绝/
+  窗口内锁放行/新鲜锁放行/锁龄计算/产物校验/看门狗/网关预检/skill 纪律/空壳不补)。
+
+#### G10 · 环境层: 网关双服务冲突 + 浏览器 CDP 端口残留(非本仓库代码, 但影响跑批)
+- **现场事实**: 系统级 `hermes-gateway.service` 在跑(自 10-19 23:30 UTC 起), 同时
+  **用户级** `~/.config/systemd/user/hermes-gateway.service` 处于 `activating (auto-restart)`
+  崩溃重启循环(`status=75` = 锁 `/root/.hermes/gateway.lock` 被系统级那个占着)。
+  后果: 每隔几秒空转一次(`CPU: 3.730s`/次), 并让"网关是否就绪"难以判断。
+- **CDP 连不上的真因**: 网关里的 browser supervisor 记着一个**已死的 CDP 端口**
+  (37149) —— 该端口上没有任何进程监听(`ss -ltnp` 只有网关 38929 与手工起的
+  cdptest chrome 39999)。 supervisor 反复重连 5 次失败后放弃。
+  另有 4 个 14 天前遗留的孤儿 `browser_harness.daemon`(ppid=1, RSS 0–76KB)。
+- **内存真相(与"6 个浏览器守护进程吃掉 1975MB"的说法不同)**: 真正的内存大头是
+  **网关主进程本身**(RSS 601MB, systemd 口径 923MB, 已连续运行 2 天);
+  那 6 个 `browser_harness` 里 4 个是 RSS≈0 的空壳, 2 个新的各 40–45MB。
+  杀掉它们最多释放约 85MB, **且不会修好 CDP 端口残留**。
+- **处置**: 禁用用户级服务(只保留系统级那个); 重启系统级网关 —— 一次同时解决
+  ①释放 601MB ②清掉陈旧 CDP 端口记录 ③清掉卡死的 44 分钟会话与 50 次搜索计数。
+
 #### G3 · 诊断/更新脚本自身有三个坑, 现场第一次跑就卡住 → 全部修掉
 - 位置: `scripts/deploy_update.sh`; `scripts/diagnose_push.py`; `scripts/buildinfo.py`;
   `.gitignore`; `scripts/push_report.py`(`.pushed` 标记)

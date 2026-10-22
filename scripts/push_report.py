@@ -100,11 +100,11 @@ import report
 from buildinfo import fingerprint as code_fingerprint
 from normalize import DATA_DIR, biz_now, biz_today
 from push_scope import (HERMES_CHANNEL_MAP, HERMES_COMMAND, REVIEW_CHANNEL_ALIASES,
-                        REVIEW_CHANNEL_ENV, REVIEW_CHANNEL_MAP,
+                        REVIEW_CHANNEL_ENV, REVIEW_CHANNEL_MAP, SCOPE_MAX_AGE_MINUTES,
                         channel_available, channel_key_for_label, channel_kind,
                         channel_label, channel_unavailable_hint, clear_scope,
                         describe_scope, hermes_broadcast_channels, load_hermes_env,
-                        read_scope, write_scope)
+                        read_scope, scope_age_minutes, scope_is_stale, write_scope)
 
 PUSH_FLAG_DIR = os.path.join(DATA_DIR, "reports", ".pushed")
 PENDING_DIR = os.path.join(DATA_DIR, "reports", ".review-pending")
@@ -455,6 +455,25 @@ def main():
             print("         · 人工声明: python scripts/push_scope.py --date %s --broadcast --source manual"
                   % args.date)
             print("       声明后再执行 push_report.py --date %s --broadcast。" % args.date)
+            return 1
+        # 过期声明不放行(2026-10-22 加固, 红线级): cron 在跑批**开始**时就写下
+        # broadcast 锁, 但那一轮可能根本没跑完(10-22 实测: 检索卡死 44 分钟, Agent
+        # 放弃, rc=0 假成功, 推送从未发生)。锁留在盘上, 当天任何时候执行
+        # `push_report.py --broadcast` 都会被它放行 → 日报群发到钉钉 ——
+        # **这正是 10-20 事故的重演路径**, 且 cron 上下文校验拦不住(锁是 cron 写的)。
+        if scope_is_stale(lock):
+            age = scope_age_minutes(lock)
+            print("[错误] --broadcast 被拒绝: 本轮的全量声明已过期"
+                  "(声明于 %s, 距今约 %.0f 分钟, 上限 %d 分钟)。"
+                  % ((lock or {}).get("declared_at") or "-", age or 0,
+                     SCOPE_MAX_AGE_MINUTES))
+            print("       过期声明通常意味着: cron 那一轮跑批没跑完(检索失败/超时), "
+                  "锁却留在盘上。")
+            print("       留着它, 人工补跑就会直接群发到所有渠道 —— 10-20 事故的重演路径。")
+            print("       确需全量补发(人已确认扩散), 重新声明一次:")
+            print("         python scripts/push_scope.py --date %s --broadcast "
+                  "--source manual:运维补发" % args.date)
+            print("         python scripts/push_report.py --date %s --broadcast" % args.date)
             return 1
     elif lock_scope == "review" and review_channel and lock_label and not args.review_approved:
         # 锁里记着审阅渠道, 命令行却指定了别的渠道 → 拒绝(防"同一轮发到两个渠道")。

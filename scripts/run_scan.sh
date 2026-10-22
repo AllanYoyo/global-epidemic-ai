@@ -161,17 +161,99 @@ STAMP="$(date '+%F %T')"
 echo "[$STAMP] run_scan mode=$MODE date=$SCAN_DATE tz=$TZ scope=$SCOPE src=$SCOPE_SOURCE start"
 cd "$REPO"  # agent 依赖仓库相对路径(config/sources.yaml, scripts/*)
 
+# ---- 跑批开始的时间戳: 产物新鲜度判定用(同名文件可能是上一轮留下的) ----
+SCAN_START_EPOCH="$(date +%s)"
+
+# 产物是否"这一轮才生成的": 存在、非空、且 mtime 不早于跑批开始。
+_fresh() {
+  [ -s "$1" ] || return 1
+  local m
+  m="$(stat -c %Y "$1" 2>/dev/null)" || return 1
+  [ "$m" -ge "$SCAN_START_EPOCH" ] || return 1
+  return 0
+}
+
 if [ -n "${HERMES_RUN_CMD:-}" ]; then
-  eval "${HERMES_RUN_CMD/\{PROMPT\}/$PROMPT}"
+  # ---- 网关健康预检(2026-10-22 加固) ----
+  # 10-20 实测: cron 恰好撞上网关重启(Gateway draining), 整轮扫描 8 秒就废了。
+  # 跑批前先探一次; 不就绪就短暂等待后重试(重启窗口通常几十秒),
+  # 一直不就绪就明确失败退出 —— 而不是把一整轮扫描耗在必然失败的重试上。
+  HEALTH_CMD="${HERMES_HEALTH_CMD:-hermes status}"
+  if command -v hermes >/dev/null 2>&1; then
+    GATEWAY_WAIT="${GATEWAY_WAIT:-180}"
+    WAITED=0
+    while :; do
+      GW_LINE="$(timeout 20 $HEALTH_CMD 2>&1 | grep -E 'Gateway:' | head -1)"
+      if [ -z "$GW_LINE" ]; then
+        echo "[$(date '+%F %T')] 网关状态无法解析, 跳过预检继续"
+        break
+      fi
+      case "$GW_LINE" in
+        *"not running"*|*"draining"*|*"stopped"*|*"failed"*|*"not running"*|*unavailable*)
+          if [ "$WAITED" -ge "$GATEWAY_WAIT" ]; then
+            echo "[失败] 网关在 ${GATEWAY_WAIT}s 内始终不就绪($GW_LINE), 本轮放弃。"
+            echo "       10-20 实测: 撞上网关重启(Gateway draining)时整轮扫描直接废掉。"
+            exit 1
+          fi
+          sleep 15
+          WAITED=$((WAITED + 15))
+          echo "[$(date '+%F %T')] 网关未就绪($GW_LINE), 等待重试... ${WAITED}s/${GATEWAY_WAIT}s"
+          ;;
+        *) break ;;   # running / 解析不出关键字 → 视为就绪, 不拦
+      esac
+    done
+  else
+    echo "[WARN] 找不到 hermes 命令, 跳过网关健康预检"
+  fi
+
+  # ---- 看门狗: 跑批超时直接终止 ----
+  # 10-22 实测: 检索阶段卡死 44 分钟(web_search 撞单轮上限, Agent 反复重试到
+  # 自行放弃), 白烧 40 多分钟 CPU。给硬上限, 超时即 kill 并报失败。
+  SCAN_TIMEOUT="${SCAN_TIMEOUT:-2400}"
+  echo "[$(date '+%F %T')] 开始扫描(上限 ${SCAN_TIMEOUT}s)"
+  eval "timeout -k 30 ${SCAN_TIMEOUT} ${HERMES_RUN_CMD/\{PROMPT\}/$PROMPT}"
   RC=$?
+  if [ "$RC" -eq 124 ] || [ "$RC" -eq 137 ]; then
+    echo "[失败] 扫描超时(${SCAN_TIMEOUT}s), 已终止"
+    RC=1
+  fi
+
+  # ---- 产物校验(2026-10-22 加固): 退出码不能信, 只能信产物 ----
+  # Agent 放弃时退出码仍是 0(10-22 实测: 检索卡死 44 分钟, Agent 自行放弃, rc=0),
+  # run_scan.sh 直接透传 → cron 记成功 → **没有任何告警**, 故障静默一整天。
+  # 所以跑完必须核对这一轮到底产出了什么, 且产物必须是"这一轮新生成"的。
+  REPORT_MD="$REPO/data/reports/$SCAN_DATE-policy-report.md"
+  PUSH_FLAG="$REPO/data/reports/.pushed/$SCAN_DATE.flag"
+  PENDING_FLAG="$REPO/data/reports/.review-pending/$SCAN_DATE.flag"
+  MISSING=""
+  _fresh "$REPORT_MD" || MISSING="$MISSING 日报Markdown"
+  case "$SCOPE" in
+    broadcast) _fresh "$PUSH_FLAG" || MISSING="$MISSING 推送标记(.pushed)" ;;
+    review)    _fresh "$PENDING_FLAG" || MISSING="$MISSING 审阅待审标记(.review-pending)" ;;
+    none)      : ;;   # 本轮不扩散, 只要求日报产物
+  esac
+  if [ -n "$MISSING" ]; then
+    echo "[失败] 本轮扫描未完成, 缺少:$MISSING"
+    echo "       (Agent 放弃时退出码仍是 0, 不能只看 rc; 产物必须是这一轮新生成的)"
+    # 失败即撤销声明: 这一轮没推成, 全量声明就不能留着放行之后的人工全量推送
+    # (10-22 实测: cron 07:30 写下 broadcast 锁, 那一轮检索卡死后没推成, 锁却
+    #  留在盘上, 当天任何时候 push_report.py --broadcast 都会被它放行 → 群发
+    #  到钉钉, 正是 10-20 事故的重演路径)。
+    if [ "$SCOPE" = "broadcast" ]; then
+      "$PY" "$REPO/scripts/push_scope.py" --date "$SCAN_DATE" --clear \
+        && echo "[$(date '+%F %T')] run_scan: 本轮未推送, 已撤销全量声明(不留残锁)"
+    fi
+    exit 1
+  fi
+
   # 确定性补齐日报产物(2026-10-20 加固): Word 日报是 `report.py --docx` 生成的,
   # 而那一步由 Agent 照 prompt 执行 —— 实测 10-20 的跑批漏掉了 --docx, 只产出
   # csv/md/xlsx, 而推送侧当时是静默跳过附件(用户收到纯文本却以为带 Word)。
-  # 跑批结束兜底补齐一次: 已有则不动, 补不上就告警(推送会只带正文并如实标注)。
+  # 校验已确认 Markdown 存在, 此时补出来的 Word 才是真日报(而不是空壳)。
   "$PY" "$REPO/scripts/report.py" --date "$SCAN_DATE" --ensure-docx \
     || echo "[$(date '+%F %T')] run_scan: Word 日报补生成失败(推送将只带正文)"
-  echo "[$(date '+%F %T')] run_scan mode=$MODE date=$SCAN_DATE done rc=$RC"
-  exit $RC
+  echo "[$(date '+%F %T')] run_scan mode=$MODE date=$SCAN_DATE done rc=0 (产物校验通过)"
+  exit 0
 fi
 
 echo "[$(date '+%F %T')] HERMES_RUN_CMD 未配置, 发送待执行提醒"

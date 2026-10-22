@@ -38,8 +38,20 @@ TMP = tempfile.mkdtemp(prefix="radar-smoke-")
 os.environ["EPIDEMIC_DATA_DIR"] = TMP
 os.environ["EPIDEMIC_DB"] = os.path.join(TMP, "smoke.db")
 
+# 推送渠道变量同样要隔离(2026-10-22): push_scope.load_hermes_env() 会去读
+# ~/.hermes/.env 补齐渠道变量, 而生产那台机器的 .env 里**真的配了钉钉**。
+# 于是同一套测试在本地(无渠道)全绿、在生产恒挂 3 条 —— 自检在生产上等于失效,
+# 绿灯与红灯都不代表代码状态。这里显式清干净并把 .env 路径指到不存在的文件,
+# 需要真实 .env 的用例自己 mock HERMES_ENV_PATH(见 PushScopeLockTests)。
+for _k in ("WECHAT_WEBHOOK", "DINGTALK_WEBHOOK", "DINGTALK_SECRET", "SMTP_HOST",
+           "SMTP_PORT", "SMTP_USER", "SMTP_PASS", "SMTP_TO", "HERMES_PUSH_CHANNELS",
+           "REVIEW_CHANNEL"):
+    os.environ.pop(_k, None)
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(REPO, "templates"))
+
+import push_scope as _push_scope  # noqa: E402  (须在 sys.path 注入之后)
+_push_scope.HERMES_ENV_PATH = os.path.join(TMP, "no-such-.hermes-env")
 
 
 def _source_event(**overrides):
@@ -1181,6 +1193,7 @@ class PushScopeLockTests(unittest.TestCase):
         os.environ.pop("SMTP_HOST", None)
         buf = io.StringIO()
         with mock.patch.object(push_scope, "HERMES_ENV_PATH", env_path), \
+                mock.patch.object(diagnose_push, "_run", return_value=(None, "not found")), \
                 redirect_stdout(buf):
             diagnose_push.main(["--date", "2026-10-20"])
         out = buf.getvalue()

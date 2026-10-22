@@ -271,6 +271,44 @@
 - **处置**: 禁用用户级服务(只保留系统级那个); 重启系统级网关 —— 一次同时解决
   ①释放 601MB ②清掉陈旧 CDP 端口记录 ③清掉卡死的 44 分钟会话与 50 次搜索计数。
 
+#### G11 · Hermes 快照脚本把全部环境变量明文落盘(含凭据), 且落在媒体投递白名单目录里
+- 位置: `/root/.hermes/cache/scratch/hermes-snap-*.sh`(Hermes 自身产生, **非本仓库代码**)
+- **现场事实(10-22 只读核查, 全程未读取任何值)**:
+  - 快照脚本用 `declare -x` 把 **110 个环境变量逐条明文写盘**; 其中至少 8 个是凭据类:
+    `DINGTALK_SECRET` / `DINGTALK_WEBHOOK`、`HERMES_CUSTOM_CHAT_INTERN_AI_ORG_CN_API_KEY` /
+    `HERMES_CUSTOM_DEVELOPER_AMD_COM_CN_API_KEY` / `HERMES_CUSTOM_LLM_LONGAI_VIP_API_KEY`、
+    `X_ADMIN_TOKEN`、`TERMINAL_DOCKER_SHARED_CONTAINER_KEY`、`HERMES_REDACT_SECRET`。
+  - 文件权限 `600 root:root`、目录 `700 root:root` → **本机其他用户读不到**(不是裸奔)。
+  - **但 `HERMES_MEDIA_ALLOW_DIRS` 包含 `/root`**, 而 Hermes 以 root 运行 →
+    该目录整体落在**媒体附件投递白名单**内。本项目推日报时用 `MEDIA:<path>` 送 Word,
+    若哪一轮把 `hermes-snap-*.sh` 当成附件发出去(例如路径写错、或把 scratch 目录
+    整目录作为附件), **凭据即随日报外发到微信/钉钉/邮箱**。
+  - 危害路径是"投递"而不是"本机读取", 所以收紧文件权限**挡不住**这条路径。
+- **处置(待执行, 需谨慎)**: ①Hermes 侧改为**只导出白名单变量**(非凭据类),
+  凭据类不落盘 —— 这是根治; ②在 `push_report.py` 的附件选择上**只允许日报自身目录**
+  (`data/reports/`) 下的文件, 不接受任意 `MEDIA:` 路径; ③把 `~/.hermes/cache/scratch`
+  从 `HERMES_MEDIA_ALLOW_DIRS` 剔除; ④现存快照文件**轮转即清**(旧的不删也行,
+  但不应有新的)。
+- **注意**: 本条涉及真实凭据, **任何处置都不得把密钥值写进代码、提交、文档或回复**;
+  报告只写"哪些键名被落盘"。
+
+#### G12 · ePing 行式列表的真实行形状与文档不一致, 按下标解析会全军覆没
+- 位置: `scripts/parse_eping.py`(`_from_text`); `skills/global-policy-search/SKILL.md`
+- **现场事实(10-22 生产实机首跑)**: 10-21 成功轮的产物 `sps_list.txt`(26 行)真实形状是
+  `序号 | 成员 | 日期 | 文号+标题 | 直链`, 而 skill 文档写的是
+  `成员 | 日期 | 文号 | 标题 | 直链`。两处差异:
+  ①行首有**序号列**, 成员在第 2 段; ②**文号与标题合并在一段**(空格分隔),
+  没有独立标题列; ③日期段可能**有两个**日期 —— 第一个是发布日(dist), 第二个通常是生效日。
+- **后果**: 按固定下标解析的真实结果是「窗口内 0 条 / 26 条无发布日期」= **全军覆没**;
+  而"解析不出日期"的行若被误当成"无日期"就会在后续流程里引发逐条下载核日期 ——
+  正是 10-22 卡死 40 分钟的路径。
+- **修法**: 行式解析改为**按内容判定**(文号正则 / 日期正则 / URL / 序号数字),
+  **不依赖下标**; 行式产物形状会随 Agent 的解析写法漂移, 固定下标一漂移就全废。
+  动作判定同时看 kw 与**标题**(行式没有关键词列, kw 为空)。
+- **回归**: 自测新增真实形状 2 条(序号列不能被当成员 / 双日期都要留住);
+  全量 179 → **181 条全绿**。生产实机复验: 26 条全部正确解析, 收敛出 17 条候选,
+  **零 PDF 下载**。
+
 #### G3 · 诊断/更新脚本自身有三个坑, 现场第一次跑就卡住 → 全部修掉
 - 位置: `scripts/deploy_update.sh`; `scripts/diagnose_push.py`; `scripts/buildinfo.py`;
   `.gitignore`; `scripts/push_report.py`(`.pushed` 标记)

@@ -189,7 +189,7 @@ if [ -n "${HERMES_RUN_CMD:-}" ]; then
         break
       fi
       case "$GW_LINE" in
-        *"not running"*|*"draining"*|*"stopped"*|*"failed"*|*"not running"*|*unavailable*)
+        *"not running"*|*"draining"*|*"stopped"*|*"failed"*|*unavailable*)
           if [ "$WAITED" -ge "$GATEWAY_WAIT" ]; then
             echo "[失败] 网关在 ${GATEWAY_WAIT}s 内始终不就绪($GW_LINE), 本轮放弃。"
             echo "       10-20 实测: 撞上网关重启(Gateway draining)时整轮扫描直接废掉。"

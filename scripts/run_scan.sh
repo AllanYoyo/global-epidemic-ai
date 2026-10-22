@@ -40,6 +40,7 @@ EOF
 MODE=""
 SCOPE=""            # review | broadcast | none
 SCOPE_CHANNEL=""
+STAGE="all"         # all | process(policy 档: 跳过取数, 直接加工 data/raw 已有的存档)
 while [ $# -gt 0 ]; do
   case "$1" in
     am|pm|policy) MODE="$1"; shift ;;
@@ -48,6 +49,10 @@ while [ $# -gt 0 ]; do
       SCOPE="review"; SCOPE_CHANNEL="$2"; shift 2 ;;
     --review-channel=*) SCOPE="review"; SCOPE_CHANNEL="${1#*=}"; shift ;;
     --broadcast) SCOPE="broadcast"; shift ;;
+    --stage)
+      if [ $# -lt 2 ]; then echo "[错误] --stage 需要参数(all|process)"; usage; exit 2; fi
+      STAGE="$2"; shift 2 ;;
+    --stage=*) STAGE="${1#*=}"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "未知参数: $1"; usage; exit 2 ;;
   esac
@@ -294,14 +299,17 @@ if [ -n "${HERMES_RUN_CMD:-}" ]; then
   }
 
   if [ "$MODE" = "policy" ] && [ -n "${PROMPT_FETCH:-}" ]; then
-    echo "[$(date '+%F %T')] 阶段 1/2 取数存档(上限 ${FETCH_TIMEOUT}s)"
-    eval "timeout -k 30 ${FETCH_TIMEOUT} ${HERMES_RUN_CMD/\{PROMPT\}/$PROMPT_FETCH}"
-    FRC=$?
-    if [ "$FRC" -eq 124 ] || [ "$FRC" -eq 137 ]; then
-      echo "[失败] 取数阶段超时(${FETCH_TIMEOUT}s), 已终止"
-      FRC=1
+    if [ "$STAGE" != "process" ]; then
+      echo "[$(date '+%F %T')] 阶段 1/2 取数存档(上限 ${FETCH_TIMEOUT}s)"
+      eval "timeout -k 30 ${FETCH_TIMEOUT} ${HERMES_RUN_CMD/\{PROMPT\}/$PROMPT_FETCH}"
+      FRC=$?
+      if [ "$FRC" -eq 124 ] || [ "$FRC" -eq 137 ]; then
+        echo "[失败] 取数阶段超时(${FETCH_TIMEOUT}s), 已终止"
+      else
+        echo "[$(date '+%F %T')] 阶段 1/2 结束 rc=$FRC, 继续加工出报"
+      fi
     else
-      echo "[$(date '+%F %T')] 阶段 1/2 结束 rc=$FRC, 继续加工出报"
+      echo "[$(date '+%F %T')] 指定 --stage process: 跳过取数, 直接用 data/raw/$SCAN_DATE/ 已有存档加工"
     fi
     echo "[$(date '+%F %T')] 阶段 2/2 加工出报(上限 ${PROCESS_TIMEOUT}s)"
     _run_agent "$PROCESS_TIMEOUT" "$PROMPT_PROCESS"

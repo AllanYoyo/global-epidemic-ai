@@ -164,6 +164,24 @@ class SourceDomainTests(unittest.TestCase):
             self.assertTrue(errs, "缺 scheme 的 URL 竟被放行: %s" % url)
             self.assertTrue(any("scheme" in m for m in errs), errs)
 
+    def test_official_flag_only_accepts_true_values(self):
+        """2026-10-22 审计: 逃生口原先是真值判断, official:"0"/"false"/"no"
+        这类字符串全是真值, 等于随手写一个就能打开 official:1 逃生口。"""
+        url = "https://www.example-somewhere.org/notice/1"   # 不在官方域库内
+        for bad in ("0", "false", "no", "off", "", "maybe"):
+            e = _source_event(
+                source={"tier": 1, "name": "n", "url": url, "quote": "q",
+                        "official": bad},
+                verification_status="unverified")
+            errs = self.n.validate(dict(e))
+            self.assertTrue(errs, "official=%r 竟打开了逃生口" % bad)
+        for good in (1, True, "1", "true", "yes"):
+            e = _source_event(
+                source={"tier": 1, "name": "n", "url": url, "quote": "q",
+                        "official": good},
+                verification_status="unverified")
+            self.assertEqual(self.n.validate(dict(e)), [], "official=%r 应放行" % good)
+
     def test_third_party_host_rejected(self):
         # 2026-10-19 文案修正: 行为不变(第三方来源整条拒收不入库), 只是把错误文案
         # 改成与实现一致 —— 原文案写"[线索] ... 已将 tier 降为 3", 让人以为会入库。

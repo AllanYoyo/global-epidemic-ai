@@ -397,7 +397,16 @@ def check_source_domain(e):
         return errs, e
 
     if tier == 1 and host and not _is_official_domain(host):
-        if not src.get("official"):
+        # 逃生口只认真正的"是"。原先用真值判断, 结果 official: "0" / "false" /
+        # "no" / "off" 这类**字符串**全是真值, 等于随手写一个就能打开逃生口。
+        # 语义应当 fail-closed: 只有 1 / true / yes / 是 才算数, 其余(含非法值)
+        # 一律按"没声明"处理并报错。
+        flag = src.get("official")
+        truthy = (flag is True
+                  or (isinstance(flag, int) and not isinstance(flag, bool) and flag == 1)
+                  or (isinstance(flag, str)
+                      and flag.strip().lower() in ("1", "true", "yes", "y", "是")))
+        if not truthy:
             errs.append(
                 "source.tier=1 但来源主机 %s 不在官方域名库内; "
                 "若该国确有本系统未收录的官方域, 在 source 里显式加 official: 1 说明" % host)

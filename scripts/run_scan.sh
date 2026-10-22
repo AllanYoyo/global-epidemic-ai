@@ -341,6 +341,25 @@ if [ -n "${HERMES_RUN_CMD:-}" ]; then
   if [ "${RAW_N:-0}" -gt 12 ]; then
     MISSING="$MISSING 存档量超限(当轮 ${RAW_N} 个文件 > 12, 疑似穷举下载)"
   fi
+  # ---- 当日入库条数终检(2026-10-22, 假成功的最后一道口子) ----
+  # 实机复现: 阶段 2 加工超时被杀, 但 Agent 在被杀前一刻跑完了 report.py, 于是
+  # 日报 md/xlsx/docx 三件套齐全且新鲜 -> 产物校验通过 -> rc=0「跑批成功」,
+  # 而库里当日入库是 **0 条**。cron 记成功、监控看不出来, 正是 10-22 那次的形态。
+  # 只查文件存在性永远抓不到这种情况, 必须查**有没有真的入库**。
+  # 判定规则(区分"安静的一天"与"流程断了"):
+  #   当日有存档 但入库 0 条 -> 判失败(取到了东西却没走完入库, 流程中断)
+  #   当日无存档 且入库 0 条 -> 允许成功(确实没有新政策)
+  if [ "${RAW_N:-0}" -gt 0 ]; then
+    NEW_N="$("$PY" "$REPO/scripts/normalize.py" --count-first-seen "$SCAN_DATE" 2>/dev/null | tail -1)"
+    case "$NEW_N" in
+      ''|*[!0-9]*) NEW_N=0 ;;
+    esac
+    if [ "$NEW_N" -eq 0 ]; then
+      MISSING="$MISSING 当日入库 0 条(本轮存档 ${RAW_N} 个文件却一条没进库)"
+    else
+      echo "[$(date '+%F %T')] 当日入库计数: $NEW_N 条"
+    fi
+  fi
   if [ -n "$MISSING" ]; then
     echo "[失败] 本轮扫描未完成, 缺少:$MISSING"
     echo "       (Agent 放弃时退出码仍是 0, 不能只看 rc; 产物必须是这一轮新生成的)"
@@ -351,6 +370,19 @@ if [ -n "${HERMES_RUN_CMD:-}" ]; then
     if [ "$SCOPE" = "broadcast" ]; then
       "$PY" "$REPO/scripts/push_scope.py" --date "$SCAN_DATE" --clear \
         && echo "[$(date '+%F %T')] run_scan: 本轮未推送, 已撤销全量声明(不留残锁)"
+    fi
+    exit 1
+  fi
+
+  # ---- Agent 退出码同样不能被产物覆盖(2026-10-22) ----
+  # 实机复现: 阶段 2 加工阶段超时被杀, 日志已打 [失败] 加工阶段超时(900s), 但紧接着
+  # 又输出 done rc=0 —— 因为成功路径无条件 exit 0, 把 RC=1 吞了。结果是"超时失败"
+  # 被记成"跑批成功"。产物齐全只说明 report.py 跑过, 不代表 Agent 跑完了。
+  if [ "$RC" -ne 0 ]; then
+    echo "[失败] Agent 退出码 $RC, 本轮判定失败(即便产物齐全也不放过)"
+    if [ "$SCOPE" = "broadcast" ]; then
+      "$PY" "$REPO/scripts/push_scope.py" --date "$SCAN_DATE" --clear >/dev/null 2>&1 \
+        && echo "[$(date '+%F %T')] run_scan: 已撤销全量声明(不留残锁)"
     fi
     exit 1
   fi

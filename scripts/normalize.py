@@ -696,9 +696,39 @@ def _load_input(spec):
     return records
 
 
+def count_first_seen(date_str, db_path=None):
+    """统计某个业务日期当天入库(first_seen)的政策条数。
+
+    first_seen 存在 payload JSON 里而不是独立列(见 upsert/load_events), 所以这里
+    逐行解析而不是写 SQL LIKE —— 免得依赖 JSON 序列化格式。
+    2026-10-22 新增: run_scan.sh 的产物校验需要它来区分"安静的一天"与
+    "取到了东西却没入库"(后者是 10-22 同款假成功, 必须判失败)。
+    """
+    con = open_db(db_path)
+    if con is None:
+        return 0
+    try:
+        rows = con.execute("SELECT payload FROM events").fetchall()
+    except sqlite3.Error:
+        return 0
+    finally:
+        con.close()
+    n = 0
+    for (payload,) in rows:
+        try:
+            d = json.loads(payload) if isinstance(payload, str) else (payload or {})
+        except ValueError:
+            continue
+        if str(d.get("first_seen") or "")[:10] == date_str:
+            n += 1
+    return n
+
+
 def main():
     ap = argparse.ArgumentParser(description="政策变化记录标准化入库")
-    ap.add_argument("--input", required=True, help="政策 JSON 文件路径; - 为 stdin")
+    ap.add_argument("--input", help="政策 JSON 文件路径; - 为 stdin")
+    ap.add_argument("--count-first-seen", metavar="YYYY-MM-DD",
+                    help="只查询: 打印该业务日期当天入库(first_seen)的政策条数后退出")
     ap.add_argument("--out", help="政策 JSON 落盘目录")
     ap.add_argument("--db", action="store_true", help="写入 SQLite")
     ap.add_argument("--db-path", help="SQLite 路径覆盖")
@@ -710,6 +740,12 @@ def main():
                          "距今天超过 N 天拒收; 默认取环境变量 POLICY_MAX_AGE_DAYS, 未设为 %d;"
                          " 0 关闭(历史回补/库重建重放时用)" % DEFAULT_MAX_AGE_DAYS)
     args = ap.parse_args()
+    if args.count_first_seen:
+        print(count_first_seen(args.count_first_seen, args.db_path))
+        return 0
+    if not args.input:
+        print("[错误] 需要 --input <文件> (或用 --count-first-seen <日期> 做只读查询)")
+        return 2
     try:
         records = _load_input(args.input)
     except (OSError, ValueError) as exc:

@@ -319,15 +319,17 @@ if [ -n "${HERMES_RUN_CMD:-}" ]; then
     [ "${SCAN_ORPHAN_RESTART:-1}" = "1" ] || return 0
     command -v hermes >/dev/null 2>&1 || return 0
     echo "[$(date '+%F %T')] [孤儿清理] 阶段被 timeout 终止, 网关侧 turn 仍在跑 —— 重启网关硬中断"
-    if hermes gateway restart >/dev/null 2>&1; then
+    # 600s 上限: 实测重启 ~164s(新进程启动慢), CLI 内部对"在跑 turn+drain"的等待
+    # 上限是 2745s —— 套壳防极端情况挂住整轮 cron(重启本身是 systemctl 级, 超时
+    # 杀掉的只是等待进程, 重启仍会完成)。
+    if timeout -k 30 600 hermes gateway restart >/dev/null 2>&1; then
       echo "[$(date '+%F %T')] [孤儿清理] 网关已重启"
     else
-      echo "[WARN] 网关重启失败, 孤儿 turn 可能仍在跑(将耗配额至 max_turns)"
-      return 0
+      echo "[WARN] 网关重启命令未按时返回(重启可能仍在后台进行), 继续就绪等待"
     fi
-    # 后续加工段要立刻用网关, 就绪等待(与预检同款判定: 非 not running/draining 等)
+    # 后续加工段要立刻用网关, 就绪等待(与预检同款判定; 实测启动最慢 ~165s)
     _waited=0
-    while [ "$_waited" -lt 120 ]; do
+    while [ "$_waited" -lt 180 ]; do
       _gw="$(timeout -k 5 20 hermes status 2>&1 | grep 'Gateway:' | head -1)"
       case "$_gw" in
         *"✓ running"*) break ;;

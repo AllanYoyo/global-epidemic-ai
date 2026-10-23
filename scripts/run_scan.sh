@@ -210,15 +210,15 @@ case "$MODE" in
     PROMPT_FETCH="执行 $SCAN_DATE 的政策变化**取数阶段**(运行日期 $SCAN_DATE, 东八区)。本阶段做两件事: 上网找政策存档, 并趁原文在手**就地抽取**。**不要入库、不要出报、不要写对华影响研判** —— 那是下一阶段的事。
 【取数纪律】
 1) 先读 config/sources.yaml 的 policy_watch_countries 取当天必扫档与轮转档, 再读 skills/global-policy-search/SKILL.md 的取数工具纪律。
-2) 优先级固定: collect.py 直抓已知官方入口 > web_fetch > 浏览器。web_search 单轮不超过 15 次; 同一工具失败 2 次就换下一个; 浏览器失败就放弃浏览器, 不要反复重连。
+2) 通道探测**批次化**, 禁止一通道一次调用(10-23 实测: 一通道一调用把取数段推到 90 轮/12.9M token): 把当天通道分组, 每组用**一个 bash for 循环**一次探完 —— curl -m 5 -sL -o <临时文件> -w "%{http_code} %{url_effective}\n", 状态行重定向进一个文件, 之后**只看这份状态清单**, 仅对"状态正常且可能有候选"的通道做后续。下方通道体检点了名的通道按其指示跳过/复检。抓任何页面必须**先落盘**(collect.py 或 curl -o), 需要判断内容时用 grep/head/python 摘 ≤2KB 的片段, **严禁把整页正文留在对话里**(10-23 实测单个 JS 页面就吃掉 96KB 上下文); 单次工具输出超过 30KB 即违规, 立刻改落盘+摘录。web_search 单轮不超过 15 次; 同一工具失败 2 次就换下一个; 浏览器失败就放弃浏览器, 不要反复重连。
 3) WTO ePing 只走列表页。拿到行式列表后立刻用 python3 scripts/parse_eping.py <列表文件> --days 7 预筛, 只对清单内、发布日期在近 7 天内的条目下载存档, 窗口外一律不下。PDF 直链就在列表行里(members.wto.org/crnattachments/...), 不要自己拼。
-4) 每找到一条就**立刻**做三件事, 边存边写、绝不留到收尾: ①存档 python3 scripts/collect.py --url <直链> --title <标题>; ②存档成功后**马上**把该条追加写入 data/raw/$SCAN_DATE/candidates.json 并在 search-log.md 记一行; ③趁原文还在手上, 按 prompts/policy-extraction.md 把该条抽成 policy 记录, **立即追加**到 data/raw/$SCAN_DATE/extracted-policy.json。理由: 10-22 实测, 收尾才写 = 白干; 而把抽取留给加工段 = 冷启动重读全部原文(12 万 token), 必超时 —— 取数时就地抽取是零成本, 这正是拆段前单轮流程 3-7 分钟能跑完全程的原因。就地抽取要求: 每条必须有 source.url 与 source.quote(≤120 字, 摘自刚抓到的原文); source.publish_date 用该页面自己的发布日期, 不得用抓取日冒充; 原文没有的信息填 null, **严禁编造**; 旧闻(超 7 天)与第三方站点不写入, 只在 search-log.md 记为线索。当日存档文件数上限 12(含 .meta.json 约等于 6 条), 触顶就停, 剩下的留待下一轮。
+4) 每找到一条就**立刻**做三件事, 边存边写、绝不留到收尾: ①存档 python3 scripts/collect.py --url <直链> --title <标题>; ②存档成功后**马上**把该条追加写入 data/raw/$SCAN_DATE/candidates.json 并在 search-log.md 记一行; ③抽取**从存档文件做**, 不整读 html: 用 grep/head/python 从刚落盘的存档摘标题、发布日期与关键句(每次输出 ≤2KB), 按 prompts/policy-extraction.md 抽成 policy 记录, **立即追加**到 data/raw/$SCAN_DATE/extracted-policy.json。每条必须有 source.url 与 source.quote(≤120 字, **逐字摘自存档文件**); source.publish_date 用该页面自己的发布日期, 不得用抓取日冒充; 原文没有的信息填 null, **严禁编造**; 旧闻(超 7 天)与第三方站点不写入, 只在 search-log.md 记为线索。理由: 收尾才写 = 白干; 把抽取留到以后 = 冷启动重读全部原文, 必超时 —— 趁刚存档、文件就在盘上时摘录是最低成本。当日存档文件数上限 12(含 .meta.json 约等于 6 条), 触顶就停, 剩下的留待下一轮。
 【本阶段必须交付的四个文件】
 A) 存档: data/raw/$SCAN_DATE/ 下每条一个 html + 一个 meta.json。
 B) data/raw/$SCAN_DATE/candidates.json —— 数组, 每条含 title/url/country_en/publish_date/source_name/brief(一句话说明这是什么措施)与 topics(动植物/产品/病害关键词)。**增量维护**: 每存档一条立即追加一条, 不是收尾时一次性写; 哪怕一条都没取到也要创建这个文件(空数组), 下一阶段靠它判断有没有东西可做。
 C) data/raw/$SCAN_DATE/extracted-policy.json —— 数组, **每存档一条立即追加一条就地抽取的 policy 记录**(同 B 的边存边写纪律); 哪怕 0 条也要创建空数组。这是下一阶段的主输入, 加工段只补漏、不再重读全部原文。
 D) data/raw/$SCAN_DATE/search-log.md —— 逐通道状态, 同样**边扫边记**: 本通道取到几条 / 不可用(附原因, 如 403 封禁、页面结构不匹配、搜索额度用尽)。
-【红线】严禁 --broadcast; 严禁逐条穷举下载 PDF; 严禁把第三方站点当 tier=1; 时间到了就**立刻交卷**, 不要为了多找一条而超时。"
+【红线】严禁 --broadcast; 严禁逐条穷举下载 PDF; 严禁把第三方站点当 tier=1; **严禁在本段运行 normalize.py / risk.py / report.py / push_report.py**(入库/研判/出报/推送全是加工段的事, 抢跑会把 first_seen 记错日子); 时间到了就**立刻交卷**, 不要为了多找一条而超时。"
     PROMPT_PROCESS="执行 $SCAN_DATE 的政策变化**加工阶段**(运行日期 $SCAN_DATE, 东八区)。取数阶段已存档并就地抽取, 你的输入是**本地文件, 不要联网检索**; 本阶段是轻收尾, 正常几分钟内完成。
 1) 读 data/raw/$SCAN_DATE/extracted-policy.json(主输入, 取数段已边存边写生成)。对照 candidates.json 找出「已存档但未抽取」的漏条: 先看 search-log.md 是否已把它记为线索或判为不合格(第三方/旧闻), 确实漏抽的才读对应 html 原文、按 prompts/policy-extraction.md 补抽并追加进 extracted-policy.json —— **不要重读已抽取条目的原文**。extracted-policy.json 与 candidates.json 都为空数组或不存在时, 直接跳到第 4 步(仍要出报)。
 2) 入库: python3 scripts/normalize.py --input data/raw/$SCAN_DATE/extracted-policy.json --out data/events/$SCAN_DATE/ --db --max-age-days 7。tier=1 只认官方域名; 第三方站点整条拒收, 只在 search-log.md 记为线索。
@@ -293,8 +293,10 @@ if [ -n "${HERMES_RUN_CMD:-}" ]; then
   # 预算都花在检索上, normalize/risk/report 一步都跑不到 —— run3 拿到 49 条候选、
   # run4 落了 3 份存档, 两轮都是 0 入库、0 日报。prompt 里的"硬预算"是自然语言,
   # 约束不住模型。拆开后每段各自独立计时、独立收尾:
-  #   fetch   段 = 上网 + collect.py 存档 + search-log.md   (不抽取、不入库)
-  #   process 段 = 只读本地存档 -> 抽取 -> 入库 -> 研判 -> 出报(不联网检索)
+  #   fetch   段 = 上网(批次化探测+落盘) + collect.py 存档 + 就地抽取(从存档
+  #               文件摘录) + search-log/candidates/extracted-policy 边存边写
+  #               (不入库、不出报)
+  #   process 段 = 只读 extracted-policy.json 补漏 -> 入库 -> 研判 -> 出报(不联网)
   # process 段输入是本地文件, 体量可控, 必然跑得完; fetch 段超时也不影响已存档数据。
   SCAN_TIMEOUT="${SCAN_TIMEOUT:-2400}"
   FETCH_TIMEOUT="${STAGE_FETCH_TIMEOUT:-1500}"
@@ -306,6 +308,16 @@ if [ -n "${HERMES_RUN_CMD:-}" ]; then
 
   if [ "$MODE" = "policy" ] && [ -n "${PROMPT_FETCH:-}" ]; then
     if [ "$STAGE" != "process" ]; then
+      # ---- 死通道跳过名单(2026-10-23 引入, 确定性) ----
+      # 10-22/10-23 实测: 约 20 个通道连续两日一字不差地不可用(403/连接失败/
+      # 占位页), 取数段每天仍要花 30-50 轮重新发现它们。channel_health.py 从近
+      # 几日 search-log.md 提取名单注入 prompt(只读、不联网、失败不阻塞跑批)。
+      HEALTH_BLOCK="$("$PY" "$REPO/scripts/channel_health.py" --date "$SCAN_DATE" 2>/dev/null || true)"
+      if [ -n "$HEALTH_BLOCK" ]; then
+        PROMPT_FETCH="$PROMPT_FETCH
+$HEALTH_BLOCK"
+        echo "[$(date '+%F %T')] 已注入通道体检名单($(echo "$HEALTH_BLOCK" | grep -c '^-' ) 条)"
+      fi
       echo "[$(date '+%F %T')] 阶段 1/2 取数存档(上限 ${FETCH_TIMEOUT}s)"
       eval "timeout -k 30 ${FETCH_TIMEOUT} ${HERMES_RUN_CMD/\{PROMPT\}/$PROMPT_FETCH}"
       FRC=$?

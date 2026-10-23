@@ -306,6 +306,38 @@ if [ -n "${HERMES_RUN_CMD:-}" ]; then
     eval "timeout -k 30 $1 ${HERMES_RUN_CMD/\{PROMPT\}/$2}"
   }
 
+  # ---- 孤儿 turn 终止(2026-10-23, 受控实验驱动) ----
+  # `hermes -z` 只是把 prompt 经 websocket 提交给网关, turn 由网关守护进程执行;
+  # timeout 杀掉的 CLI 只是断开 ws, 网关侧照跑到 max_turns —— 10-22 实测孤儿跑满
+  # 90 轮(~8M token), 10-23 取数段孤儿超时后仍多跑并抢跑 normalize。网关没有按
+  # 会话终止的 CLI(pause 只挡新 turn, sessions 无 stop, 控制套接字无 interrupt
+  # 动词), 看门狗又是"不活动"触发 —— 活跃的孤儿永远打不断。唯一确定性手段是
+  # restart: restart_drain_timeout=0 立即硬中断所有在跑 turn; 被中断会话按
+  # Hermes 语义"下条消息续跑", 用户微信在途消息只是晚点回, 影响有限。
+  # SCAN_ORPHAN_RESTART=0 可关闭。
+  _abort_gateway_orphans() {
+    [ "${SCAN_ORPHAN_RESTART:-1}" = "1" ] || return 0
+    command -v hermes >/dev/null 2>&1 || return 0
+    echo "[$(date '+%F %T')] [孤儿清理] 阶段被 timeout 终止, 网关侧 turn 仍在跑 —— 重启网关硬中断"
+    if hermes gateway restart >/dev/null 2>&1; then
+      echo "[$(date '+%F %T')] [孤儿清理] 网关已重启"
+    else
+      echo "[WARN] 网关重启失败, 孤儿 turn 可能仍在跑(将耗配额至 max_turns)"
+      return 0
+    fi
+    # 后续加工段要立刻用网关, 就绪等待(与预检同款判定: 非 not running/draining 等)
+    _waited=0
+    while [ "$_waited" -lt 120 ]; do
+      _gw="$(timeout -k 5 20 hermes status 2>&1 | grep 'Gateway:' | head -1)"
+      case "$_gw" in
+        *"✓ running"*) break ;;
+      esac
+      sleep 5
+      _waited=$((_waited + 5))
+    done
+    echo "[$(date '+%F %T')] [孤儿清理] 网关就绪(等待 ${_waited}s)"
+  }
+
   if [ "$MODE" = "policy" ] && [ -n "${PROMPT_FETCH:-}" ]; then
     if [ "$STAGE" != "process" ]; then
       # ---- 死通道跳过名单(2026-10-23 引入, 确定性) ----
@@ -323,6 +355,7 @@ $HEALTH_BLOCK"
       FRC=$?
       if [ "$FRC" -eq 124 ] || [ "$FRC" -eq 137 ]; then
         echo "[失败] 取数阶段超时(${FETCH_TIMEOUT}s), 已终止"
+        _abort_gateway_orphans
       else
         echo "[$(date '+%F %T')] 阶段 1/2 结束 rc=$FRC, 继续加工出报"
       fi
@@ -342,6 +375,7 @@ $HEALTH_BLOCK"
     if [ "$RC" -eq 124 ] || [ "$RC" -eq 137 ]; then
       echo "[失败] 加工阶段超时(${PROCESS_TIMEOUT}s), 已终止"
       RC=1
+      _abort_gateway_orphans
     fi
   else
     echo "[$(date '+%F %T')] 开始扫描(上限 ${SCAN_TIMEOUT}s)"
@@ -350,6 +384,7 @@ $HEALTH_BLOCK"
     if [ "$RC" -eq 124 ] || [ "$RC" -eq 137 ]; then
       echo "[失败] 扫描超时(${SCAN_TIMEOUT}s), 已终止"
       RC=1
+      _abort_gateway_orphans
     fi
   fi
 

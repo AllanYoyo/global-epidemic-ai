@@ -210,7 +210,7 @@ case "$MODE" in
     PROMPT_FETCH="执行 $SCAN_DATE 的政策变化**取数阶段**(运行日期 $SCAN_DATE, 东八区)。本阶段做两件事: 上网找政策存档, 并趁原文在手**就地抽取**。**不要入库、不要出报、不要写对华影响研判** —— 那是下一阶段的事。
 【取数纪律】
 1) 先读 config/sources.yaml 的 policy_watch_countries 取当天必扫档与轮转档, 再读 skills/global-policy-search/SKILL.md 的取数工具纪律。
-2) 通道探测**批次化**, 禁止一通道一次调用(10-23 实测: 一通道一调用把取数段推到 90 轮/12.9M token): 把当天通道分组, 每组用**一个 bash for 循环**一次探完 —— curl -m 5 -sL -o <临时文件> -w "%{http_code} %{url_effective}\n", 状态行重定向进一个文件, 之后**只看这份状态清单**, 仅对"状态正常且可能有候选"的通道做后续。下方通道体检点了名的通道按其指示跳过/复检。抓任何页面必须**先落盘**(collect.py 或 curl -o), 需要判断内容时用 grep/head/python 摘 ≤2KB 的片段, **严禁把整页正文留在对话里**(10-23 实测单个 JS 页面就吃掉 96KB 上下文); 单次工具输出超过 30KB 即违规, 立刻改落盘+摘录。web_search 单轮不超过 15 次; 同一工具失败 2 次就换下一个; 浏览器失败就放弃浏览器, 不要反复重连。
+2) 通道探测**批次化**, 禁止一通道一次调用(10-23 实测: 一通道一调用把取数段推到 90 轮/12.9M token): 把当天通道分组, 每组用**一个 bash for 循环**一次探完 —— curl -m 5 -sL -o <临时文件> -w '%{http_code} %{url_effective}\n', 状态行重定向进一个文件, 之后**只看这份状态清单**, 仅对「状态正常且可能有候选」的通道做后续。下方通道体检点了名的通道按其指示跳过/复检。抓任何页面必须**先落盘**(collect.py 或 curl -o), 需要判断内容时用 grep/head/python 摘 ≤2KB 的片段, **严禁把整页正文留在对话里**(10-23 实测单个 JS 页面就吃掉 96KB 上下文); 单次工具输出超过 30KB 即违规, 立刻改落盘+摘录。web_search 单轮不超过 15 次; 同一工具失败 2 次就换下一个; 浏览器失败就放弃浏览器, 不要反复重连。
 3) WTO ePing 只走列表页。拿到行式列表后立刻用 python3 scripts/parse_eping.py <列表文件> --days 7 预筛, 只对清单内、发布日期在近 7 天内的条目下载存档, 窗口外一律不下。PDF 直链就在列表行里(members.wto.org/crnattachments/...), 不要自己拼。
 4) 每找到一条就**立刻**做三件事, 边存边写、绝不留到收尾: ①存档 python3 scripts/collect.py --url <直链> --title <标题>; ②存档成功后**马上**把该条追加写入 data/raw/$SCAN_DATE/candidates.json 并在 search-log.md 记一行; ③抽取**从存档文件做**, 不整读 html: 用 grep/head/python 从刚落盘的存档摘标题、发布日期与关键句(每次输出 ≤2KB), 按 prompts/policy-extraction.md 抽成 policy 记录, **立即追加**到 data/raw/$SCAN_DATE/extracted-policy.json。每条必须有 source.url 与 source.quote(≤120 字, **逐字摘自存档文件**); source.publish_date 用该页面自己的发布日期, 不得用抓取日冒充; 原文没有的信息填 null, **严禁编造**; 旧闻(超 7 天)与第三方站点不写入, 只在 search-log.md 记为线索。理由: 收尾才写 = 白干; 把抽取留到以后 = 冷启动重读全部原文, 必超时 —— 趁刚存档、文件就在盘上时摘录是最低成本。当日存档文件数上限 12(含 .meta.json 约等于 6 条), 触顶就停, 剩下的留待下一轮。
 【本阶段必须交付的四个文件】
@@ -329,15 +329,20 @@ if [ -n "${HERMES_RUN_CMD:-}" ]; then
     fi
     # 后续加工段要立刻用网关, 就绪等待(与预检同款判定; 实测启动最慢 ~165s)
     _waited=0
+    _ready=0
     while [ "$_waited" -lt 180 ]; do
       _gw="$(timeout -k 5 20 hermes status 2>&1 | grep 'Gateway:' | head -1)"
       case "$_gw" in
-        *"✓ running"*) break ;;
+        *"✓ running"*) _ready=1; break ;;
       esac
       sleep 5
       _waited=$((_waited + 5))
     done
-    echo "[$(date '+%F %T')] [孤儿清理] 网关就绪(等待 ${_waited}s)"
+    if [ "$_ready" -eq 1 ]; then
+      echo "[$(date '+%F %T')] [孤儿清理] 网关就绪(等待 ${_waited}s)"
+    else
+      echo "[WARN] 网关重启后 ${_waited}s 仍未就绪, 下一段大概率失败 —— 这轮算废, 靠产物校验兜底"
+    fi
   }
 
   if [ "$MODE" = "policy" ] && [ -n "${PROMPT_FETCH:-}" ]; then
@@ -348,6 +353,10 @@ if [ -n "${HERMES_RUN_CMD:-}" ]; then
       # 几日 search-log.md 提取名单注入 prompt(只读、不联网、失败不阻塞跑批)。
       HEALTH_BLOCK="$("$PY" "$REPO/scripts/channel_health.py" --date "$SCAN_DATE" 2>/dev/null || true)"
       if [ -n "$HEALTH_BLOCK" ]; then
+        # 名单内容摘自 search-log 原文, 可能含 ASCII 双引号/反引号/$(如 返回"관리모드"
+        # 占位页)。prompt 最终要经 eval 拼进 hermes -z "...", 这些字符会切断引号把
+        # 命令拆烂(实测 10-23 复查: 体检名单带引号 → -z 参数被截断)。一律替换/剔除。
+        HEALTH_BLOCK="$(printf '%s' "$HEALTH_BLOCK" | sed -e 's/"/」/g' -e 's/`//g' -e 's/\$//g')"
         PROMPT_FETCH="$PROMPT_FETCH
 $HEALTH_BLOCK"
         echo "[$(date '+%F %T')] 已注入通道体检名单($(echo "$HEALTH_BLOCK" | grep -c '^-' ) 条)"

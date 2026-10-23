@@ -67,8 +67,16 @@ def parse_day(path):
 
 
 def _join(items, limit):
-    """拼名单, 超长截断并注明总数。"""
-    text = "、".join("%s(%s)" % (n, r) for n, r in items)
+    """拼名单, 超长截断并注明总数。
+
+    名称/原因摘自 search-log.md 原文, 可能含 ASCII 双引号/反引号/$(如
+    返回"관리모드"占位页)。本脚本的输出会被 run_scan.sh 拼进 prompt、
+    最终经 eval 送进 hermes -z "...", 这些字符会切断引号拆烂命令 ——
+    这里先做一层清洗, run_scan.sh 注入处还有第二层。
+    """
+    def _clean(s):
+        return s.replace('"', "」").replace("`", "").replace("$", "")
+    text = "、".join("%s(%s)" % (_clean(n), _clean(r)) for n, r in items)
     if len(text) > limit:
         text = text[:limit] + "…(共 %d 个, 已截断)" % len(items)
     return text

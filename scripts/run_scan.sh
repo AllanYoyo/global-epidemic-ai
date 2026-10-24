@@ -29,11 +29,14 @@ set -u
 usage() {
   cat <<'EOF'
 用法: run_scan.sh [am|pm|policy] [--review-channel <渠道> | --broadcast]
+                  [--stage all|process|fetch] [--refetch]
 
   --review-channel <渠道>  本轮来自该渠道的会话, 只发该渠道, 等用户确认后才扩散
                           渠道取值: wechat | dingtalk | mail(也认企业微信/钉钉/邮箱)
   --broadcast              本轮是定时任务, 全量推送
   两者都不给                cron 上下文自动按定时任务处理; 其它上下文本轮不推送
+  --stage fetch            只跑取数段(不加工不推送), 结束写 .fetch-done 幂等标记
+  --refetch                清除当日取数标记强制重取(与幂等锁配对, 显式留痕)
 EOF
 }
 
@@ -41,6 +44,8 @@ MODE=""
 SCOPE=""            # review | broadcast | none
 SCOPE_CHANNEL=""
 STAGE="all"         # all | process(policy 档: 跳过取数, 直接加工 data/raw 已有的存档)
+                    #    | fetch (policy 档: 只跑取数段, 不加工不推送 —— 会话/人工补数入口)
+REFETCH=0           # 1 = 清除当日 .fetch-done 标记, 无视幂等锁强制重取
 while [ $# -gt 0 ]; do
   case "$1" in
     am|pm|policy) MODE="$1"; shift ;;
@@ -50,9 +55,10 @@ while [ $# -gt 0 ]; do
     --review-channel=*) SCOPE="review"; SCOPE_CHANNEL="${1#*=}"; shift ;;
     --broadcast) SCOPE="broadcast"; shift ;;
     --stage)
-      if [ $# -lt 2 ]; then echo "[错误] --stage 需要参数(all|process)"; usage; exit 2; fi
+      if [ $# -lt 2 ]; then echo "[错误] --stage 需要参数(all|process|fetch)"; usage; exit 2; fi
       STAGE="$2"; shift 2 ;;
     --stage=*) STAGE="${1#*=}"; shift ;;
+    --refetch) REFETCH=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "未知参数: $1"; usage; exit 2 ;;
   esac
@@ -133,6 +139,15 @@ if [ -z "$SCOPE" ]; then
   fi
 else
   SCOPE_SOURCE="显式参数"
+fi
+
+# --stage fetch 只取数不加工不推送(2026-10-24): 给会话/人工一个**带看护的补数入口** ——
+# 它同样享受超时看护/幂等锁/预算刹车, 而不是让调用方自己拼 hermes -z 裸奔。
+# 因此强制 scope=none: 不写范围锁、不携带推送指令, 推送范围声明对本轮无意义。
+if [ "$MODE" = "policy" ] && [ "$STAGE" = "fetch" ] && [ "$SCOPE" != "none" ]; then
+  echo "[WARN] --stage fetch 本轮不加工不推送, 推送范围声明被忽略(scope 强制 none)。"
+  SCOPE="none"
+  SCOPE_SOURCE="--stage fetch(只取数)"
 fi
 
 # 显式 --broadcast 也必须发生在 cron 上下文里(2026-10-20 事故后加固):
@@ -377,7 +392,38 @@ if [ -n "${HERMES_RUN_CMD:-}" ]; then
   }
 
   if [ "$MODE" = "policy" ] && [ -n "${PROMPT_FETCH:-}" ]; then
+    # ---- 取数幂等锁 + 预算刹车(2026-10-24 token 爆量事故后引入) ----
+    # 10-24 现场: 6 条存档 09:39 已全部落盘, 之后 12:50/13:54/14:55 三轮重复取数
+    # 零新增, ~126 万输入 token + 3200 万 cache 读白烧, 当日 Token Plan 打穿(429)。
+    # 两道闸: ①.fetch-done 标记 —— 当日取数已交付(rc=0 或已有存档)就不再重跑,
+    # 强制重取必须显式 --refetch; ②token_budget.py —— 东八区当日 Hermes 消耗
+    # 达到预算就不再启动新取数, 本轮降级为"只加工已有存档"(数据不丢, 损失止于增量)。
+    FETCH_DIR="$DATA_DIR/raw/$SCAN_DATE"
+    FETCH_DONE="$FETCH_DIR/.fetch-done"
+    FETCH_SKIP=""
+    FETCH_RAN=0
+    FRC=0
     if [ "$STAGE" != "process" ]; then
+      echo "[$(date '+%F %T')] 预算检查(东八区当日 Hermes 消耗):"
+      if ! "$PY" "$REPO/scripts/token_budget.py" --date "$SCAN_DATE"; then
+        FETCH_SKIP="budget"
+        mkdir -p "$FETCH_DIR" 2>/dev/null || true
+        printf -- '- 预算刹车: 东八区当日 Hermes 消耗已达上限, 本轮跳过取数(%s)\n' \
+          "$(date '+%F %T')" >> "$FETCH_DIR/search-log.md" 2>/dev/null || true
+      fi
+      if [ -z "$FETCH_SKIP" ] && [ "$REFETCH" = "1" ]; then
+        rm -f "$FETCH_DONE"
+        echo "[$(date '+%F %T')] --refetch: 已清除当日取数标记, 本轮强制重取"
+      fi
+      if [ -z "$FETCH_SKIP" ] && [ -f "$FETCH_DONE" ]; then
+        FETCH_SKIP="fetched"
+        echo "[INFO] 当日取数已完成, 标记内容:"
+        sed 's/^/       /' "$FETCH_DONE" 2>/dev/null || true
+      fi
+      if [ -n "$FETCH_SKIP" ]; then
+        echo "[WARN] 跳过取数段(原因: $FETCH_SKIP), 直接用 data/raw/$SCAN_DATE/ 已有存档加工。"
+        echo "       如确需重取: scripts/run_scan.sh policy --refetch"
+      else
       # ---- 死通道跳过名单(2026-10-23 引入, 确定性) ----
       # 10-22/10-23 实测: 约 20 个通道连续两日一字不差地不可用(403/连接失败/
       # 占位页), 取数段每天仍要花 30-50 轮重新发现它们。channel_health.py 从近
@@ -393,6 +439,7 @@ $HEALTH_BLOCK"
         echo "[$(date '+%F %T')] 已注入通道体检名单($(echo "$HEALTH_BLOCK" | grep -c '^-' ) 条)"
       fi
       echo "[$(date '+%F %T')] 阶段 1/2 取数存档(上限 ${FETCH_TIMEOUT}s)"
+      FETCH_RAN=1
       eval "timeout -k 30 ${FETCH_TIMEOUT} ${HERMES_RUN_CMD/\{PROMPT\}/$PROMPT_FETCH}"
       FRC=$?
       if [ "$FRC" -eq 124 ] || [ "$FRC" -eq 137 ]; then
@@ -400,6 +447,7 @@ $HEALTH_BLOCK"
         _abort_gateway_orphans
       else
         echo "[$(date '+%F %T')] 阶段 1/2 结束 rc=$FRC, 继续加工出报"
+      fi
       fi
     else
       echo "[$(date '+%F %T')] 指定 --stage process: 跳过取数, 直接用 data/raw/$SCAN_DATE/ 已有存档加工"
@@ -411,6 +459,32 @@ $HEALTH_BLOCK"
     # 抽取规则从原文补齐。脚本幂等、不联网、不编造(见 synth_candidates.py)。
     "$PY" "$REPO/scripts/synth_candidates.py" --date "$SCAN_DATE" || \
       echo "[WARN] synth_candidates 失败(不影响继续, 加工段将看不到候选清单兜底)"
+    # ---- 取数完成标记: 只有本轮真的跑了取数才写(跳过的不改写原标记的完成时刻) ----
+    # rc=0(正常收尾, 哪怕 0 条的安静日)或已有存档(取到了东西, 值得保留断点)才写;
+    # 超时且 0 存档 → 不写, 下一轮允许重取。
+    if [ "$FETCH_RAN" = "1" ]; then
+      RAW_N_NOW="$(find "$FETCH_DIR" -maxdepth 1 -type f -name '*.meta.json' 2>/dev/null | wc -l | tr -d ' ')"
+      CAND_N="$(wc -l < "$FETCH_DIR/candidates.jsonl" 2>/dev/null | tr -d ' ')"
+      case "$CAND_N" in ''|*[!0-9]*) CAND_N=0 ;; esac
+      if [ "$FRC" -eq 0 ] || [ "${RAW_N_NOW:-0}" -gt 0 ]; then
+        mkdir -p "$FETCH_DIR" 2>/dev/null || true
+        { echo "done_at=$(date '+%F %T')"; echo "fetch_rc=$FRC";
+          echo "archives=$RAW_N_NOW"; echo "candidates=$CAND_N"; } > "$FETCH_DONE"
+        echo "[$(date '+%F %T')] 取数标记已写($FETCH_DONE): rc=$FRC 存档=$RAW_N_NOW 候选=$CAND_N"
+      else
+        echo "[WARN] 本轮取数 rc=$FRC 且 0 存档, 不写完成标记(下一轮可重取)"
+      fi
+    fi
+    # --stage fetch 到此为止: 不加工不推送, 不做日报产物校验(那两样是全流程的判据)。
+    if [ "$STAGE" = "fetch" ]; then
+      if [ -f "$FETCH_DONE" ]; then
+        echo "[$(date '+%F %T')] run_scan --stage fetch 完成(未加工未推送); 加工请跑: scripts/run_scan.sh policy --stage process"
+        _BROADCAST_ARMED=0
+        exit 0
+      fi
+      echo "[失败] --stage fetch 未正常结束且无存档(未写取数标记)"
+      exit 1
+    fi
     echo "[$(date '+%F %T')] 阶段 2/2 加工出报(上限 ${PROCESS_TIMEOUT}s)"
     _run_agent "$PROCESS_TIMEOUT" "$PROMPT_PROCESS"
     RC=$?

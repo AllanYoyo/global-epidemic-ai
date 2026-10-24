@@ -1899,6 +1899,109 @@ class TokenEconomyTests(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class TokenBudgetBrakeTests(unittest.TestCase):
+    """取数幂等锁 + 日预算刹车(2026-10-24 token 爆量事故)。
+
+    当天 6 个扫描会话烧穿 Token Plan(429, 连微信对话都调不动); 6 条存档
+    09:39 已落齐, 之后 12:50/13:54/14:55 三轮重取(其中 4 个会话绕过
+    run_scan.sh 直接 hermes -z, 无超时无幂等检查)零新增、白烧 ~126 万输入
+    token + 3200 万 cache 读。对应三道闸: .fetch-done 幂等锁 / token_budget.py
+    预算刹车 / run_scan.sh --stage fetch 统一发射口。
+    """
+
+    def _make_db(self, path, rows):
+        import sqlite3
+        con = sqlite3.connect(path)
+        con.execute(
+            "CREATE TABLE sessions (id TEXT, started_at REAL, input_tokens INTEGER,"
+            " output_tokens INTEGER, cache_read_tokens INTEGER, title TEXT)")
+        con.executemany("INSERT INTO sessions VALUES (?,?,?,?,?,?)", rows)
+        con.commit()
+        con.close()
+
+    def _rows_for(self, date):
+        """两条当日会话 + 一条前一日深夜会话(不应计入)。"""
+        import token_budget as tb
+        start, _ = tb.day_window(date)
+        return [
+            ("s1", start + 3600, 100000, 50000, 1000000, "取数会话A"),
+            ("s2", start + 7200, 200000, 50000, 2000000, "取数会话B"),
+            ("s3", start - 10, 999999, 99999, 9999999, "前一日深夜"),
+        ]
+
+    def _run_budget(self, args):
+        import token_budget
+        buf = io.StringIO()
+        with mock.patch("sys.argv", ["token_budget.py"] + args), redirect_stdout(buf):
+            try:
+                rc = token_budget.main()
+            except SystemExit as e:
+                rc = e.code
+        return rc, buf.getvalue()
+
+    def test_over_budget_returns_3(self):
+        # 当日折合 30万输入+10万输出+300万cache*0.1=70万 → 预算 60万时必须拦
+        tmp = tempfile.mkdtemp(prefix="budget-over-")
+        db = os.path.join(tmp, "state.db")
+        self._make_db(db, self._rows_for("2026-10-24"))
+        try:
+            rc, out = self._run_budget(["--date", "2026-10-24", "--db", db,
+                                        "--budget", "600000"])
+            self.assertEqual(rc, 3, out)
+            self.assertIn("已达预算上限", out)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_under_budget_returns_0_and_excludes_other_days(self):
+        # 预算内 rc=0; 且窗口是东八区当日, 前一日深夜的会话不计入(会话数=2)
+        tmp = tempfile.mkdtemp(prefix="budget-under-")
+        db = os.path.join(tmp, "state.db")
+        self._make_db(db, self._rows_for("2026-10-24"))
+        try:
+            rc, out = self._run_budget(["--date", "2026-10-24", "--db", db,
+                                        "--budget", "800000"])
+            self.assertEqual(rc, 0, out)
+            self.assertIn("预算内", out)
+            self.assertIn("会话 2 个", out)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_missing_db_fails_open(self):
+        # fail-open: 测不到(本机无 state.db)就不拦跑批, 但要大声说
+        rc, out = self._run_budget(["--date", "2026-10-24",
+                                    "--db", os.path.join(tempfile.gettempdir(), "no-such-x.db")])
+        self.assertEqual(rc, 0, out)
+        self.assertIn("WARN", out)
+
+    def _run_scan_text(self):
+        with open(os.path.join(REPO, "scripts", "run_scan.sh"), encoding="utf-8") as f:
+            return f.read()
+
+    def test_run_scan_has_fetch_idempotency_lock(self):
+        # 取数幂等锁: 当日已交付(.fetch-done)必须跳过重取; 强制重取必须显式 --refetch
+        text = self._run_scan_text()
+        self.assertIn(".fetch-done", text)
+        self.assertIn("--refetch", text)
+        self.assertIn("FETCH_DONE", text)
+        self.assertIn("跳过取数段", text)
+
+    def test_run_scan_has_budget_brake(self):
+        # 预算刹车: 取数段启动前必须查当日消耗, 超限降级为只加工
+        text = self._run_scan_text()
+        self.assertIn("token_budget.py", text)
+        self.assertIn("预算检查", text)
+        self.assertIn("FETCH_SKIP", text)
+
+    def test_run_scan_stage_fetch_exits_before_process(self):
+        # --stage fetch 只取数不加工: 完成即退出, 不得进入加工段/产物校验
+        text = self._run_scan_text()
+        self.assertIn("--stage fetch", text)
+        exit_pos = text.index("run_scan --stage fetch 完成")
+        process_pos = text.index("阶段 2/2 加工出报")
+        self.assertLess(exit_pos, process_pos,
+                        "--stage fetch 的收尾退出必须早于加工段启动")
+
+
 class BriefTextFocusTests(unittest.TestCase):
     """IM 卡片"重点关注"口径必须与 report.py 一致(2026-10-19 修复)。
 

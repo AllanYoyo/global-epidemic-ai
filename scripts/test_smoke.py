@@ -1783,7 +1783,7 @@ class ScanFailureGuardTests(unittest.TestCase):
 
     def test_run_scan_counts_meta_files_only(self):
         # 2026-10-24 体检 H2: 原先 RAW_N 数"所有非 meta 文件", 把取数段强制创建的
-        # 交付文件(candidates.json/extracted-policy.json/search-log.md, prompt 要求
+        # 交付文件(candidates*/extracted-policy*/search-log.md, prompt 要求
         # 哪怕 0 条也要建)全数进去 —— 安静的一天 RAW_N 也 ≥3, "当日有存档却 0 入库"
         # 恒触发, 每天必红。必须只数 *.meta.json(collect.py 每条存档恰一个)。
         text = self._run_scan_text()
@@ -1802,6 +1802,101 @@ class ScanFailureGuardTests(unittest.TestCase):
                         "布防初始化必须出现在范围声明 case 之前")
         self.assertLess(case_start, arm,
                         "布防置 1 必须发生在范围声明 case 内(锁写下之后)")
+
+
+class TokenEconomyTests(unittest.TestCase):
+    """取数段 token 经济(2026-10-24 二次修复)。
+
+    f7ae1c4 前单轮流程 ~65k/轮; 拆段+纪律后实测 200-250k/轮。差距经 state.db
+    实证定位在流程复杂度反噬: ①Agent 临场 read_file 58KB AGENTS.md/16KB SKILL.md;
+    ②python 读改写整个 JSON(每追加一条读回一次)+打印整条记录"验证"(单次 11KB);
+    ③prompt 越写越长。对应三味药: 当日清单预渲染注入 / JSONL 追加且不打印 /
+    严禁读仓库文件。
+    """
+
+    def test_run_scan_prompt_uses_jsonl_and_bans_fileread(self):
+        # prompt 必须已切换到 JSONL 追加 + 禁读仓库文件 + 禁验证打印
+        with open(os.path.join(REPO, "scripts", "run_scan.sh"), encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn("extracted-policy.jsonl", text)
+        self.assertIn("candidates.jsonl", text)
+        self.assertIn("严禁 read_file", text)
+        self.assertIn("不打印任何内容", text)
+        self.assertIn("scan_targets.py", text)          # 当日清单预渲染注入
+        self.assertIn("COUNTRY_BLOCK", text)
+        # 旧指令不得残留: "追加写入 ... candidates.json"(读改写整个 JSON 的病根)
+        self.assertNotIn("追加写入 data/raw/$SCAN_DATE/candidates.json", text)
+
+    def test_scan_targets_respects_weekly_shards(self):
+        # 周轮转档: 周六(ISO 6)按 weekly_shards 扫 state_level; 周二只扫必扫档
+        import scan_targets
+        sat, n_sat = scan_targets.render("2026-10-24")   # 周六
+        tue, n_tue = scan_targets.render("2026-10-27")   # 周二
+        self.assertIn("[state_level]", sat)
+        self.assertIn("[priority_1]", sat)
+        self.assertIn("[regional]", sat)
+        self.assertNotIn("[state_level]", tue)
+        self.assertNotIn("[border_neighbours]", tue)
+        self.assertGreaterEqual(n_sat, 10)               # fail-visible 自检线
+        self.assertGreaterEqual(n_tue, 10)
+
+    def test_scan_targets_injects_source_urls(self):
+        # 清单必须直出源入口 URL, Agent 才不需要读 sources.yaml
+        import scan_targets
+        out, _ = scan_targets.render("2026-10-27")
+        self.assertRegex(out, r"ca-cfia https?://\S+")
+        self.assertRegex(out, r"wto-eping https?://\S+")
+
+    def test_synth_candidates_writes_jsonl_and_merges_legacy(self):
+        # synth 兜底: 输出 candidates.jsonl; 合并已有 jsonl + 旧数组版 candidates.json;
+        # 按 url 去重; Agent 已写的语义字段不被覆盖
+        import synth_candidates
+        tmp = tempfile.mkdtemp(prefix="synth-jsonl-")
+        raw_dir = os.path.join(tmp, "raw", "2026-10-24")
+        os.makedirs(raw_dir)
+        for i, (title, url) in enumerate([
+                ("甲政策", "https://official.example/a"),
+                ("乙政策", "https://official.example/b")], 1):
+            with open(os.path.join(raw_dir, "%02d-x.meta.json" % i), "w",
+                      encoding="utf-8") as f:
+                json.dump({"title": title, "url": url}, f, ensure_ascii=False)
+        # 已有 jsonl 一条(url=A, 带语义字段 country_en 已填) + 旧数组版一条(url=C)
+        with open(os.path.join(raw_dir, "candidates.jsonl"), "w", encoding="utf-8") as f:
+            f.write(json.dumps({"title": "甲政策", "url": "https://official.example/a",
+                                "country_en": "Demo Land"}, ensure_ascii=False) + "\n")
+        with open(os.path.join(raw_dir, "candidates.json"), "w", encoding="utf-8") as f:
+            json.dump([{"title": "丙政策", "url": "https://official.example/c"}], f,
+                      ensure_ascii=False)
+        try:
+            with mock.patch.object(synth_candidates, "DATA_DIR", tmp), \
+                    mock.patch("sys.argv", ["synth_candidates.py",
+                                            "--date", "2026-10-24"]):
+                rc = synth_candidates.main()
+            self.assertEqual(rc, 0)
+            with open(os.path.join(raw_dir, "candidates.jsonl"), encoding="utf-8") as f:
+                lines = [json.loads(x) for x in f.read().splitlines() if x.strip()]
+            urls = [x["url"] for x in lines]
+            # 3 个不同 url 各一行, 无重复; A 的语义字段保留, B/C 由 meta/旧文件补齐
+            self.assertEqual(sorted(urls), sorted(set(urls)))
+            self.assertEqual(len(lines), 3)
+            a = next(x for x in lines if x["url"].endswith("/a"))
+            self.assertEqual(a["country_en"], "Demo Land")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_normalize_loads_jsonl_with_bad_lines(self):
+        # JSONL 输入: 好行入库、坏行(写入中断的半行)跳过并 WARN、空行忽略
+        from normalize import _load_input
+        tmp = tempfile.mkdtemp(prefix="norm-jsonl-")
+        try:
+            p = os.path.join(tmp, "x.jsonl")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write('{"a": 1}\n\n{"a": 2}\n{"a": trunc')   # 末行是半条
+            with mock.patch("sys.stdout", new_callable=io.StringIO):
+                records = _load_input(p)
+            self.assertEqual(records, [{"a": 1}, {"a": 2}])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 class BriefTextFocusTests(unittest.TestCase):

@@ -699,8 +699,25 @@ def write_event_file(e, out_dir):
 
 def _load_input(spec):
     raw = __import__("sys").stdin.read() if spec == "-" else open(spec, encoding="utf-8").read()
-    data = json.loads(raw)
-    records = data.get("events") or [data] if isinstance(data, dict) else data
+    if spec.endswith(".jsonl"):
+        # JSONL(每行一条, 2026-10-24 引入): 取数段改为逐条 append 一行, 消灭
+        # "python 读改写整个 JSON" 的上下文放大(实测每追加一条就把已增长的
+        # 整个文件读回一次, 是取数段单轮消耗 65k→200k 的主因之一)。
+        # 坏行/空行跳过并计数 —— 断在半条的最后一行不该堵死整批。
+        records, bad = [], 0
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except ValueError:
+                bad += 1
+        if bad:
+            print("[WARN] JSONL 输入跳过 %d 条解析失败的行(常见于写入中断的半行)" % bad)
+    else:
+        data = json.loads(raw)
+        records = data.get("events") or [data] if isinstance(data, dict) else data
     if not isinstance(records, list):
         raise ValueError("输入的 events 必须是数组(当前是 %s)" % type(records).__name__)
     return records

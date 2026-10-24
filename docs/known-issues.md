@@ -186,6 +186,36 @@
 
 ## 已修复 (历史)
 
+### 2026-10-24 下午 · 取数段 token 二次治理(复杂度反噬)
+
+#### H14 · 取数段单轮消耗 65k→200k: 治超时的复杂度本身成了预算杀手
+- 位置: `scripts/run_scan.sh`(prompt 重写)、新增 `scripts/scan_targets.py`、
+  `scripts/normalize.py`(_load_input)、`scripts/synth_candidates.py`(JSONL 化)
+- 实证(state.db 逐日曲线): f7ae1c4 前单轮流程 ~65k/轮; 10-22 拆段+10-23 三连修后
+  实测 200-250k/轮(10-24 取数段 60 轮 10.1M 输入, 60 轮里把当日 Token Plan 打掉 75%)。
+  同口径工具构成对照(旧 10-13 会话 39 轮 vs 10-24 取数段 60 轮):
+  ① 代码/终端调用 21 次(平均 461 字符)→87 次(平均 2.6KB) —— 「边存边写」把每条
+  候选从 1 次调用变成 5-9 次(collect+grep+python 读改写+打印验证);
+  ② read_file 4 次→11 次, 最大单次 58KB(Agent 临场读 AGENTS.md/SKILL.md —— prompt
+  第一步就叫它读 sources.yaml/SKILL.md); ③ web_search 10 次→≈0(三连修的成果,
+  方向正确)。结论: **差距不在检索量, 在流程复杂度反噬** —— 为治理预算引入的
+  纪律让每条候选成本翻了 3 倍。
+- 修法(四件套):
+  · **当日清单预渲染注入**: 新增 `scan_targets.py`, 跑批前把当天相关国别/源入口
+    (必扫档+周轮转档)确定性渲染成 ~30 行注入 prompt, 取数段**严禁 read_file/cat
+    任何仓库文件**; 渲染失败退回旧指令不阻塞。
+  · **写盘 JSONL 化**: candidates/extracted-policy 改 .jsonl 逐行追加(open 'a' 写
+    一行、**不打印任何内容**、写完不回读不验证) —— 消灭"python 读改写整个 JSON,
+    每追加一条读回一次"的上下文放大; normalize._load_input 支持 .jsonl(坏行跳过
+    计数); synth_candidates 兼容读旧数组版与 jsonl、输出 jsonl。
+  · **prompt 瘦身**: 取数/加工段 prompt 重写, 删理由解释与重复强调, 纪律条目化;
+    单次工具输出红线从 30KB 收紧到 8KB。
+  · **轮次上限(部署侧)**: Hermes config.yaml 顶层 max_turns 90→50(取数段正常
+    30-40 轮, 上限兜底; 不改 repo, VPS 上调整)。
+- 验证: 干跑桩掉 HERMES_RUN_CMD 落盘 prompt, 断言清单真实注入(ca-cfia 等源 URL
+  直出)/关键指令齐全/无断串; 自测 188 → **193 条全绿**(TokenEconomyTests 5 条)。
+- 预期: 取数段单轮回到 ~65-90k, 一轮总输入 10M → 3-4M(待下一轮 cron 实测校准)。
+
 ### 2026-10-24 全量体检 (高危四条当日闭环)
 
 #### H1 · EXIT trap 撤锁机制被初始化语句的位置错误整体杀死

@@ -72,6 +72,32 @@ def section(title):
     print("\n=== %s ===" % title)
 
 
+def _ahead_behind(repo, remote_sha, local_sha):
+    """(本地领先远端多少个提交, 本地落后远端多少个提交)。
+
+    只比 commit 前缀分不出"本地更新"和"本地更旧" —— 本地领先上游时会被误报成
+    "生产跑的是旧逻辑"(2026-10-24 升级时实测: 本地比 origin 多 2 个体检修复
+    提交, 却被报成不一致, 方向还是反的)。用 rev-list 数提交数才分得清。
+
+    远端提交对象本地没有时(从没 fetch 过)返回 (None, None)。
+    """
+    if not (remote_sha and local_sha):
+        return (None, None)
+    out, err = _run(["git", "-C", repo, "rev-list", "--left-right", "--count",
+                      "%s...%s" % (remote_sha, local_sha)], timeout=10)
+    if not out:
+        return (None, None)
+    parts = out.split()
+    if len(parts) != 2:
+        return (None, None)
+    try:
+        # --left-right --count 的顺序是: <左(远端独有)> <右(本地独有)>
+        behind, ahead = int(parts[0]), int(parts[1])
+    except ValueError:
+        return (None, None)
+    return (ahead, behind)
+
+
 def check_code_version():
     section("1. 运行代码版本(生产上跑的是哪版?)")
     info = buildinfo.describe()
@@ -83,15 +109,36 @@ def check_code_version():
         print("  未跟踪:   %s(不阻塞更新)" % "、".join(info["untracked"][:6]))
     branch = info["branch"] or "policy"
     out, err = _run(["git", "-C", info["repo"], "ls-remote", "origin", branch], timeout=10)
-    if out:
-        remote = out.split()[0][:7] if out.split() else ""
-        if remote and info["commit"] and not info["commit"].startswith(remote):
-            _problem("本地代码(%s)与 origin/%s(%s)不一致 —— 生产可能跑的是旧逻辑, "
-                     "先执行 scripts/deploy_update.sh 更新" % (info["commit"], branch, remote))
-        else:
-            print("  远端:     origin/%s = %s(与本地一致)" % (branch, remote or "?"))
-    else:
+    if not out:
         print("  远端:     查不到(离线或无 origin 远端): %s" % (err or ""))
+        return
+    remote_full = out.split()[0] if out.split() else ""
+    remote = remote_full[:7]
+    if not remote or not info.get("commit_full"):
+        print("  远端:     origin/%s = %s" % (branch, remote or "?"))
+        return
+    ahead, behind = _ahead_behind(info["repo"], remote_full, info["commit_full"])
+    if ahead is None:
+        # 数不出提交数(远端对象本地没有 / 离线): 退回前缀比较, 但只提示不报警
+        if not info["commit"].startswith(remote):
+            _warn("本地代码(%s)与 origin/%s(%s)不一致, 但无法比较提交数 —— "
+                  "先 fetch 一次再判断方向" % (info["commit"], branch, remote))
+        else:
+            print("  远端:     origin/%s = %s(与本地一致)" % (branch, remote))
+        return
+    if behind > 0 and ahead > 0:
+        _problem("本地代码(%s)与 origin/%s(%s)**分叉** —— 本地领先 %d 个提交、落后 %d 个提交, "
+                 "先人工处理分叉再更新" % (info["commit"], branch, remote, ahead, behind))
+    elif behind > 0:
+        _problem("本地代码(%s)落后 origin/%s(%s) %d 个提交 —— 生产跑的是旧逻辑, "
+                 "先执行 scripts/deploy_update.sh 更新"
+                 % (info["commit"], branch, remote, behind))
+    elif ahead > 0:
+        # 本地更新 = 生产跑的是**比 GitHub 更新的**代码, 不是旧逻辑 —— 不该报警
+        print("  远端:     origin/%s = %s; 本地领先 %d 个提交(尚未推送到 GitHub) —— "
+              "生产跑的是更新代码, 不是旧逻辑" % (branch, remote, ahead))
+    else:
+        print("  远端:     origin/%s = %s(与本地一致)" % (branch, remote))
 
 
 def check_scope_state(date):

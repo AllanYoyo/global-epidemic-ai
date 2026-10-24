@@ -186,6 +186,53 @@
 
 ## 已修复 (历史)
 
+### 2026-10-24 晚 · 一天 6 会话烧穿 Token Plan(重复取数 + 不收敛 + 输出纪律失守)
+
+#### H15 · 当日 Token Plan 打穿(429): 全部存档 09:39 已落齐, 之后三轮重取零新增
+- 位置: `scripts/run_scan.sh`(幂等锁/预算刹车/拆组循环)、新增 `scripts/token_budget.py`
+  / `scripts/probe_channels.py` / `scripts/jsonl_append.py` / `scripts/snip.py`、
+  `scripts/scan_targets.py`(--group/--groups)、`scripts/push_scope.py`(锁时效 60→75)
+- 实证(state.db 会话明细 + scan.log + messages 表 chars 下钻, 均为北京时间):
+  | 时间 | 会话 | 发起方 | api 轮 | 输入 | cache 读 | 结果 |
+  |---|---|---|---|---|---|---|
+  | 07:30 | 8192ea35 | cron(撞 PROMPT_FETCH 空串缺陷跑成单轮) | 70 | 411k | 17.3M | 出报+推送 |
+  | 09:27 | 9e2a31ae | 手动 run_scan.sh | **90(打满)** | 374k | 16.4M | **09:39 落齐全部 6 条存档**后超时 |
+  | 12:50 | 3d45b052 | 网关侧 ad-hoc(scan.log 无记录, **旧 prompt**) | **90(打满)** | **614k** | **19.4M** | read_file 12 次 125KB(含 58KB sources.yaml); 零新增 |
+  | 13:54 | 569361b6 | 网关侧 ad-hoc(新 prompt, **无超时看护裸跑 48 分钟**) | **50(打满)** | 226k | 5.0M | 零新增 |
+  | 14:55 | 39303181 | ad-hoc + 委派 | **50(打满)** | 182k | 3.6M | 零新增 |
+  | 14:57 | aad0682d | 上轮 delegate_task 派生 | 36 | 234k | 4.4M | 完成推送 |
+  当日合计 ≈204 万输入 + 130 万输出 + 6600 万 cache 读 / 386 次 API, 产出 = 6 存档 4 入库
+  (存档 mtime 证明全部来自 09:27 那轮); 16:21 起 errors.log 连续 429「Token Plan 用量
+  上限」, 连微信对话都调不动。三个病根: ①**重复扫描无闸** —— hermes -z 是开放入口,
+  任何会话可拼扫描 prompt 发射, 绕开超时/幂等/日志, 而"今日取数是否已完成"无任何锁;
+  ②**取数段不收敛** —— 每轮都撞 max_turns(90/90 ×2、50/50 ×2), 打满即整轮作废重来,
+  叠加"每轮全量重发上下文"的计费结构, 单轮成本 ≈ 上下文 × 轮数; ③**输出上限靠
+  prompt 约束不住** —— 治理后单次 execute_code 仍 13.4KB(红线 8KB), 25 次累计 115KB。
+- 修法(三提交四件套, 依「确定性优先」路线):
+  · **e84f277 幂等锁+预算刹车**: `data/raw/<日期>/.fetch-done`(取数交付即写, 后续
+    任何取数请求见标记直接跳过进加工, 强制重取显式 `--refetch`; 超时且 0 存档不写、
+    允许重取); `token_budget.py` 只读 state.db 统计东八区当日折合消耗
+    (input+output+cache_read×0.1), ≥400 万(可覆盖)即 rc3 → run_scan.sh 降级为只加工;
+    `--stage fetch` 统一发射口(自带看护, scope 强制 none)。
+  · **560ae37 拆组+预探**: 取数按档位拆两组逐个发起(必扫档/轮转档, 超时按源对数
+    加权、保底 360s, 单组打满只废单组); `probe_channels.py` 用 curl 8 并发预探当日
+    全部源入口, [dead] 清单注入 prompt(Agent 对死通道零工具调用); 分支条件查
+    `PROMPT_FETCH_TPL` 的静默退化 bug 由干跑抓到并修; `SCOPE_MAX_AGE_MINUTES`
+    60→75 防合法锁被误判过期。
+  · **f9ca490 输出硬上限**: `jsonl_append.py`(追加只回执一行)/`snip.py`(摘录硬性
+    ≤2KB)把纪律变成脚本保证, prompt 内联抽取键值模板(补上「禁读文件却让按
+    policy-extraction.md 抽」的缺口); 部署时 VPS `tool_output.max_bytes`
+    50000→12000(全局兜底)。
+- 验证: VPS 真机干跑 5 场景全过 —— 预算刹车(真实 state.db 当日 998 万折合 → 拦截
+  +search-log 留痕 +fetch-only 判失败 rc1)/取数写标记/幂等跳过(prompt 不再生成)/
+  --refetch 重取/分组双轮(组1 21 源对 1008s + 组2 4 源对 360s, 预探实探 25 源,
+  ca-cfia 连接失败/usda-aphis 403 与 search-log 历史记录一致); 两组 prompt 零 ASCII
+  双引号/反引号/$; jsonl_append/snip 冒烟通过(冒烟抓到 title_cn/source.url 误拒
+  bug 一处, 已修)。自测 193 → **208 全绿**(TokenBudgetBrake 6 + FetchGrouping 6 +
+  ToolOutputCap 4, 另更新 TokenEconomy 1 条断言随行为)。
+- 预期: 重复取数被幂等锁挡死; 单轮不收敛的爆炸半径从整轮缩到单组; 死通道/探测
+  从每轮 20-40 次工具调用归零; 输出放大被硬上限压住。次日 cron 实测校准。
+
 ### 2026-10-24 下午 · 取数段 token 二次治理(复杂度反噬)
 
 #### H14 · 取数段单轮消耗 65k→200k: 治超时的复杂度本身成了预算杀手

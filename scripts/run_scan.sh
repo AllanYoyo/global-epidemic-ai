@@ -88,18 +88,24 @@ PY="${PYTHON_BIN:-python3}"
 # 调用方显式给的值**优先于** ~/.hermes/.env(后者只是默认配置源)。
 # 10-22 实测踩到: source .env 会把外部传入的 HERMES_RUN_CMD 等覆盖掉,
 # 于是"用空跑批验证一下"实际上启动了真扫描(两个 Agent 抢资源)。
-# 所以先记下调用方给的值, source 之后再还原。
+# 2026-10-24 二级测试再踩同类坑: STAGE_FETCH_TIMEOUT=600 被 .env 的 1200
+# 覆盖 —— 想收紧单轮超时做小规模测试, 实际跑了整整 20 分钟。阶段超时同入
+# 保护名单。所以先记下调用方给的值, source 之后再还原。
 _caller_run_cmd="${HERMES_RUN_CMD-__unset__}"
 _caller_health="${HERMES_HEALTH_CMD-__unset__}"
 _caller_timeout="${SCAN_TIMEOUT-__unset__}"
 _caller_gw_wait="${GATEWAY_WAIT-__unset__}"
 _caller_tz="${SCAN_TZ-__unset__}"
+_caller_fetch_to="${STAGE_FETCH_TIMEOUT-__unset__}"
+_caller_process_to="${STAGE_PROCESS_TIMEOUT-__unset__}"
 [ -n "${HOME:-}" ] && [ -f "$HOME/.hermes/.env" ] && . "$HOME/.hermes/.env"
 [ "$_caller_run_cmd" = "__unset__" ] || export HERMES_RUN_CMD="$_caller_run_cmd"
 [ "$_caller_health" = "__unset__" ] || export HERMES_HEALTH_CMD="$_caller_health"
 [ "$_caller_timeout" = "__unset__" ] || export SCAN_TIMEOUT="$_caller_timeout"
 [ "$_caller_gw_wait" = "__unset__" ] || export GATEWAY_WAIT="$_caller_gw_wait"
 [ "$_caller_tz" = "__unset__" ] || export SCAN_TZ="$_caller_tz"
+[ "$_caller_fetch_to" = "__unset__" ] || export STAGE_FETCH_TIMEOUT="$_caller_fetch_to"
+[ "$_caller_process_to" = "__unset__" ] || export STAGE_PROCESS_TIMEOUT="$_caller_process_to"
 
 # 数据根目录: 与 normalize.py / report.py / push_*.py 保持同一来源。
 # 2026-10-22 审计发现: 产物校验曾把路径写死成 "$REPO/data/reports/...", 而其余脚本

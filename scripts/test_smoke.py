@@ -2084,6 +2084,16 @@ class FetchGroupingTests(unittest.TestCase):
         self.assertIn('[ -z "$ONLY_GROUP" ]', text)      # 测试语义不写 .fetch-done
         self.assertIn("组间预算复查", text)               # 前一组烧超, 剩余组不再发起
 
+    def test_run_scan_stage_timeouts_beat_hermes_env(self):
+        # 2026-10-24 二级测试实测: STAGE_FETCH_TIMEOUT=600 被 ~/.hermes/.env 的
+        # 1200 覆盖(与 10-22 HERMES_RUN_CMD 同类 bug) —— 阶段超时必须进
+        # "调用方优先于 .env"的保护名单, 否则小规模测试根本收不紧超时
+        text = self._run_scan_text()
+        self.assertIn('_caller_fetch_to="${STAGE_FETCH_TIMEOUT-__unset__}"', text)
+        self.assertIn('export STAGE_FETCH_TIMEOUT="$_caller_fetch_to"', text)
+        self.assertIn('_caller_process_to="${STAGE_PROCESS_TIMEOUT-__unset__}"', text)
+        self.assertIn('export STAGE_PROCESS_TIMEOUT="$_caller_process_to"', text)
+
     def test_scope_max_age_widened_for_groups(self):
         # 拆组后最坏路径 ~70 分钟(两组加权超时 + 加工 + 网关重启等待),
         # 60 分钟会把"这一轮还在跑"的合法广播锁误判过期 → 全量推送被自己拦死

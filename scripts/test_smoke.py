@@ -2077,6 +2077,13 @@ class FetchGroupingTests(unittest.TestCase):
         self.assertIn("未指定模式", text)
         self.assertNotIn('MODE="${MODE:-am}"', text)
 
+    def test_run_scan_only_group_test_mode(self):
+        # 小token测试开关: 只跑指定组 + 不写幂等标记(不挡正式取数) + 组间预算复查
+        text = self._run_scan_text()
+        self.assertIn("--only-group", text)
+        self.assertIn('[ -z "$ONLY_GROUP" ]', text)      # 测试语义不写 .fetch-done
+        self.assertIn("组间预算复查", text)               # 前一组烧超, 剩余组不再发起
+
     def test_scope_max_age_widened_for_groups(self):
         # 拆组后最坏路径 ~70 分钟(两组加权超时 + 加工 + 网关重启等待),
         # 60 分钟会把"这一轮还在跑"的合法广播锁误判过期 → 全量推送被自己拦死

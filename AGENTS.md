@@ -52,6 +52,7 @@ scripts/run_scan.sh policy --review-channel wechat          # 渠道会话触发
 scripts/run_scan.sh policy --broadcast                      # 定时任务扫描：全量（写全量范围锁）
 scripts/run_scan.sh policy --stage fetch                    # 只跑取数段（会话/人工补数入口；写 .fetch-done 幂等标记）
 scripts/run_scan.sh policy --refetch                        # 强制重取（清当日 .fetch-done 标记，显式留痕）
+scripts/run_scan.sh policy --stage fetch --only-group 2     # 小token测试：只跑当日轮转档组（不写标记、不挡正式取数）
 python scripts/token_budget.py --date YYYY-MM-DD            # 当日 Hermes token 用量/预算检查（只读 state.db）
 bash scripts/deploy_update.sh policy                        # 生产更新（git pull + 依赖 + 自检）
 ```

@@ -37,6 +37,8 @@ usage() {
   两者都不给                cron 上下文自动按定时任务处理; 其它上下文本轮不推送
   --stage fetch            只跑取数段(不加工不推送), 结束写 .fetch-done 幂等标记
   --refetch                清除当日取数标记强制重取(与幂等锁配对, 显式留痕)
+  --only-group <1|2>       只跑指定组取数(1=必扫档, 2=当日轮转档; 小token测试用,
+                          不写 .fetch-done, 不会挡住之后的正式取数)
 EOF
 }
 
@@ -46,6 +48,7 @@ SCOPE_CHANNEL=""
 STAGE="all"         # all | process(policy 档: 跳过取数, 直接加工 data/raw 已有的存档)
                     #    | fetch (policy 档: 只跑取数段, 不加工不推送 —— 会话/人工补数入口)
 REFETCH=0           # 1 = 清除当日 .fetch-done 标记, 无视幂等锁强制重取
+ONLY_GROUP=""       # 1|2 = 只跑该组取数(小token测试/补单组; 测试语义, 不写完成标记)
 while [ $# -gt 0 ]; do
   case "$1" in
     am|pm|policy) MODE="$1"; shift ;;
@@ -58,6 +61,13 @@ while [ $# -gt 0 ]; do
       if [ $# -lt 2 ]; then echo "[错误] --stage 需要参数(all|process|fetch)"; usage; exit 2; fi
       STAGE="$2"; shift 2 ;;
     --stage=*) STAGE="${1#*=}"; shift ;;
+    --only-group)
+      if [ $# -lt 2 ]; then echo "[错误] --only-group 需要参数(1|2)"; usage; exit 2; fi
+      case "$2" in 1|2) ONLY_GROUP="$2" ;; *) echo "[错误] --only-group 只认 1|2"; usage; exit 2 ;; esac
+      shift 2 ;;
+    --only-group=*)
+      case "${1#*=}" in 1|2) ONLY_GROUP="${1#*=}" ;; *) echo "[错误] --only-group 只认 1|2"; usage; exit 2 ;; esac
+      shift ;;
     --refetch) REFETCH=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "未知参数: $1"; usage; exit 2 ;;
@@ -462,10 +472,28 @@ if [ -n "${HERMES_RUN_CMD:-}" ]; then
         GROUP_LIST="x"
         echo "[WARN] 当日分组解析失败(收到: $GROUPS_INFO), 本轮退回单组全量取数"
       fi
+      # --only-group N(小token测试/补单组): 只发起指定组, 其余组不跑 ——
+      # 测试语义**不写 .fetch-done**(单组跑完 ≠ 当日取数已交付, 不能挡正式取数)
+      if [ -n "$ONLY_GROUP" ]; then
+        case " $GROUP_LIST " in
+          *" $ONLY_GROUP "*)
+            GROUP_LIST="$ONLY_GROUP"
+            echo "[INFO] --only-group $ONLY_GROUP: 本轮只取该组, 不写取数完成标记" ;;
+          *)
+            echo "[WARN] --only-group $ONLY_GROUP: 当日该组无源对($GROUPS_INFO), 本轮不取数"
+            GROUP_LIST="" ;;
+        esac
+      fi
       GROUP_TOTAL="$(echo $GROUP_LIST | wc -w | tr -d ' ')"
       N_TOTAL=$(( ${G1_N:-0} + ${G2_N:-0} ))
       FRC=0
       for G in $GROUP_LIST; do
+        # 组间预算复查(小token测试与生产双重保险): 前一组烧完若已达预算, 剩余组
+        # 不再发起 —— 半途而废比全烧完强, 已存档数据不受影响(边存边写)
+        if ! "$PY" "$REPO/scripts/token_budget.py" --date "$SCAN_DATE" >/dev/null 2>&1; then
+          echo "[WARN] 组间预算复查已达上限, 剩余组(含组$G)本轮不发起, 直接进加工"
+          break
+        fi
         if [ "$G" = "x" ]; then
           GROUP_BLOCK="$COUNTRY_BLOCK"
           PROBE_BLOCK="$("$PY" "$REPO/scripts/probe_channels.py" --date "$SCAN_DATE" 2>/dev/null || true)"
@@ -521,8 +549,8 @@ $HEALTH_BLOCK"
       echo "[WARN] synth_candidates 失败(不影响继续, 加工段将看不到候选清单兜底)"
     # ---- 取数完成标记: 只有本轮真的跑了取数才写(跳过的不改写原标记的完成时刻) ----
     # rc=0(正常收尾, 哪怕 0 条的安静日)或已有存档(取到了东西, 值得保留断点)才写;
-    # 超时且 0 存档 → 不写, 下一轮允许重取。
-    if [ "$FETCH_RAN" = "1" ]; then
+    # 超时且 0 存档 → 不写, 下一轮允许重取。--only-group 是测试/补单组语义, 不写。
+    if [ "$FETCH_RAN" = "1" ] && [ -z "$ONLY_GROUP" ]; then
       RAW_N_NOW="$(find "$FETCH_DIR" -maxdepth 1 -type f -name '*.meta.json' 2>/dev/null | wc -l | tr -d ' ')"
       CAND_N="$(wc -l < "$FETCH_DIR/candidates.jsonl" 2>/dev/null | tr -d ' ')"
       case "$CAND_N" in ''|*[!0-9]*) CAND_N=0 ;; esac
@@ -539,6 +567,11 @@ $HEALTH_BLOCK"
     if [ "$STAGE" = "fetch" ]; then
       if [ -f "$FETCH_DONE" ]; then
         echo "[$(date '+%F %T')] run_scan --stage fetch 完成(未加工未推送); 加工请跑: scripts/run_scan.sh policy --stage process"
+        _BROADCAST_ARMED=0
+        exit 0
+      fi
+      if [ -n "$ONLY_GROUP" ] && [ "$FETCH_RAN" = "1" ] && [ "$FRC" -eq 0 ]; then
+        echo "[$(date '+%F %T')] run_scan --only-group $ONLY_GROUP 测试完成(不写标记, 不挡正式取数)"
         _BROADCAST_ARMED=0
         exit 0
       fi

@@ -137,6 +137,10 @@ fi
 
 # ---- 声明本轮推送范围(落盘成范围锁) ----
 # push_scope.py 会校验渠道名: 认不出就报错退出, 绝不静默当成"没设闸门"。
+# 布防标记必须在 case **之前**初始化(set -u 下 EXIT trap 函数要读它)。
+# 2026-10-24 修复: 原先初始化写在 case 结束之后, 把 broadcast 分支刚设的 1
+# 无条件清零 —— EXIT trap 撤锁在任何退出路径上都空转, 残锁保护形同虚设。
+_BROADCAST_ARMED=0
 case "$SCOPE" in
   broadcast)
     # 全量推送时清掉可能残留的 REVIEW_CHANNEL: 它与 --broadcast 互斥,
@@ -181,7 +185,6 @@ esac
 #   · 任何以后新增的 exit 1 分支
 # 这正是 10-20 钉钉误推事故的重演路径, 只是触发点从"跑批没跑完"换成"网关抖动"。
 # 现在改成 EXIT trap: 只要本轮没走到"done", 退出(含超时/信号/预检失败)一律撤销。
-_BROADCAST_ARMED=0
 _revoke_broadcast_lock() {
   if [ "$SCOPE" = "broadcast" ] && [ "$_BROADCAST_ARMED" = "1" ]; then
     if "$PY" "$REPO/scripts/push_scope.py" --date "$SCAN_DATE" --clear >/dev/null 2>&1; then
@@ -416,9 +419,14 @@ $HEALTH_BLOCK"
   # 存档量上限(2026-10-22): 正常一轮只存 2 个文件(10-21 实测); 存了 20+ 个说明
   # Agent 在穷举下载(逐条下 WTO 通报 PDF 核发布日期)—— 10-22 就是这么跑的,
   # 40 分钟没完。这道终检兜住"绕过 collect.py 直接往 raw 目录倾倒"的情况。
-  RAW_N="$(find "$DATA_DIR/raw/$SCAN_DATE" -maxdepth 1 -type f ! -name '*.meta.json' 2>/dev/null | wc -l | tr -d ' ')"
+  # 2026-10-24 修正: 原先「数所有非 meta 文件」把取数段强制创建的交付文件
+  # (candidates.json / extracted-policy.json / search-log.md, prompt 要求哪怕
+  # 0 条也要建空数组)与加工段产物(policy-findings.md)全数进去 —— 安静的一天
+  # RAW_N 也 ≥3, 「当日有存档却 0 入库」恒触发, 每天必红。改为只数
+  # *.meta.json(collect.py 每条存档恰写一个), 计数即真实存档条数, 交付文件天然排除。
+  RAW_N="$(find "$DATA_DIR/raw/$SCAN_DATE" -maxdepth 1 -type f -name '*.meta.json' 2>/dev/null | wc -l | tr -d ' ')"
   if [ "${RAW_N:-0}" -gt 12 ]; then
-    MISSING="$MISSING 存档量超限(当轮 ${RAW_N} 个文件 > 12, 疑似穷举下载)"
+    MISSING="$MISSING 存档量超限(当轮 ${RAW_N} 条存档 > 12, 疑似穷举下载)"
   fi
   # ---- 当日入库条数终检(2026-10-22, 假成功的最后一道口子) ----
   # 实机复现: 阶段 2 加工超时被杀, 但 Agent 在被杀前一刻跑完了 report.py, 于是
@@ -434,7 +442,7 @@ $HEALTH_BLOCK"
       ''|*[!0-9]*) NEW_N=0 ;;
     esac
     if [ "$NEW_N" -eq 0 ]; then
-      MISSING="$MISSING 当日入库 0 条(本轮存档 ${RAW_N} 个文件却一条没进库)"
+      MISSING="$MISSING 当日入库 0 条(本轮存档 ${RAW_N} 条却一条没进库)"
     else
       echo "[$(date '+%F %T')] 当日入库计数: $NEW_N 条"
     fi

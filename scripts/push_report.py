@@ -429,6 +429,13 @@ def main():
               "全量推送与\"只发审阅渠道\"不能同时指定")
         return 1
 
+    # 2026-10-24 修复: --review-approved 的"批准对象"只能是已发出的审阅版日报,
+    # 自定义文本没有对应待审对象, 组合即拒绝(fail-closed, 不给"未审先扩散"留旁路)。
+    if args.review_approved and args.message:
+        print("[错误] --review-approved 与 --message 互斥: "
+              "审核通过后的扩散只针对日报; 自定义文本没有可批准的待审对象。")
+        return 1
+
     # ---- 推送范围锁(2026-10-20 起): 范围由发起方声明, 本脚本只执行 ----
     # 锁: data/reports/.push-scope/<日期>.lock, 由 run_scan.sh(定时任务)或
     # 本脚本的 --review-channel(渠道会话)写入。目的是把"谁发起了这次请求"从
@@ -487,14 +494,19 @@ def main():
             return 1
 
     # 审阅渠道(阶段 1 要单独发的那个 / 阶段 2 要排除的那个):
-    #   阶段 2(--review-approved): 待审标记里记录的渠道 > 范围锁里的渠道 > 显式指定
+    #   阶段 2(--review-approved): **只认待审标记** —— .review-pending 是"审阅版
+    #                              已发出"的唯一凭证, 范围锁/env 兜底会把"声明过
+    #                              范围"错当"已审阅"(2026-10-24 修复: run_scan.sh
+    #                              --review-channel 路径既 export REVIEW_CHANNEL
+    #                              又写 review 锁, 原兜底链让 Agent 跳过阶段 1
+    #                              直接 --review-approved 就能群发其余渠道)
     #   有待审标记(未批准):        一律用标记里的渠道 —— 待审期间任何推送
     #                              (含 --force / --message)都不得扩散到其它渠道
     #   其余:                      范围锁里的渠道 > 显式指定的渠道
     pending_label = _pending_channel(args.date)
     env_label = channel_label(review_channel) if review_channel else ""
     if args.review_approved:
-        review_label = pending_label or lock_label or env_label
+        review_label = pending_label
     elif pending_label:
         review_label = pending_label
     else:
@@ -639,8 +651,10 @@ def main():
             # 2026-10-20 修复: 阶段 2 读不到审阅渠道时, 原实现"警告一下照常全量发"
             # —— 这是又一个"忘了 → 发到所有渠道"的口子(没有待审记录却喊批准)。
             # 现在直接拒绝: 没有待审记录就没有"批准"的对象。
-            print("[错误] 阶段 2 无审阅渠道可读(无 .review-pending 待审标记, 也没有"
-                  "推送范围锁), 已中止。")
+            # 2026-10-24 加固: 范围锁 / REVIEW_CHANNEL 也不再兜底(见上方解析注释),
+            # 只有 .review-pending 标记能证明审阅版确实发出过。
+            print("[错误] 阶段 2 无待审记录可批准(.review-pending 标记不存在), 已中止。")
+            print("       范围锁/REVIEW_CHANNEL 只能证明\"声明过范围\", 不能证明审阅版已发出。")
             print("       阶段 2 必须紧跟在阶段 1(--review-channel <渠道>)之后执行; "
                   "若确实要全量, 请显式声明: ")
             print("         python scripts/push_scope.py --date %s --broadcast --source manual" % args.date)

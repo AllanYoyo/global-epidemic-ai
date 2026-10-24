@@ -35,7 +35,17 @@ POLICY_IMPACT_TYPES = {"约束", "机会", "中性"}
 POLICY_IMPACT_LEVELS = {"高影响", "中影响", "低影响"}
 POLICY_CHINA_RELEVANCE = {"直接涉及中国", "间接影响", "暂无明显关联"}
 # 合并更新时的兜底默认值: 不覆盖库中更明确的取值, 防止重抽取抹掉核验/研判结论
-DEFAULT_SENTINELS = {"verification_status": "unverified", "policy_status": "已生效"}
+# 合并更新时不得覆盖已有结论的兜底默认值(须与 fill_defaults 填的兜底保持一致)。
+# 2026-10-24 补全: 原先只有 verification_status/policy_status 两键, 而
+# fill_defaults 还会给 action_type/policy_domain 填兜底 —— 二轮重抽没识别出
+# 动作/领域时(校验对缺省放行), "调整"/"measures" 会把库里的 "收紧"/"animal"
+# 等真实结论洗掉, 直接违反"兜底默认值不覆盖"合同(实测复现)。
+DEFAULT_SENTINELS = {
+    "verification_status": "unverified",
+    "policy_status": "已生效",
+    "action_type": "调整",
+    "policy_domain": "measures",
+}
 # 旧闻拦截默认窗口(天): 新记录发布时间早于"今天-N 天"拒收; 0 或 --max-age-days 0 关闭
 DEFAULT_MAX_AGE_DAYS = 7
 

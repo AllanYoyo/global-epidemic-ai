@@ -844,7 +844,44 @@ class PushReportReviewGateTests(unittest.TestCase):
         # 现在直接拒绝: 没有待审记录就没有"批准"的对象。
         rc, out = self._run(["--date", "2026-10-19", "--review-approved"])
         self.assertNotEqual(rc, 0, out)
-        self.assertIn("无审阅渠道", out)
+        self.assertIn("无待审记录", out)
+        self.assertEqual(self.calls, [], out)
+
+    def test_stage2_with_env_or_lock_but_no_pending_is_refused(self):
+        # 2026-10-24 体检 H5: 原实现 review_label = pending or lock or env 的兜底链
+        # 让"无待审记录即拒绝"只在三者全空时生效 —— run_scan.sh --review-channel
+        # 路径既 export REVIEW_CHANNEL 又写 review 锁, Agent 跳过阶段 1 直接
+        # --review-approved 就能向其余渠道群发(未审先扩散)。现在阶段 2 只认
+        # .review-pending 标记(它是"审阅版已发出"的唯一凭证)。
+        # 场景 1: 有 REVIEW_CHANNEL 环境变量, 无待审标记
+        rc, out = self._run(["--date", "2026-10-19", "--review-approved"],
+                            env_extra={"REVIEW_CHANNEL": "wechat"})
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("无待审记录", out)
+        self.assertEqual(self.calls, [], out)
+        # 场景 2: 有 review 范围锁(run_scan.sh --review-channel 会写), 无待审标记
+        self.ps.write_scope("2026-10-19", "review", channel="wechat",
+                            source="run_scan.sh:policy:session")
+        self.calls.clear()
+        rc, out = self._run(["--date", "2026-10-19", "--review-approved"],
+                            env_extra={"REVIEW_CHANNEL": "wechat"})
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("无待审记录", out)
+        self.assertEqual(self.calls, [], out)
+        # 场景 3: 显式 --review-channel 与 --review-approved 组合同样不兜底
+        self.calls.clear()
+        rc, out = self._run(["--date", "2026-10-19", "--review-approved",
+                             "--review-channel", "wechat"])
+        self.assertNotEqual(rc, 0, out)
+        self.assertEqual(self.calls, [], out)
+
+    def test_message_with_review_approved_is_mutually_exclusive(self):
+        # 2026-10-24 体检 H5: --review-approved 的"批准对象"只能是已发出的审阅版
+        # 日报; 自定义文本没有对应待审对象, 组合即拒绝, 不给"未审先扩散"留旁路。
+        rc, out = self._run(["--date", "2026-10-19", "--review-approved",
+                             "--message", "自定义文本"])
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("互斥", out)
         self.assertEqual(self.calls, [], out)
 
     def test_push_report_loads_channels_from_hermes_env(self):
@@ -1744,6 +1781,28 @@ class ScanFailureGuardTests(unittest.TestCase):
         text = self._run_scan_text()
         self.assertIn("存档量超限", text)
 
+    def test_run_scan_counts_meta_files_only(self):
+        # 2026-10-24 体检 H2: 原先 RAW_N 数"所有非 meta 文件", 把取数段强制创建的
+        # 交付文件(candidates.json/extracted-policy.json/search-log.md, prompt 要求
+        # 哪怕 0 条也要建)全数进去 —— 安静的一天 RAW_N 也 ≥3, "当日有存档却 0 入库"
+        # 恒触发, 每天必红。必须只数 *.meta.json(collect.py 每条存档恰一个)。
+        text = self._run_scan_text()
+        self.assertIn("-name '*.meta.json'", text)
+        self.assertNotIn("! -name '*.meta.json'", text)
+
+    def test_run_scan_trap_armed_before_scope_case(self):
+        # 2026-10-24 体检 H1: _BROADCAST_ARMED=0 的初始化原先写在 case 块**之后**,
+        # 把 broadcast 分支刚设的 1 无条件清零 —— EXIT trap 撤锁在所有退出路径上
+        # 空转, "任何非正常退出一律撤销"的保护形同虚设。初始化必须在 case 之前。
+        text = self._run_scan_text()
+        init = text.index("_BROADCAST_ARMED=0")
+        arm = text.index("_BROADCAST_ARMED=1")
+        case_start = text.index('case "$SCOPE" in')
+        self.assertLess(init, case_start,
+                        "布防初始化必须出现在范围声明 case 之前")
+        self.assertLess(case_start, arm,
+                        "布防置 1 必须发生在范围声明 case 内(锁写下之后)")
+
 
 class BriefTextFocusTests(unittest.TestCase):
     """IM 卡片"重点关注"口径必须与 report.py 一致(2026-10-19 修复)。
@@ -1865,6 +1924,33 @@ class NormalizeMergeTests(unittest.TestCase):
             self.assertEqual(b["first_seen"], first_seen)
             self.assertEqual(b["summary_cn"], "更新后的摘要")
         finally:
+            con.close()
+
+    def test_fill_default_sentinels_do_not_overwrite_real_conclusions(self):
+        # 2026-10-24 体检 H4: DEFAULT_SENTINELS 原先缺 action_type/policy_domain,
+        # 同一显式 event_id(镜像回放/增量更新路径)二轮重抽没识别出动作/领域时,
+        # fill_defaults 的兜底 "调整"/"measures" 会把库里的 "收紧"/"animal" 洗掉
+        # —— 违反"空值和兜底默认值不覆盖已有核验/研判结论"的合同。
+        from normalize import open_db, upsert, fill_defaults
+        con = open_db()
+        ev_id = "5entinel0test"
+        try:
+            first = fill_defaults(dict(_source_event(event_id=ev_id)))
+            self.assertEqual(first["action_type"], "收紧")
+            upsert(con, first, merge=True)
+            # 第二轮: 同一 event_id, 但 action_type/policy_domain 缺失,
+            # fill_defaults 会各填兜底值 "调整"/"measures"
+            second = _source_event(event_id=ev_id)
+            second.pop("action_type")
+            second.pop("policy_domain")
+            second = fill_defaults(dict(second))
+            self.assertEqual(second["action_type"], "调整")  # 兜底确实已填
+            merged = upsert(con, second, merge=True)
+            self.assertEqual(merged["action_type"], "收紧")   # 库里真实结论保住了
+            self.assertEqual(merged["policy_domain"], "animal")
+        finally:
+            con.execute("DELETE FROM events WHERE event_id = ?", (ev_id,))
+            con.commit()
             con.close()
 
 

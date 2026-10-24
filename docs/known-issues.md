@@ -2,13 +2,117 @@
 
 > 体检沉淀与工单跟踪。本文件登记代码库**已识别但未修复**的问题,按"高/中/低"分档。
 > 修复后从"未修复"移入"已修复"区,保留作为历史与回归参考。
-> 上次体检: **2026-10-20** (基于 2026-10-19 专项复审后的推送范围锁改造、10-20 钉钉误推事故复盘, 以及当日微信端到端验证时发现的 Word 附件缺失问题)。
+> 上次体检: **2026-10-24** (全量代码审查: 推送链路 / 扫描编排 / 数据合同与展示层三线并行, 高危 H1/H2/H4/H5 当日修复, 见文末 2026-10-24 小节)。
 
 ---
 
 ## 未修复
 
+### 高 (2026-10-24 体检新增, 建议立即排期)
+
+#### H3 · 取数段非超时失败(rc=1/2)被静默吞掉 —— 空日报照常全量推送, rc=0 假成功
+- 位置: `scripts/run_scan.sh` 取数段 FRC 分支(约 :366-372)
+- 现象: `FRC` 只在 124/137(超时)时处理, 其它失败码只打一行日志"继续加工出报",
+  之后不再被引用。取数段 CLI 以 rc=1/2 失败(ws 提交失败/网关瞬断)而加工段正常时:
+  零存档空数据照样出报并 broadcast 推送"今日无新增", 产物校验因无存档目录全部放行
+  → cron 记成功; 且该形态不触发孤儿清理, 网关侧孤儿 turn 继续烧配额。
+- 建议处理: FRC 非 0 时置 MISSING 或至少记录失败因子, 与 1afdbbd 的"有存档 0 入库
+  判失败"对偶补上"取数没跑成也不许判成功"。
+
+#### H6 · 展示/投递层注入三连(数据源自外部网页, 攻击面真实)
+- 位置与形态:
+  ① **Excel/CSV 公式注入**: `scripts/report.py` export_table —— `title_cn`/`summary_cn`/
+     `source.name` 以 `=`/`+`/`-`/`@` 开头时, openpyxl 存为公式、CSV 裸写, 打开台账即
+     触发 DDE/外链。修法: 写入前给危险前缀加 `'` 前缀。
+  ② **面板 stored XSS**: `webapp/app.py` mdView 用 `marked.parse(t)` 直接赋 innerHTML,
+     marked 默认放行内联 HTML; 标题含 `<img onerror=...>` 或 source.url 为
+     `javascript://官方域名/...`(入库端只查域名后缀不查 scheme)即执行。修法: 配置
+     marked sanitize 或引入 DOMPurify, 链接渲染前校验 scheme 白名单。
+  ③ **MEDIA 附件注入**: `scripts/push_report.py` brief_text 把库内标题拼进正文不清洗
+     换行, send_hermes 只在尾部追加 `MEDIA:` 行 —— 若 hermes 解析正文中任意 `MEDIA:`
+     行[待验证: hermes 的 MEDIA 解析规则], 标题注入即可外发任意白名单路径文件(含
+     G11 的凭据快照)。修法: 标题/正文剥离换行 + `MEDIA:` 路径白名单只认
+     `data/reports/`(即 G11 处置②, 至今未落地)。
+
 ### 中 (建议排期修)
+
+#### M1 · 合并 patch 不过滤空串, 且 source dict 整体替换抹掉 official_note 审计留痕
+- 位置: `scripts/normalize.py` upsert merge(约 :656-661)
+- 现象: `v not in (None, [], {})` 放过空串 `''` —— 重抽写 `summary_cn: ""` 会覆盖旧摘要;
+  `source` 是 dict 整体替换, 旧记录经 `official:1` 逃生口生成的 `source.official_note`
+  在下一次合并更新时必然丢失, 事后审计链断裂。
+- 建议处理: patch 过滤加空串; source 按 key 深合并或至少保留旧 official_note。
+
+#### M2 · B3 已修复项回归: dry-run 不再提示"今日已推送过"
+- 位置: `scripts/push_report.py` dry-run 分支(git 证据: 0459442 重写时删除了 ea9b0e8 加的提示行)
+- 现象: 当日已推送后 `--dry-run` 只打"将发送到 X", Agent 会被误导带 `--force` 补发
+  造成重复推送(正是 B3 当初要防的场景)。
+- 建议处理: 恢复 2026-10-18 B3 的提示行; known-issues"已修复"区该条与现实不符。
+
+#### M3 · HERMES_PUSH_CHANNELS / HERMES_CLI 不在 PUSH_ENV_KEYS —— 人工直跑渠道集合静默不一致
+- 位置: `scripts/push_scope.py` PUSH_ENV_KEYS(约 :159-160); `hermes_broadcast_channels`
+  运行时读 env, `HERMES_COMMAND` 模块导入时固化
+- 现象: 把 `HERMES_PUSH_CHANNELS=weixin` 写进 `~/.hermes/.env`(最自然的配置位置)后,
+  cron 经 run_scan.sh source 全量 .env 正常, 人工/Agent 直跑只补 PUSH_ENV_KEYS 那 8 个
+  webhook/SMTP 键 → 全量集合静默少发微信(G6 同族缺口)。
+- 建议处理: 两个键补进 PUSH_ENV_KEYS; HERMES_COMMAND 改为用时读取。
+
+#### M5 · 全链路无并发锁, am 与 policy 超时预算叠加后可撞车
+- 位置: `scripts/run_scan.sh` 全文(无 flock); 单轮最坏 ≈56 分钟
+  (预检 180 + 取数 1500 + 孤儿重启 600+180 + 加工 900)
+- 现象: am(06:30)拖满即 07:26 结束, 余量稍大就与 policy(07:30)重叠; 手动
+  `--stage process` 补跑也可与在跑轮次并发 → 双 Agent 抢配额、collect seq 撞号(C6)、
+  范围锁/推送标记竞态。
+- 建议处理: `exec 9>"$DATA_DIR/.scan.lock"; flock -n 9 || exit`; crontab.example 补约定。
+
+#### M6 · run_scan.sh 未 export EPIDEMIC_DATA_DIR —— Agent 侧写入目录可能与校验目录分叉[待验证]
+- 位置: `scripts/run_scan.sh`(DATA_DIR 就地取值不 export)
+- 现象: Agent turn 在网关守护进程环境执行, 不继承 run_scan 的 shell 变量。若
+  EPIDEMIC_DATA_DIR 只配在 cron/调用方环境而不在 `~/.hermes/.env`, 产物校验盯
+  `$EPIDEMIC_DATA_DIR/reports` 而 Agent 写 repo 内 data/ → G13 的 100% 失败形态复活。
+- 建议处理: run_scan.sh `export EPIDEMIC_DATA_DIR`(与 EPIDEMIC_DB 一并), 或校验前
+  显式传给下游命令。
+
+#### M8 · 推送幂等无文件锁: TOCTOU 双发 + 部分成功不写 .pushed 导致重发全部渠道
+- 位置: `scripts/push_report.py` 幂等检查(约 :550-575)与发送+写标记(约 :706-743)之间无互斥
+- 现象: ①并发调用两边都通过 isfile 检查 → 双发; ②广播中任一渠道失败(ok<len)→ 不写
+  `.pushed` 也不写 pending → 下一次合法调用把已成功渠道再发一遍。
+- 建议处理: 写标记改为"先占后发"(O_EXCL 创建 + 内容记录已发渠道), 失败重试只补发缺口。
+
+#### M9 · 外部提供的 event_id 不校验 12 位 hex, 一条脏记录打崩整个面板
+- 位置: `scripts/normalize.py` fill_defaults(约 :621, `e.get("event_id") or ...`) +
+  `webapp/app.py` `_jitter`(`int(event_id, 16)` 无保护)
+- 现象: 输入 JSON 手写 `event_id: "ZZ-9"` 原样入库; 该国地理编码命中时 `/api/events`
+  抛 ValueError → 整体 500, 台账+地图全空, 无单条隔离。
+- 建议处理: normalize 校验外部 event_id 为 12 位 hex; webapp _jitter 捕获异常回退 0 偏移。
+
+#### M10 · policy_key 在 event_id_of 不做 strip/lower, 空白/大小写差异导致同一政策拆条
+- 位置: `scripts/normalize.py`(约 :434 vs :445 —— `_subject_components` 有 strip,
+  `event_id_of` 的 `e.get("policy_key")` 直接用)
+- 现象: `' AB '` 与 `'AB'` 算出不同 event_id, 同一条政策 first_seen/研判结论分家(B2 同族)。
+- 建议处理: event_id_of 对 policy_key 同样 strip().lower()。
+
+#### M11 · 无斜杠 URL(`https://host?list=all`)整体绕过聚合页拦截
+- 位置: `scripts/normalize.py` `_is_aggregate_url`(约 :316-322, 早退发生在 query 判定
+  与 host 兜底之前)
+- 现象: URL 在 host 后直接跟 query、无 `/` 时, 连 AGGREGATE_HOSTS 兜底都被跳过
+  —— 2026-10-19 专门堵的目录页绕道口子在这类写法下重新打开(F5 的姊妹)。
+- 建议处理: 早退前先完成 query 参数与 host 兜底判定。
+
+#### M12 · geo 编码持全局锁做网络请求, 冷缓存时面板分钟级无响应(C12 叠加无自愈)
+- 位置: `webapp/app.py` country_centroid(锁内 sleep 限速 + urlopen 8s 超时)
+- 现象: 首次部署/缓存冷时一次请求串行查 N 国(N×1.1s+), 期间所有需要 geo 的请求排队;
+  叠加 C12(失败永久缓存 None)后该国会从地图永久消失。
+- 建议处理: 锁只护 cache 读写, 网络请求移出锁外; 失败不落缓存(与 C12 一并修)。
+
+#### M13 · collect.py 抓 PDF 按 utf-8 强解成 mojibake, 且 resp.read() 无大小上限
+- 位置: `scripts/collect.py` fetch(约 :43-51)
+- 现象: ePing PDF 直链是流程明文要求存档的对象, `application/pdf` 无 charset →
+  errors="replace" 解码后存档不可读, "source.quote 逐字摘自存档文件"对此类存档不可满足;
+  超大响应全量入内存; 30s timeout 是 per-blocking-op, 慢滴流可拖更久。
+- 建议处理: 二进制 Content-Type 直接落盘不解码; 流式读设上限(如 5MB)。
+
+### 中 (建议排期修) · 历史遗留
 
 #### B1 · `normalize.upsert()` 缺事务边界, 并发写有 read-modify-write 丢数据风险
 - 位置: `scripts/normalize.py:407-429`
@@ -81,6 +185,57 @@
 ---
 
 ## 已修复 (历史)
+
+### 2026-10-24 全量体检 (高危四条当日闭环)
+
+#### H1 · EXIT trap 撤锁机制被初始化语句的位置错误整体杀死
+- 位置: `scripts/run_scan.sh`(8a3ac17 引入; 修复: 布防初始化移到范围声明 case 之前)
+- 现象: `_BROADCAST_ARMED=0` 写在 case 块**之后**无条件执行, 把 broadcast 分支刚设的
+  1 立刻清零 —— `trap _revoke_broadcast_lock EXIT` 在**任何**退出路径上都空转,
+  "任何非正常退出一律撤销广播锁"的保护(183 行注释自宣)形同虚设。网关预检失败
+  exit 1 / SIGTERM / OOM 场景下 broadcast 锁残留盘上 ≤60 分钟, 窗口内
+  `push_report.py --broadcast` 被放行 → 群发钉钉(10-20 事故重演路径)。
+- 修法: 初始化移到 case 之前(set -u 下 trap 函数需要它已定义); 成功路径 476 行的
+  disarm 保留。行为级验证: 新顺序 trap 输出"撤锁生效", 旧顺序输出"空转(锁残留)"。
+- 回归: `test_smoke.py::ScanFailureGuardTests::test_run_scan_trap_armed_before_scope_case`
+  (静态断言初始化 < case < 置 1 的行序)。
+
+#### H2 · 产物校验把交付文件当"存档"计数 —— 安静的一天必判失败, 满额日误判超限
+- 位置: `scripts/run_scan.sh` RAW_N(419-437)
+- 现象: 原先"数所有非 meta 文件"把取数段 prompt **强制**创建的交付文件
+  (candidates.json / extracted-policy.json / search-log.md, 要求"哪怕 0 条也要建空
+  数组")与加工段产物(policy-findings.md)全数进去 —— 安静的一天 RAW_N 也 ≥3,
+  「当日有存档却 0 入库」恒触发 → policy 档每天必红, "安静的一天允许成功"分支
+  永不可达; 满额日(6 html + 6 meta + 交付文件)还撞 `>12` 误判"穷举下载"。
+- 修法: RAW_N 改为只数 `*.meta.json`(collect.py 每条存档恰写一个), 计数即真实存档
+  条数, 交付/中间文件天然排除。验证: 2 条存档+6 个交付文件场景, 新计数=2, 旧计数=7。
+- 回归: `test_smoke.py::ScanFailureGuardTests::test_run_scan_counts_meta_files_only`。
+
+#### H4 · DEFAULT_SENTINELS 缺 action_type/policy_domain —— 合并更新时兜底值洗掉真实结论
+- 位置: `scripts/normalize.py`(修复: 哨兵表补两键)
+- 现象: `fill_defaults` 给缺省的 `action_type` 填 `"调整"`、`policy_domain` 填
+  `"measures"`, 但合并保护表 DEFAULT_SENTINELS 只有 verification_status/policy_status
+  两键 —— 同一显式 event_id(镜像回放/增量更新路径)二轮重抽没识别出动作/领域时,
+  兜底值照常进 patch 把库里的 `收紧`/`animal` 洗掉, 直接违反"空值和兜底默认值
+  不覆盖已有核验/研判结论"的合同(单测复现)。
+- 修法: DEFAULT_SENTINELS 补 `action_type: "调整"`、`policy_domain: "measures"`,
+  与 fill_defaults 的兜底保持一致。
+- 回归: `test_smoke.py::NormalizeMergeTests::test_fill_default_sentinels_do_not_overwrite_real_conclusions`。
+
+#### H5 · 阶段 2 的"无待审记录即拒绝"可被 REVIEW_CHANNEL/范围锁兜底绕过 —— 未经确认即群发
+- 位置: `scripts/push_report.py`(修复: 阶段 2 只认 .review-pending 待审标记)
+- 现象: `review_label = pending_label or lock_label or env_label` 的兜底链让"无待审
+  记录即拒绝"只在三者全空时生效。而 `run_scan.sh --review-channel` 路径既
+  `export REVIEW_CHANNEL` 又写 review 锁 —— Agent 跳过阶段 1 直接 `--review-approved`
+  就会向"除审阅渠道外全部渠道"群发(钉钉照收), 违反"先在原渠道确认再扩散"红线;
+  `--review-approved --review-channel` 显式组合同样无检查。
+- 修法: ①阶段 2 的 review_label **只认待审标记**(它是"审阅版已发出"的唯一凭证,
+  范围锁/env 只能证明"声明过范围"); ②`--review-approved` 与 `--message` 互斥
+  (自定义文本没有可批准的待审对象); 拒绝文案同步改口径。
+- 回归: `test_smoke.py::PushReportReviewGateTests::test_stage2_with_env_or_lock_but_no_pending_is_refused`
+  (env/锁/显式参数三场景)与 `::test_message_with_review_approved_is_mutually_exclusive`;
+  同步修正既有断言 `test_stage2_without_any_review_channel_is_refused` 的文案。
+- 自测: 183 → 188 条全绿。
 
 ### 2026-10-20 推送范围锁改造 (G1 加固之后)
 

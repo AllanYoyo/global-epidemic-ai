@@ -63,7 +63,14 @@ while [ $# -gt 0 ]; do
     *) echo "未知参数: $1"; usage; exit 2 ;;
   esac
 done
-MODE="${MODE:-am}"
+# 无参数不再默认 am(2026-10-24 修复): 原实现静默按 am 起一轮真实扫描 ——
+# 手滑/写错参数的后果是"直接烧一轮 token", 与本仓库 fail-closed 取向相反。
+#忘了指定模式的后果必须是"没跑"(马上发现), 而不是"跑了个没料到的模式"。
+if [ -z "$MODE" ]; then
+  echo "[错误] 未指定模式(am|pm|policy)。"
+  usage
+  exit 2
+fi
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 PY="${PYTHON_BIN:-python3}"

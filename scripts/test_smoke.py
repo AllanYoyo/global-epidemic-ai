@@ -2070,6 +2070,13 @@ class FetchGroupingTests(unittest.TestCase):
         self.assertIn("严禁 read_file", text)
         self.assertIn("extracted-policy.jsonl", text)
 
+    def test_run_scan_requires_explicit_mode(self):
+        # 无参数不得静默默认 am 起真实扫描(2026-10-24 现场手滑实测);
+        # fail-closed: 忘了指定模式的后果是"没跑", 不是"跑了个没料到的模式"
+        text = self._run_scan_text()
+        self.assertIn("未指定模式", text)
+        self.assertNotIn('MODE="${MODE:-am}"', text)
+
     def test_scope_max_age_widened_for_groups(self):
         # 拆组后最坏路径 ~70 分钟(两组加权超时 + 加工 + 网关重启等待),
         # 60 分钟会把"这一轮还在跑"的合法广播锁误判过期 → 全量推送被自己拦死

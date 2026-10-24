@@ -1816,12 +1816,14 @@ class TokenEconomyTests(unittest.TestCase):
 
     def test_run_scan_prompt_uses_jsonl_and_bans_fileread(self):
         # prompt 必须已切换到 JSONL 追加 + 禁读仓库文件 + 禁验证打印
+        # (2026-10-24 P2: 追加改 jsonl_append.py 硬约束, 断言随行为更新)
         with open(os.path.join(REPO, "scripts", "run_scan.sh"), encoding="utf-8") as f:
             text = f.read()
         self.assertIn("extracted-policy.jsonl", text)
         self.assertIn("candidates.jsonl", text)
         self.assertIn("严禁 read_file", text)
-        self.assertIn("不打印任何内容", text)
+        self.assertIn("jsonl_append.py", text)
+        self.assertIn("不打印记录内容", text)
         self.assertIn("scan_targets.py", text)          # 当日清单预渲染注入
         self.assertIn("COUNTRY_BLOCK", text)
         # 旧指令不得残留: "追加写入 ... candidates.json"(读改写整个 JSON 的病根)
@@ -2073,6 +2075,103 @@ class FetchGroupingTests(unittest.TestCase):
         # 60 分钟会把"这一轮还在跑"的合法广播锁误判过期 → 全量推送被自己拦死
         import push_scope
         self.assertEqual(push_scope.SCOPE_MAX_AGE_MINUTES, 75)
+
+
+class ToolOutputCapTests(unittest.TestCase):
+    """工具输出硬上限(2026-10-24 P2): 纪律约束不住的, 用脚本保证。
+
+    实证(10-24 治理后一轮): 单次 execute_code 输出仍 13.4KB(prompt 红线 8KB),
+    25 次调用累计 115KB —— 把已存档 HTML 的链接清单倒进上下文。jsonl_append.py
+    只回执一行、snip.py 硬性截断, 模型想违反也违反不了。
+    """
+
+    def _run_cli(self, mod, argv):
+        buf = io.StringIO()
+        with mock.patch("sys.argv", argv), redirect_stdout(buf):
+            try:
+                rc = mod.main()
+            except SystemExit as e:
+                rc = e.code
+        return rc, buf.getvalue()
+
+    def test_jsonl_append_receipt_only(self):
+        # 追加成功只回执一行; 嵌套键落 dict; 空值存 null; 计数正确
+        import jsonl_append
+        tmp = tempfile.mkdtemp(prefix="jla-")
+        f = os.path.join(tmp, "raw", "2026-10-24", "candidates.jsonl")
+        try:
+            rc, out = self._run_cli(jsonl_append, [
+                "jsonl_append.py", f,
+                "title=甲政策", "url=https://official.example/a",
+                "country_en=Demo Land", "brief=", "products=牛肉,乳制品"])
+            self.assertEqual(rc, 0, out)
+            self.assertEqual(len(out.strip().splitlines()), 1, out)
+            self.assertIn("total 1", out)
+            with open(f, encoding="utf-8") as fh:
+                rec = json.loads(fh.read().splitlines()[0])
+            self.assertEqual(rec["title"], "甲政策")
+            self.assertIsNone(rec["brief"])
+            self.assertEqual(rec["products"], ["牛肉", "乳制品"])
+            # 第二条: 抽取记录口径(title_cn + source.*) + total 计数
+            rc, out = self._run_cli(jsonl_append, [
+                "jsonl_append.py", f,
+                "title_cn=乙政策", "source.url=https://official.example/b",
+                "source.tier=1", "source.quote=原文关键句"])
+            self.assertEqual(rc, 0, out)
+            self.assertIn("total 2", out)
+            with open(f, encoding="utf-8") as fh:
+                rec = json.loads(fh.read().splitlines()[1])
+            self.assertEqual(rec["source"]["url"], "https://official.example/b")
+            self.assertEqual(rec["source"]["tier"], "1")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_jsonl_append_rejects_incomplete(self):
+        # 缺 title/url 拒绝追加 —— 残行不入库
+        import jsonl_append
+        tmp = tempfile.mkdtemp(prefix="jla-")
+        f = os.path.join(tmp, "c.jsonl")
+        try:
+            rc, out = self._run_cli(jsonl_append, ["jsonl_append.py", f, "title=只有标题"])
+            self.assertEqual(rc, 1)
+            self.assertIn("拒绝", out)
+            self.assertFalse(os.path.exists(f))
+            rc, out = self._run_cli(jsonl_append, ["jsonl_append.py", f, "不是键值对"])
+            self.assertEqual(rc, 1)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_snip_hard_byte_cap(self):
+        # 10KB 文件无论默认还是 --grep, 回显(含截断标注)都被压在 ~bytes+标注 内
+        import snip
+        tmp = tempfile.mkdtemp(prefix="snip-")
+        p = os.path.join(tmp, "arch.html")
+        body = ("x" * 200 + "目标关键词" + "y" * 200) * 25   # ~10KB
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(body)
+        try:
+            rc, out = self._run_cli(snip, ["snip.py", p])
+            self.assertEqual(rc, 0)
+            self.assertLessEqual(len(out.encode("utf-8")), 2048 + 120, out)
+            self.assertIn("已截断", out)
+            rc, out = self._run_cli(snip, ["snip.py", p, "--grep", "目标关键词"])
+            self.assertEqual(rc, 0)
+            self.assertIn("目标关键词", out)
+            self.assertLessEqual(len(out.encode("utf-8")), 2048 + 120, out)
+            rc, out = self._run_cli(snip, ["snip.py", p, "--grep", "不存在词"])
+            self.assertEqual(rc, 0)
+            self.assertIn("无匹配", out)
+            rc, out = self._run_cli(snip, ["snip.py", os.path.join(tmp, "no.html")])
+            self.assertEqual(rc, 1)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_run_scan_prompt_pins_helper_tools(self):
+        # prompt 必须钉死 snip/jsonl_append 用法(否则 Agent 退回 execute_code 自由发挥)
+        with open(os.path.join(REPO, "scripts", "run_scan.sh"), encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn("snip.py <存档文件> --grep", text)
+        self.assertIn("source.publish_date=<YYYY-MM-DD>", text)   # 抽取键值模板内联
 
 
 class BriefTextFocusTests(unittest.TestCase):

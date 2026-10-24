@@ -257,20 +257,20 @@ case "$MODE" in
 @@COUNTRY_BLOCK@@
 【纪律】
 1) 通道探测已由脚本完成(见下方【通道探测结果】): [dead] 通道在 search-log.md 记一行状态后直接跳过, 不再花任何工具调用; 只对 [ok] 且可能有候选的通道继续。下方体检点名的死通道同样照指示跳过或复检一次。仅当下方**没有**【通道探测结果】时才自行批次化探测: 一个 bash for 循环一次探完, 每通道 curl -m 5 -sL -o /dev/null -w '%{http_code} 地址'(地址即 url), 只看汇总状态清单。
-2) 抓任何页面**先落盘**(collect.py 或 curl -o), 需要判断内容时只 grep/head/python 摘 ≤2KB 片段, 严禁把整页正文留在对话里; 单次工具输出超过 8KB 即违规。
+2) 抓任何页面**先落盘**(collect.py 或 curl -o), 需要判断内容时只用 python3 scripts/snip.py <存档文件> --grep <关键词>(脚本硬性只回显 ≤2KB); 严禁把整页正文留在对话里; 单次工具输出超过 8KB 即违规。
 3) web_search 本段不超过 15 次; 同一工具连败 2 次就换; 浏览器失败就弃用浏览器。
 4) WTO ePing 只走列表页: 行式列表存盘后用 python3 scripts/parse_eping.py <列表文件> --days 7 预筛, 只对窗口内条目下载, PDF 直链就在列表行里不要自己拼。
 5) 每找到一条**立刻**三步, 不留到收尾:
    ① 存档: python3 scripts/collect.py --url <直链> --title <标题>;
-   ② 候选: 用 execute_code 构造候选 dict(title/url/country_en/publish_date/source_name/brief/topics), 追加**一行**到 data/raw/$SCAN_DATE/candidates.jsonl —— 用 open 路径加 'a' 模式写 json.dumps(x, ensure_ascii=False) 加换行, **不打印任何内容**;
-   ③ 抽取: 从刚落盘的存档文件摘标题/发布日期/关键句(每次 ≤2KB), 按 prompts/policy-extraction.md 的字段规则抽成 policy 记录, 同样追加一行到 data/raw/$SCAN_DATE/extracted-policy.jsonl, **不打印**。
+   ② 候选: python3 scripts/jsonl_append.py data/raw/$SCAN_DATE/candidates.jsonl title=<标题> url=<直链> country_en=<英文国名> publish_date=<YYYY-MM-DD> source_name=<源> brief=<一句话> —— 脚本只回执一行(ok +1), **不打印记录内容**; 参数值含空格用单引号括起;
+   ③ 抽取: 先用 snip.py 从刚落盘的存档摘标题/发布日期/关键句, 再用 python3 scripts/jsonl_append.py data/raw/$SCAN_DATE/extracted-policy.jsonl 追加一行, 键值模板: record_type=policy title_cn=<中文标题> title_en=<英文标题> country_cn=<国名> country_en=<英文国名> policy_domain=<animal|plant|both|trade|measures> action_type=<收紧|放松|调整|恢复> event_date=<YYYY-MM-DD> effective_date=<YYYY-MM-DD> products=<英文逗号分隔> summary_cn=<中文摘要> source.tier=<1|3> source.name=<源名> source.url=<直链> source.publish_date=<YYYY-MM-DD> source.quote=<≤120字逐字摘录> —— 原文没有的信息留空(存 null), **不打印记录内容**。
    写完不回读、不打印验证 —— 记录对不对由加工段 normalize 校验兜底。
 6) 每条必须有 source.url 与 source.quote(≤120 字, 逐字摘自存档文件); source.publish_date 用页面自己的发布日期, 不得用抓取日; 原文没有的信息填 null, 严禁编造; 旧闻(超 7 天)与第三方站点不写入, 只在 search-log.md 记一行线索。
 7) 当日存档上限 12 个文件(约 6 条), 触顶即停, 剩余通道记进 search-log.md; 时间到立刻交卷。
 【交付】data/raw/$SCAN_DATE/ 下: 存档(html+meta) / candidates.jsonl / extracted-policy.jsonl / search-log.md(逐通道一行状态)。哪怕 0 条也要创建两个空的 .jsonl 文件。
 【红线】严禁 --broadcast; 严禁穷举下载 PDF; 严禁第三方站点当 tier=1; 严禁运行 normalize/risk/report/push_report(抢跑会把 first_seen 记错日子)。"
     PROMPT_PROCESS="执行 $SCAN_DATE 政策变化**加工阶段**(东八区)。输入是本地文件, 不联网检索; 轻收尾, 正常几分钟。**严禁 read_file 或 cat 仓库规则文件**(SKILL.md/AGENTS.md/scripts), 用法都在本 prompt。
-1) 主输入 data/raw/$SCAN_DATE/extracted-policy.jsonl(逐行 JSON)。对照 candidates.jsonl 找「已存档但未抽取」的漏条: 先看 search-log.md 是否已记为线索或不合格(第三方/旧闻), 确实漏抽的才读对应存档原文、按 prompts/policy-extraction.md 补抽并追加一行进 extracted-policy.jsonl —— **不要重读已抽取条目的原文, 不要打印记录内容**。两个清单都空或不存在时直接跳到第 4 步(仍要出报)。
+1) 主输入 data/raw/$SCAN_DATE/extracted-policy.jsonl(逐行 JSON)。对照 candidates.jsonl 找「已存档但未抽取」的漏条: 先看 search-log.md 是否已记为线索或不合格(第三方/旧闻), 确实漏抽的才用 python3 scripts/snip.py 摘该存档原文(硬性 ≤2KB), 再用 python3 scripts/jsonl_append.py data/raw/$SCAN_DATE/extracted-policy.jsonl <键值对> 补抽追加一行(键: record_type/title_cn/title_en/country_cn/country_en/policy_domain/action_type/event_date/effective_date/products/summary_cn/source.tier/source.name/source.url/source.publish_date/source.quote, 原文没有的留空存 null) —— **不要重读已抽取条目的原文, 不要打印记录内容**。两个清单都空或不存在时直接跳到第 4 步(仍要出报)。
 2) 入库: python3 scripts/normalize.py --input data/raw/$SCAN_DATE/extracted-policy.jsonl --out data/events/$SCAN_DATE/ --db --max-age-days 7。tier=1 只认官方域名; 第三方站点整条拒收, 只在 search-log.md 记为线索。
 3) 研判: 对已入库 verified 记录逐条写回四维与结论, 先用 python3 scripts/risk.py --list-pending 看缺哪些, 再逐条 python3 scripts/risk.py --event-id <id> --impact-type <约束|机会|中性> --china-relevance <直接涉及中国|间接影响|暂无明显关联> --action <...> --rationale <...> --dim trade=N --dim biosecurity=N --dim response=N --dim alignment=N。
 4) 出报(无论几条都必须执行): python3 scripts/report.py --date $SCAN_DATE --excel --docx; 补写 data/raw/$SCAN_DATE/policy-findings.md。

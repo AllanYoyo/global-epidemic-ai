@@ -2002,6 +2002,79 @@ class TokenBudgetBrakeTests(unittest.TestCase):
                         "--stage fetch 的收尾退出必须早于加工段启动")
 
 
+class FetchGroupingTests(unittest.TestCase):
+    """取数国别分组 + 通道确定性预探(2026-10-24 P1)。
+
+    单作业不收敛的实证(当天两轮 90/90、两轮 50/50 打满 max_turns, 打满即整轮
+    作废重来)→ 按档位拆组逐个发起; 通道 HTTP 探测前移出 Agent(治理后一轮仍有
+    26 terminal + 25 execute_code 的探测/摘录调用)。
+    """
+
+    def test_scan_targets_group_split(self):
+        # 组1=必扫档, 组2=当日轮转档; 周六(ISO 6)有 state_level, 周二只有必扫档
+        import scan_targets
+        sat_g1, n1 = scan_targets.render("2026-10-24", group=1)
+        sat_g2, n2 = scan_targets.render("2026-10-24", group=2)
+        self.assertIn("[priority_1]", sat_g1)
+        self.assertIn("[regional]", sat_g1)
+        self.assertNotIn("[state_level]", sat_g1)
+        self.assertIn("[state_level]", sat_g2)
+        self.assertNotIn("[priority_1]", sat_g2)
+        self.assertGreater(n1, 0)
+        info = scan_targets.groups_info("2026-10-27")   # 周二
+        self.assertGreater(info[1], 0)
+        self.assertEqual(info[2], 0)
+
+    def test_scan_targets_groups_cli_machine_readable(self):
+        # run_scan.sh 靠正则解析 n1=.. n2=.. —— 格式漂移会让分组退化, 这里钉死
+        import scan_targets
+        out = io.StringIO()
+        with mock.patch("sys.argv", ["scan_targets.py", "--date", "2026-10-24",
+                                     "--groups"]), redirect_stdout(out):
+            rc = scan_targets.main()
+        self.assertEqual(rc, 0)
+        self.assertRegex(out.getvalue(), r"^n1=[0-9]+ n2=[0-9]+\n$")
+
+    def test_probe_channels_classify_and_clean(self):
+        # ok/dead 口径与 channel_health 的「不可用」一致; 输出会被拼进 prompt, 必须洗净
+        import probe_channels as pc
+        self.assertEqual(pc.classify(200), "ok")
+        self.assertEqual(pc.classify(302), "ok")
+        self.assertEqual(pc.classify(403), "dead")
+        self.assertEqual(pc.classify(500), "dead")
+        self.assertEqual(pc.classify(0), "dead")     # 连接失败/超时
+        cleaned = pc._clean("bad \"quote\" `bt` $dollar")
+        self.assertNotIn("\"", cleaned)
+        self.assertNotIn("`", cleaned)
+        self.assertNotIn("$", cleaned)
+
+    def _run_scan_text(self):
+        with open(os.path.join(REPO, "scripts", "run_scan.sh"), encoding="utf-8") as f:
+            return f.read()
+
+    def test_run_scan_fetch_loop_over_groups(self):
+        # 拆组循环: 模板占位符逐组替换 + 分组解析 + 探测前移 + 加权超时
+        text = self._run_scan_text()
+        self.assertIn("@@COUNTRY_BLOCK@@", text)
+        self.assertIn('"$REPO/scripts/scan_targets.py" --date "$SCAN_DATE" --groups', text)
+        self.assertIn("probe_channels.py", text)
+        self.assertIn("G_TIMEOUT", text)
+        self.assertIn("组$G 取数超时", text)
+        # 模板改名 PROMPT_FETCH_TPL 后, policy 分支条件若仍查旧变量名会静默
+        # 退化成单轮流程(干跑实测抓到过) —— 钉死条件必须查模板变量
+        cond = 'if [ "$MODE" = "policy" ] && [ -n "${PROMPT_FETCH_TPL:-}" ]; then'
+        self.assertIn(cond, text)
+        # token 经济纪律不得在重构中丢失
+        self.assertIn("严禁 read_file", text)
+        self.assertIn("extracted-policy.jsonl", text)
+
+    def test_scope_max_age_widened_for_groups(self):
+        # 拆组后最坏路径 ~70 分钟(两组加权超时 + 加工 + 网关重启等待),
+        # 60 分钟会把"这一轮还在跑"的合法广播锁误判过期 → 全量推送被自己拦死
+        import push_scope
+        self.assertEqual(push_scope.SCOPE_MAX_AGE_MINUTES, 75)
+
+
 class BriefTextFocusTests(unittest.TestCase):
     """IM 卡片"重点关注"口径必须与 report.py 一致(2026-10-19 修复)。
 

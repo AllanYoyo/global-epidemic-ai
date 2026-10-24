@@ -248,11 +248,15 @@ case "$MODE" in
     # 输出 11KB, 红线 2KB 平均超标 50%); ③prompt 越写越长。本次: 当日清单预渲染
     # 注入(见上方 COUNTRY_BLOCK)、写盘全部改 JSONL 追加一行且不打印、严禁读仓库
     # 文件、prompt 本身瘦身。
-    PROMPT_FETCH="执行 $SCAN_DATE 政策变化**取数阶段**(东八区)。只做两件事: 找政策原文存档 + 趁原文在手就地抽取。禁止入库/研判/出报/推送 —— 那是加工段的事。**所有规则都在本 prompt 里, 严禁 read_file 或 cat 任何仓库文件**(当日清单已在下方注入, SKILL.md/AGENTS.md/scripts 都不需要读, 按本 prompt 字面执行)。
-【当日国别与源清单】(已按周轮转筛好, 只扫这些)
-$COUNTRY_BLOCK
+    # 2026-10-24 P1 再修: 取数单作业不收敛(当天两轮 90/90、两轮 50/50 打满,
+    # 打满即整轮作废)——按档位拆组逐个发起, 单组打满只废单组; 通道 HTTP 探测
+    # 前移出 Agent(probe_channels.py 确定性预探, 治理后一轮仍有 26 terminal +
+    # 25 execute_code 的探测/摘录调用)。模板内 @@COUNTRY_BLOCK@@ 由循环逐组替换。
+    PROMPT_FETCH_TPL="执行 $SCAN_DATE 政策变化**取数阶段**(东八区)。只做两件事: 找政策原文存档 + 趁原文在手就地抽取。禁止入库/研判/出报/推送 —— 那是加工段的事。**所有规则都在本 prompt 里, 严禁 read_file 或 cat 任何仓库文件**(当日清单与通道探测结果已在下方注入, SKILL.md/AGENTS.md/scripts 都不需要读, 按本 prompt 字面执行)。
+【本组国别与源清单】(当日通道已按档位拆组, 本轮只扫这一组; 清单外通道不扫、不用惦记, 别的组另有轮次)
+@@COUNTRY_BLOCK@@
 【纪律】
-1) 通道探测批次化: 同组通道用一个 bash for 循环一次探完, 每个通道 curl -m 5 -sL -o /dev/null -w '%{http_code} 地址\n'(地址即 url), 只看汇总状态清单; 只对「状态正常且可能有候选」的通道继续。下方体检点名的死通道照指示跳过或复检一次。
+1) 通道探测已由脚本完成(见下方【通道探测结果】): [dead] 通道在 search-log.md 记一行状态后直接跳过, 不再花任何工具调用; 只对 [ok] 且可能有候选的通道继续。下方体检点名的死通道同样照指示跳过或复检一次。仅当下方**没有**【通道探测结果】时才自行批次化探测: 一个 bash for 循环一次探完, 每通道 curl -m 5 -sL -o /dev/null -w '%{http_code} 地址'(地址即 url), 只看汇总状态清单。
 2) 抓任何页面**先落盘**(collect.py 或 curl -o), 需要判断内容时只 grep/head/python 摘 ≤2KB 片段, 严禁把整页正文留在对话里; 单次工具输出超过 8KB 即违规。
 3) web_search 本段不超过 15 次; 同一工具连败 2 次就换; 浏览器失败就弃用浏览器。
 4) WTO ePing 只走列表页: 行式列表存盘后用 python3 scripts/parse_eping.py <列表文件> --days 7 预筛, 只对窗口内条目下载, PDF 直链就在列表行里不要自己拼。
@@ -391,7 +395,7 @@ if [ -n "${HERMES_RUN_CMD:-}" ]; then
     fi
   }
 
-  if [ "$MODE" = "policy" ] && [ -n "${PROMPT_FETCH:-}" ]; then
+  if [ "$MODE" = "policy" ] && [ -n "${PROMPT_FETCH_TPL:-}" ]; then
     # ---- 取数幂等锁 + 预算刹车(2026-10-24 token 爆量事故后引入) ----
     # 10-24 现场: 6 条存档 09:39 已全部落盘, 之后 12:50/13:54/14:55 三轮重复取数
     # 零新增, ~126 万输入 token + 3200 万 cache 读白烧, 当日 Token Plan 打穿(429)。
@@ -434,19 +438,68 @@ if [ -n "${HERMES_RUN_CMD:-}" ]; then
         # 占位页)。prompt 最终要经 eval 拼进 hermes -z "...", 这些字符会切断引号把
         # 命令拆烂(实测 10-23 复查: 体检名单带引号 → -z 参数被截断)。一律替换/剔除。
         HEALTH_BLOCK="$(printf '%s' "$HEALTH_BLOCK" | sed -e 's/"/」/g' -e 's/`//g' -e 's/\$//g')"
-        PROMPT_FETCH="$PROMPT_FETCH
-$HEALTH_BLOCK"
         echo "[$(date '+%F %T')] 已注入通道体检名单($(echo "$HEALTH_BLOCK" | grep -c '^-' ) 条)"
       fi
-      echo "[$(date '+%F %T')] 阶段 1/2 取数存档(上限 ${FETCH_TIMEOUT}s)"
-      FETCH_RAN=1
-      eval "timeout -k 30 ${FETCH_TIMEOUT} ${HERMES_RUN_CMD/\{PROMPT\}/$PROMPT_FETCH}"
-      FRC=$?
-      if [ "$FRC" -eq 124 ] || [ "$FRC" -eq 137 ]; then
-        echo "[失败] 取数阶段超时(${FETCH_TIMEOUT}s), 已终止"
-        _abort_gateway_orphans
-      else
-        echo "[$(date '+%F %T')] 阶段 1/2 结束 rc=$FRC, 继续加工出报"
+      # ---- 国别分组取数(2026-10-24 P1): 单作业装不下全部通道, 按档位拆组 ----
+      # 实证: 当天两轮 90/90、两轮 50/50 打满 max_turns, 打满即整轮作废重来;
+      # 拆组后单组打满只废单组(存档边存边写, 其它组的成果不受牵连)。
+      # 超时按各组源对数加权(保底 360s), 总时长仍受 FETCH_TIMEOUT 约束。
+      GROUPS_INFO="$("$PY" "$REPO/scripts/scan_targets.py" --date "$SCAN_DATE" --groups 2>/dev/null || true)"
+      G1_N="$(printf '%s' "$GROUPS_INFO" | sed -n 's/^n1=\([0-9][0-9]*\) n2=[0-9][0-9]*$/\1/p')"
+      G2_N="$(printf '%s' "$GROUPS_INFO" | sed -n 's/^n1=[0-9][0-9]* n2=\([0-9][0-9]*\)$/\1/p')"
+      GROUP_LIST=""
+      case "${G1_N:-x}" in [0-9]*) [ "$G1_N" -gt 0 ] && GROUP_LIST="1" ;; esac
+      case "${G2_N:-x}" in [0-9]*) [ "$G2_N" -gt 0 ] && GROUP_LIST="$GROUP_LIST 2" ;; esac
+      if [ -z "$GROUP_LIST" ]; then
+        # 分组解析失败(格式漂移) → 退回单组全量旧口径, 不阻塞跑批
+        GROUP_LIST="x"
+        echo "[WARN] 当日分组解析失败(收到: $GROUPS_INFO), 本轮退回单组全量取数"
+      fi
+      GROUP_TOTAL="$(echo $GROUP_LIST | wc -w | tr -d ' ')"
+      N_TOTAL=$(( ${G1_N:-0} + ${G2_N:-0} ))
+      FRC=0
+      for G in $GROUP_LIST; do
+        if [ "$G" = "x" ]; then
+          GROUP_BLOCK="$COUNTRY_BLOCK"
+          PROBE_BLOCK="$("$PY" "$REPO/scripts/probe_channels.py" --date "$SCAN_DATE" 2>/dev/null || true)"
+          G_N="$N_TOTAL"
+        else
+          GROUP_BLOCK="$("$PY" "$REPO/scripts/scan_targets.py" --date "$SCAN_DATE" --group "$G" 2>/dev/null || true)"
+          PROBE_BLOCK="$("$PY" "$REPO/scripts/probe_channels.py" --date "$SCAN_DATE" --group "$G" 2>/dev/null || true)"
+          case "$G" in 1) G_N="$G1_N" ;; 2) G_N="$G2_N" ;; esac
+        fi
+        # 两道清洗同 COUNTRY_BLOCK: 注入内容不得含 ASCII 双引号/反引号/$
+        GROUP_BLOCK="$(printf '%s' "$GROUP_BLOCK" | sed -e 's/"/」/g' -e 's/`//g' -e 's/\$//g')"
+        PROBE_BLOCK="$(printf '%s' "$PROBE_BLOCK" | sed -e 's/"/」/g' -e 's/`//g' -e 's/\$//g')"
+        if [ -z "$GROUP_BLOCK" ]; then
+          echo "[WARN] 组$G 清单渲染为空, 跳过该组"
+          continue
+        fi
+        if [ "$GROUP_TOTAL" -le 1 ] || [ "${G_N:-0}" -le 0 ] || [ "$N_TOTAL" -le 0 ]; then
+          G_TIMEOUT="$FETCH_TIMEOUT"
+        else
+          G_TIMEOUT=$(( FETCH_TIMEOUT * G_N / N_TOTAL ))
+          [ "$G_TIMEOUT" -lt 360 ] && G_TIMEOUT=360
+        fi
+        PROMPT_FETCH="${PROMPT_FETCH_TPL/@@COUNTRY_BLOCK@@/$GROUP_BLOCK}"
+        [ -n "$PROBE_BLOCK" ] && PROMPT_FETCH="$PROMPT_FETCH
+$PROBE_BLOCK"
+        [ -n "$HEALTH_BLOCK" ] && PROMPT_FETCH="$PROMPT_FETCH
+$HEALTH_BLOCK"
+        echo "[$(date '+%F %T')] 阶段 1/2 取数存档 · 组$G/$GROUP_TOTAL(源对 ${G_N:-?}, 上限 ${G_TIMEOUT}s)"
+        FETCH_RAN=1
+        eval "timeout -k 30 ${G_TIMEOUT} ${HERMES_RUN_CMD/\{PROMPT\}/$PROMPT_FETCH}"
+        GRC=$?
+        [ "$GRC" -gt "$FRC" ] && FRC="$GRC"
+        if [ "$GRC" -eq 124 ] || [ "$GRC" -eq 137 ]; then
+          echo "[失败] 组$G 取数超时(${G_TIMEOUT}s), 已终止"
+          _abort_gateway_orphans
+        else
+          echo "[$(date '+%F %T')] 组$G 取数结束 rc=$GRC"
+        fi
+      done
+      if [ "$FRC" -eq 0 ]; then
+        echo "[$(date '+%F %T')] 阶段 1/2 全部组结束 rc=0, 继续加工出报"
       fi
       fi
     else

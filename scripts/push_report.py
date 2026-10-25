@@ -141,17 +141,17 @@ def brief_text(date, data, docx_ok=True):
     Markdown / Word / Excel", 而 Word 可能压根没生成(见 report.ensure_docx 的说明),
     用户会以为带附件却只收到正文。
     """
-    new, active = data["new"], data["active"]
+    new = data["new"]
     countries = sorted({e.get("country_cn") for e in new if e.get("country_cn")})
     act = {"收紧": 0, "调整": 1, "放松": 2, "恢复": 3}
     lines = [
         "# 🛃 疫见全球 · 政策监测日报 %s" % date, "",
-        "**新增 %d 条** · 收紧 %d · 调整 %d · 放松/恢复 %d · 近期跟踪 %d · 待核实 %d" % (
+        "**新增 %d 条** · 收紧 %d · 调整 %d · 放松/恢复 %d · 待核实 %d" % (
             len(new),
             sum(1 for e in new if e.get("action_type") == "收紧"),
             sum(1 for e in new if e.get("action_type") == "调整"),
-            sum(1 for e in new if e.get("action_type") in ("放松", "恢复")), len(active),
-            sum(1 for e in data["covered"] if e.get("verification_status") == "unverified")), "",
+            sum(1 for e in new if e.get("action_type") in ("放松", "恢复")),
+            sum(1 for e in new if e.get("verification_status") == "unverified")), "",
         "**涉及国家**: %s" % ("、".join(countries[:8]) + ("等" if len(countries) > 8 else "") if countries else "—"),
     ]
     # 重点关注口径与 report.py 保持一致(2026-10-19 修正): 原实现只看"中影响 or 收紧",
@@ -185,8 +185,8 @@ def brief_text(date, data, docx_ok=True):
     if docx_ok:
         tail = "全文见政策 Markdown / Word / Excel 报告(面板可下载)"
     else:
-        tail = ("全文见政策 Markdown / Excel 报告(面板可下载); "
-                "⚠️ 本次无 Word 附件(Word 日报生成失败, 已告警)")
+        tail = ("全文见政策 Markdown 报告(面板可下载); "
+                "⚠️ 本次无 Word 附件(Word 按需生成: report.py --docx)")
     lines += ["", "---",
               tail,
               "> AI 辅助生成 · 仅供情报参考 · 代码 %s" % code_fingerprint()]
@@ -379,7 +379,6 @@ def main():
     ap = argparse.ArgumentParser(
         description="日报推送: 企业微信 / 钉钉 / 邮箱(渠道环境变量见模块 docstring 与 .env.example)")
     ap.add_argument("--date", default=biz_today())
-    ap.add_argument("--days-back", type=int, default=14)
     ap.add_argument("--db-path", help="SQLite 路径覆盖")
     ap.add_argument("--message", help="发送自定义提醒文本(跳过日报汇总, 供 run_scan.sh 等调用)")
     ap.add_argument("--dry-run", action="store_true", help="只打印消息内容与目标渠道, 不发送")
@@ -587,7 +586,7 @@ def main():
             return 0
 
     try:
-        data = report.collect(args.date, args.days_back, args.db_path)
+        data = report.collect(args.date, args.db_path)
     except ValueError as exc:
         print("[错误] %s" % exc)
         return 2
@@ -595,16 +594,13 @@ def main():
         print("[提示] 政策库为空, 无可推送内容。")
         return 1
     docx = os.path.join(DATA_DIR, "reports", "%s-policy-report.docx" % args.date)
-    # 推送前确定性补齐 Word 日报(2026-10-20 加固): Word 由 Agent 照 prompt 执行
-    # `report.py --docx` 生成, 实测会漏(10-20 只出 csv/md/xlsx)。原来这里是
-    # 静默跳过附件 —— 用户收到纯文本却以为带 Word, 事后从推送记录里查不出来。
-    # 现在缺就补, 补不上就在正文里明确标注"无 Word 附件", 不再假装有。
+    # Word 附件按需携带(2026-10-25 调整): 跑批只产 Markdown 日报, Excel/Word 由
+    # 人工按需生成(report.py --excel/--docx 或面板一键生成), 推送**不再自动补**。
+    # 文件在就带附件, 不在正文如实标注"无 Word 附件"——2026-10-20 的教训是
+    # "用户以为有附件却没有"; 现在不承诺附件, 但同样不静默。
     docx_ok = os.path.isfile(docx) and os.path.getsize(docx) > 0
     if not docx_ok:
-        if args.dry_run:
-            print("[WARN] Word 日报缺失(%s), 实际推送时会自动补生成" % docx)
-        else:
-            docx_ok = (report.ensure_docx(args.date, args.db_path) == 0)
+        print("[提示] Word 日报未生成(按需生成: python scripts/report.py --date %s --docx), 本次推送不带附件" % args.date)
     text = brief_text(args.date, data, docx_ok=docx_ok)
     # 审阅渠道(Hermes 型)要显式纳入本次集合, 否则只发钉钉就发不到微信
     review_key = channel_key_for_label(review_label) if review_label else None

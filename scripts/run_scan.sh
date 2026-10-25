@@ -256,8 +256,8 @@ trap _revoke_broadcast_lock EXIT
 trap 'exit 143' INT TERM
 
 case "$MODE" in
-  am) PROMPT="生成 $SCAN_DATE 的政策监测日报: 仅检索外国政府动植物疫情管控政策变化, 完成政策抽取、核验、对华影响研判, 然后用 scripts/report.py --date $SCAN_DATE --excel --docx 生成 Markdown+Excel+Word 政策日报(两个开关都要带, 漏 --docx 就不会有 Word 简报)。$PUSH_INSTRUCTION" ;;
-  pm) PROMPT="执行 $SCAN_DATE 的政策晚扫增量: 仅检索外国政府官方检疫/进出口政策变化, 对新增政策完成抽取、核验、影响研判, 然后用 scripts/report.py --date $SCAN_DATE --excel --docx 刷新当日政策日报(两个开关都要带, 漏 --docx 就不会有 Word 简报)。$PUSH_INSTRUCTION" ;;
+  am) PROMPT="生成 $SCAN_DATE 的政策监测日报: 仅检索外国政府动植物疫情管控政策变化, 完成政策抽取、核验、对华影响研判, 然后用 scripts/report.py --date $SCAN_DATE 生成 Markdown 政策日报(不要带 --excel/--docx: Excel 与 Word 按需人工生成, 跑批不产出)。$PUSH_INSTRUCTION" ;;
+  pm) PROMPT="执行 $SCAN_DATE 的政策晚扫增量: 仅检索外国政府官方检疫/进出口政策变化, 对新增政策完成抽取、核验、影响研判, 然后用 scripts/report.py --date $SCAN_DATE 刷新当日 Markdown 政策日报(不要带 --excel/--docx: Excel 与 Word 按需人工生成, 跑批不产出)。$PUSH_INSTRUCTION" ;;
   policy)
     # 2026-10-22 结构修复(同日两轮实测失败驱动): 拆成两次独立调用。
     # run3: 检索到 49 条候选, 预算耗尽前 collect/normalize/risk/report 一步没跑。
@@ -304,7 +304,7 @@ case "$MODE" in
 1) 主输入 data/raw/$SCAN_DATE/extracted-policy.jsonl(逐行 JSON)。对照 candidates.jsonl 找「已存档但未抽取」的漏条: 先看 search-log.md 是否已记为线索或不合格(第三方/旧闻), 确实漏抽的才用 python3 scripts/snip.py 摘该存档原文(硬性 ≤2KB), 再用 python3 scripts/jsonl_append.py data/raw/$SCAN_DATE/extracted-policy.jsonl <键值对> 补抽追加一行(键: record_type/title_cn/title_en/country_cn/country_en/policy_domain/action_type/event_date/effective_date/products/summary_cn/source.tier/source.name/source.url/source.publish_date/source.quote, 原文没有的留空存 null) —— **不要重读已抽取条目的原文, 不要打印记录内容**。两个清单都空或不存在时直接跳到第 4 步(仍要出报)。
 2) 入库: python3 scripts/normalize.py --input data/raw/$SCAN_DATE/extracted-policy.jsonl --out data/events/$SCAN_DATE/ --db --max-age-days 7。tier=1 只认官方域名; 第三方站点整条拒收, 只在 search-log.md 记为线索。
 3) 研判: 对已入库 verified 记录逐条写回四维与结论, 先用 python3 scripts/risk.py --list-pending 看缺哪些, 再逐条 python3 scripts/risk.py --event-id <id> --impact-type <约束|机会|中性> --china-relevance <直接涉及中国|间接影响|暂无明显关联> --action <...> --rationale <...> --dim trade=N --dim biosecurity=N --dim response=N --dim alignment=N。
-4) 出报(无论几条都必须执行): python3 scripts/report.py --date $SCAN_DATE --excel --docx; 补写 data/raw/$SCAN_DATE/policy-findings.md。
+4) 出报(无论几条都必须执行): python3 scripts/report.py --date $SCAN_DATE; 补写 data/raw/$SCAN_DATE/policy-findings.md。不要带 --excel/--docx —— Excel 与 Word 按需人工生成, 跑批不产出。
 【红线】严禁 --broadcast; 严禁为了让日报好看而入库旧闻; 严禁编造 quote; **严禁联网检索与 collect.py 抓取新原文**(2026-10-25 实测: 空输入下加工 Agent 自发联网重做取数, 194 万折合白烧、50 轮打满 —— 本段只处理 data/raw/$SCAN_DATE/ 已有存档, 没有就直接出报, 日报显示 0 新增是诚实结果)。
 $PUSH_INSTRUCTION"
     PROMPT="$PROMPT_PROCESS" ;;
@@ -639,7 +639,7 @@ $HEALTH_BLOCK"
         printf '# 政策变化发现 · %s(东八区)\n\n- 本轮自动生成: 取数段交付 0 条存档(原因见 search-log.md 与调度日志), 加工段按空输入确定性出报, 未派 Agent。\n' \
           "$SCAN_DATE" > "$FETCH_DIR/policy-findings.md" 2>/dev/null || true
       fi
-      "$PY" "$REPO/scripts/report.py" --date "$SCAN_DATE" --excel --docx
+      "$PY" "$REPO/scripts/report.py" --date "$SCAN_DATE"
       RC=$?
       PR_RC=0
       case "$SCOPE" in
@@ -669,7 +669,7 @@ $HEALTH_BLOCK"
         "$PY" "$REPO/scripts/extract_records.py" --date "$SCAN_DATE" --stage risk || true
       fi
       if [ "$RC" -eq 0 ]; then
-        "$PY" "$REPO/scripts/report.py" --date "$SCAN_DATE" --excel --docx || RC=$?
+        "$PY" "$REPO/scripts/report.py" --date "$SCAN_DATE" || RC=$?
       fi
       PR_RC=0
       case "$SCOPE" in
@@ -775,12 +775,11 @@ $HEALTH_BLOCK"
     exit 1
   fi
 
-  # 确定性补齐日报产物(2026-10-20 加固): Word 日报是 `report.py --docx` 生成的,
-  # 而那一步由 Agent 照 prompt 执行 —— 实测 10-20 的跑批漏掉了 --docx, 只产出
-  # csv/md/xlsx, 而推送侧当时是静默跳过附件(用户收到纯文本却以为带 Word)。
-  # 校验已确认 Markdown 存在, 此时补出来的 Word 才是真日报(而不是空壳)。
-  "$PY" "$REPO/scripts/report.py" --date "$SCAN_DATE" --ensure-docx \
-    || echo "[$(date '+%F %T')] run_scan: Word 日报补生成失败(推送将只带正文)"
+  # Excel/Word 按需生成(2026-10-25 调整): 跑批只产出 Markdown 日报, 不再自动
+  # 生成 xlsx/docx, 也不再跑批后补 Word —— 人工需要时执行
+  # `report.py --date X --excel --docx` 或面板一键生成; 推送侧有 Word 才带附件,
+  # 没有就在正文如实标注"无 Word 附件"。10-20 的教训(漏 --docx + 静默跳过附件)
+  # 由推送侧的如实标注兜住; report.ensure_docx 保留为人工按需入口(幂等)。
   # 产物校验通过 = 本轮真的跑完了, 广播声明可以保留给之后的推送/补跑。
   _BROADCAST_ARMED=0
   echo "[$(date '+%F %T')] run_scan mode=$MODE date=$SCAN_DATE done rc=0 (产物校验通过)"

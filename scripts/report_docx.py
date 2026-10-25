@@ -136,12 +136,12 @@ def _build_policy(date, data=None, out_dir=None, db_path=None):
     """生成政策监测 Word 简报。"""
     if data is None:
         try:
-            data = report.collect(date, 14, db_path)
+            data = report.collect(date, db_path)
         except ValueError as exc:
             raise SystemExit("[错误] %s" % exc)
     if data is None:
         raise SystemExit("[提示] 政策库为空: 先运行 normalize.py 入库政策记录。")
-    new, active, covered = data["new"], data["active"], data["covered"]
+    new = data["new"]
     doc = Document()
     _para(doc, "全球动植物检疫政策监测日报", size=18, bold=True,
           align=WD_ALIGN_PARAGRAPH.CENTER, space_after=2)
@@ -156,16 +156,13 @@ def _build_policy(date, data=None, out_dir=None, db_path=None):
         _heading(doc, "%s、%s" % ("一二三四五六七八九十"[sec - 1], title))
 
     _h("本期政策变化速览")
-    for item in report.policy_headline_items(new, active):
+    for item in report.policy_headline_items(new):
         _bullet(doc, item)
     _h("本期新增政策变化(%d 条)" % len(new))
     _policy_table(doc, new)
-    if active:
-        _h("近期变动跟踪(%d 条)" % len(active))
-        _policy_table(doc, active)
 
     _h("收紧与调整动作详情")
-    focus = [e for e in covered if e.get("action_type") in ("收紧", "调整")
+    focus = [e for e in new if e.get("action_type") in ("收紧", "调整")
              or e.get("impact_level") == "高影响"]
     if not focus:
         _para(doc, "本期无收紧、调整或高影响类政策变化。", color=GRAY)
@@ -200,7 +197,7 @@ def _build_policy(date, data=None, out_dir=None, db_path=None):
                 _run(pnode, "   ")
 
     _h("对华影响研判综述")
-    judged = [e for e in covered if e.get("impact_level")]
+    judged = [e for e in new if e.get("impact_level")]
     if not judged:
         _para(doc, "本期暂无已完成对华影响研判的政策变化。", color=GRAY)
     for e in judged:
@@ -210,7 +207,7 @@ def _build_policy(date, data=None, out_dir=None, db_path=None):
                                    e.get("impact_rationale") or e.get("recommended_action") or ""))
 
     _h("待核实信息")
-    open_rows = [e for e in covered if e.get("verification_status") in ("unverified", "false_positive")
+    open_rows = [e for e in new if e.get("verification_status") in ("unverified", "false_positive")
                  or (e.get("verification_status") == "verified" and not e.get("impact_level"))]
     if not open_rows:
         _para(doc, "无待核实/待研判政策记录。", color=GRAY)
@@ -224,7 +221,7 @@ def _build_policy(date, data=None, out_dir=None, db_path=None):
 
     _h("来源索引")
     seen, idx = set(), 0
-    for e in covered:
+    for e in new:
         for s in [e.get("source")] + list(e.get("cross_sources") or []):
             if isinstance(s, dict) and s.get("url") and s["url"] not in seen:
                 seen.add(s["url"]); idx += 1
@@ -247,7 +244,6 @@ def build(date, data=None, out_dir=None, db_path=None):
 def main():
     ap = argparse.ArgumentParser(description="生成 Word 情报简报(数据与 Markdown 日报同源)")
     ap.add_argument("--date", default=report.biz_today())
-    ap.add_argument("--days-back", type=int, default=14)
     ap.add_argument("--db-path", help="SQLite 路径覆盖")
     ap.add_argument("--out-dir", help="输出目录(默认 data/reports)")
     args = ap.parse_args()

@@ -499,10 +499,8 @@ class PushReportReviewGateTests(unittest.TestCase):
                               side_effect=lambda t, title: self.calls.append(("dingtalk", t, title))),
             mock.patch.object(self.pr, "send_mail",
                               side_effect=lambda s, t, p: self.calls.append(("mail", s, t, p))),
-            # 2026-10-20: 推送前会确定性补齐 Word 日报, 测试里打桩避免真去生成文件
-            mock.patch.object(self.pr.report, "ensure_docx", return_value=0),
             mock.patch.object(self.pr.report, "collect",
-                              return_value={"new": [], "active": [], "covered": []}),
+                              return_value={"new": []}),
         ]
         for p in self._patches:
             p.start()
@@ -942,10 +940,8 @@ class PushScopeLockTests(unittest.TestCase):
                               side_effect=lambda t: self.calls.append(("wechat", t))),
             mock.patch.object(self.pr, "send_dingtalk",
                               side_effect=lambda t, title: self.calls.append(("dingtalk", t, title))),
-            # 2026-10-20: 推送前会确定性补齐 Word 日报, 测试里打桩避免真去生成文件
-            mock.patch.object(self.pr.report, "ensure_docx", return_value=0),
             mock.patch.object(self.pr.report, "collect",
-                              return_value={"new": [], "active": [], "covered": []}),
+                              return_value={"new": []}),
         ]
         for p in self._patches:
             p.start()
@@ -1139,7 +1135,7 @@ class PushScopeLockTests(unittest.TestCase):
         # 推送内容带代码指纹: 事故现场一眼看出"跑的是哪版代码"
         import push_report
         text = push_report.brief_text("2026-10-20", {
-            "new": [], "active": [], "covered": []})
+            "new": []})
         self.assertIn("代码", text)
 
     def test_diagnose_flags_scope_none_in_log(self):
@@ -1301,10 +1297,8 @@ class PushHermesChannelTests(unittest.TestCase):
                               side_effect=self._fake_available),
             mock.patch.object(self.ps, "channel_available",
                               side_effect=self._fake_available),
-            # 2026-10-20: 推送前会确定性补齐 Word 日报, 测试里打桩避免真去生成文件
-            mock.patch.object(self.pr.report, "ensure_docx", return_value=0),
             mock.patch.object(self.pr.report, "collect",
-                              return_value={"new": [], "active": [], "covered": []}),
+                              return_value={"new": []}),
         ]
         for p in self._patches:
             p.start()
@@ -1463,8 +1457,9 @@ class ReportAttachmentTests(unittest.TestCase):
     而 push_report.py 侧是 `if isfile(docx_path)` **静默跳过附件** ——
     用户收到纯文本, 以为带 Word, 事后从推送记录里完全看不出来。
 
-    现在: 推送前/跑批后确定性补齐(report.ensure_docx), 补不上就在正文里明确
-    标注"无 Word 附件", 渠道侧也不再静默跳过。
+    2026-10-25 调整: Excel/Word 改为按需人工生成 —— 跑批只产 Markdown, 推送
+    不再自动补 Word(有则带附件, 无则正文标注"无 Word 附件", 渠道侧不静默);
+    report.ensure_docx 保留为人工按需入口(幂等, md 缺失不补防空壳)。
     """
 
     def setUp(self):
@@ -1552,12 +1547,14 @@ class ReportAttachmentTests(unittest.TestCase):
 
     # ---- push_report 侧 ----
 
-    def _run_push(self, args, ensure_rc=0):
+    def _run_push(self, args):
         sent = []
 
+        # 2026-10-25 起 Word 按需生成, 推送不得自动补 —— 用哨兵桩证明 ensure_docx
+        # 没被调用过(被调用则 sent 里出现 ("ensure", ...) 元组)
         def fake_ensure(date, db_path=None):
             sent.append(("ensure", date))
-            return ensure_rc
+            return 0
 
         buf = io.StringIO()
         with mock.patch.object(self.pr, "PUSH_FLAG_DIR", os.path.join(self.tmp, ".pushed")), \
@@ -1566,7 +1563,7 @@ class ReportAttachmentTests(unittest.TestCase):
              mock.patch.object(self.pr, "send_dingtalk",
                                side_effect=lambda t, title: sent.append(("dingtalk", t, title))), \
              mock.patch.object(self.pr.report, "collect",
-                               return_value={"new": [], "active": [], "covered": []}), \
+                               return_value={"new": []}), \
              mock.patch.object(self.pr.report, "ensure_docx", side_effect=fake_ensure), \
              mock.patch("sys.argv", ["push_report.py"] + args), \
              redirect_stdout(buf):
@@ -1576,23 +1573,23 @@ class ReportAttachmentTests(unittest.TestCase):
                 rc = e.code
         return rc, buf.getvalue(), sent
 
-    def test_push_report_regenerates_docx_before_push(self):
-        # Word 缺失时, 推送前必须先补生成(确定性), 而不是静默跳过附件
+    def test_push_report_does_not_regenerate_docx(self):
+        # 2026-10-25 调整: Excel/Word 按需人工生成, 推送**不得**自动补 ——
+        # Word 缺失时只发正文并如实标注, 不调用 report.ensure_docx
         rc, out, sent = self._run_push(["--date", "2026-12-10", "--review-channel", "dingtalk"])
         self.assertEqual(rc, 0, out)
-        self.assertIn(("ensure", "2026-12-10"), sent)
+        self.assertNotIn(("ensure", "2026-12-10"), sent)
 
     def test_push_report_marks_missing_word_in_body(self):
-        # 补不上时, 正文必须如实标注"无 Word 附件", 不能假装有
-        rc, out, sent = self._run_push(["--date", "2026-12-11", "--review-channel", "dingtalk"],
-                                       ensure_rc=1)
+        # Word 缺失时, 正文必须如实标注"无 Word 附件", 不能假装有
+        rc, out, sent = self._run_push(["--date", "2026-12-11", "--review-channel", "dingtalk"])
         self.assertEqual(rc, 0, out)
         bodies = [c[1] for c in sent if c[0] == "dingtalk"]
         self.assertEqual(len(bodies), 1, out)
         self.assertIn("无 Word 附件", bodies[0])
 
     def test_brief_text_marks_missing_word(self):
-        data = {"new": [], "active": [], "covered": []}
+        data = {"new": []}
         self.assertIn("无 Word 附件", self.pr.brief_text("2026-12-12", data, docx_ok=False))
         self.assertNotIn("无 Word 附件", self.pr.brief_text("2026-12-12", data, docx_ok=True))
 
@@ -1644,7 +1641,7 @@ class ScanFailureGuardTests(unittest.TestCase):
             mock.patch.object(self.pr, "send_dingtalk",
                               side_effect=lambda t, title: self.sent.append(("dingtalk", t))),
             mock.patch.object(self.pr.report, "collect",
-                              return_value={"new": [], "active": [], "covered": []}),
+                              return_value={"new": []}),
             mock.patch.object(self.pr.report, "ensure_docx", return_value=0),
         ]
         for p in self._patches:
@@ -2091,7 +2088,13 @@ class FetchGroupingTests(unittest.TestCase):
         text = self._run_scan_text()
         self.assertIn("加工段不派 Agent", text)
         self.assertIn("直接确定性出报", text)
-        self.assertIn('"$REPO/scripts/report.py" --date "$SCAN_DATE" --excel --docx', text)
+        self.assertIn('"$REPO/scripts/report.py" --date "$SCAN_DATE"', text)
+        # 2026-10-25 起 Excel/Word 按需生成: 跑批所有出报调用/prompt 指令都不得
+        # 带 --excel/--docx/--ensure-docx(注释里的按需生成指引除外)
+        self.assertNotIn('--date "$SCAN_DATE" --excel', text)
+        self.assertNotIn('--date "$SCAN_DATE" --ensure-docx', text)
+        self.assertNotIn("--date $SCAN_DATE --excel", text)
+        self.assertNotIn("--date $SCAN_DATE --ensure-docx", text)
         self.assertIn('"$REPO/scripts/push_report.py" --date "$SCAN_DATE" --broadcast', text)
         self.assertIn('"$REPO/scripts/push_report.py" --date "$SCAN_DATE" --review-channel "$SCOPE_CHANNEL"', text)
         # 三重计数护栏(文件缺失时 wc 不再抛 bash 报错行)
@@ -2351,7 +2354,7 @@ class BriefTextFocusTests(unittest.TestCase):
         data = {"new": [{"event_id": "a", "title_cn": "重点政策", "country_cn": "X",
                           "action_type": "调整", "impact_level": level,
                           "impact_type": "约束", "source": {"url": "https://x/1"}}],
-                "active": [], "covered": []}
+                }
         return self.pr.brief_text("2026-10-19", data)
 
     def test_high_impact_goes_to_focus_section(self):
@@ -2757,10 +2760,10 @@ class ReportDateGuardTests(unittest.TestCase):
 
     def test_collect_raises_value_error_on_bad_date(self):
         with self.assertRaises(ValueError):
-            self.report.collect("2026-13-45", 14)
+            self.report.collect("2026-13-45")
 
     def test_collect_accepts_valid_date(self):
-        data = self.report.collect("2026-10-19", 14)
+        data = self.report.collect("2026-10-19")
         self.assertIsNotNone(data)
         self.assertIn("new", data)
 
@@ -2947,7 +2950,7 @@ class DirtyDateGuardTests(unittest.TestCase):
         con.close()
         buf = io.StringIO()
         with redirect_stdout(buf):
-            data = report.collect("2026-10-19", 14)
+            data = report.collect("2026-10-19")
         self.assertEqual(len(data["new"]), 1)
         self.assertIn("日期无法解析", buf.getvalue())
 

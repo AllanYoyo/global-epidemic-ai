@@ -11,7 +11,10 @@ run_scan.sh policy (定时入口, 默认确定性管线)
   → scripts/extract_records.py    (每份存档一次 hermes -z 单轮微调用: 抽取+研判字段,
                                     key=value 输出, 429/坏输出只废单份)
   → scripts/normalize.py          (入库) → extract_records --stage risk (研判写回)
-  → scripts/report.py + report_docx.py (日报) → scripts/push_report.py (推送)
+  → scripts/report.py (Markdown 日报)  → scripts/push_report.py (推送)
+                                    [Excel/Word 不在跑批产出, 按需人工生成:
+                                     report.py --excel/--docx 或面板一键生成;
+                                     推送有 Word 才带附件, 无则正文如实标注]
 ```
 
 `--agent` 参数回退旧 Agent 会话路径（分块取数 + 会话加工，仅排障/对照用）。
@@ -41,8 +44,9 @@ pip install -r requirements.txt
 python scripts/collect.py --url <url> --title <标题>  # 原文存档到 data/raw/（可溯源链第一环）
 python scripts/normalize.py --input <json> --db     # 入库（支持 - 读 stdin）
 python scripts/risk.py --event-id <id> --dim trade=4 --dim biosecurity=3,...   # 影响写回
-python scripts/report.py --date YYYY-MM-DD --excel --docx   # 日报（--policy 已废弃为 no-op）
-python scripts/report.py --date YYYY-MM-DD --ensure-docx   # Word 日报缺失才补生成（幂等；跑批/推送的兜底入口）
+python scripts/report.py --date YYYY-MM-DD                # Markdown 日报（跑批只产这个）
+python scripts/report.py --date YYYY-MM-DD --excel --docx   # 按需生成 Excel/Word（--policy 已废弃为 no-op）
+python scripts/report.py --date YYYY-MM-DD --ensure-docx   # Word 日报缺失才补生成（幂等；人工按需入口——2026-10-25 起跑批/推送不再自动调）
 python scripts/push_report.py --date YYYY-MM-DD --dry-run   # 推送预览（企业微信/钉钉/SMTP）
 python scripts/push_report.py --date YYYY-MM-DD --review-channel weixin  # 只发微信会话（阶段 1，渠道会话必用；经 hermes send 投递）
 python scripts/push_report.py --date YYYY-MM-DD --review-approved  # 审核通过，发完剩余渠道（阶段 2）
@@ -91,14 +95,14 @@ bash scripts/deploy_update.sh policy                        # 生产更新（git
   - **孤儿 turn 终止（2026-10-23 引入）**：受控实验确认 `hermes -z` 只是把 prompt 经 websocket 提交给网关，turn 由网关守护进程执行——`timeout` 杀掉的 CLI 只是断开 ws（agent.log 可见 `client_disconnect`），网关侧照跑到 max_turns（10-22 实测孤儿跑满 90 轮 ≈ 8M token；10-23 取数段孤儿超时后仍多跑并抢跑 normalize）。网关没有按会话终止的 CLI（`pause` 只挡新 turn、`sessions` 无 stop、控制套接字无 interrupt 动词、`--resume` 新 turn 只会在 FIFO 里排队），且网关看门狗是**不活动**触发——活跃的孤儿永远打不断。唯一确定性手段：阶段超时（rc 124/137）后 `hermes gateway restart`——`restart_drain_timeout=0` 立即硬中断所有在跑 turn，被中断会话按 Hermes 语义"下条消息续跑"，用户微信在途消息只是晚点回。run_scan.sh 的 `_abort_gateway_orphans` 在取数/加工/单轮三处超时分支调用，重启后等待网关就绪再进下一段；`SCAN_ORPHAN_RESTART=0` 可关闭。
   - **取数幂等锁 + 日预算刹车(2026-10-24 token 爆量事故后引入, 红线级)**：当天 6 个扫描会话烧穿 Token Plan（429，连微信对话都调不动），而 6 条存档 09:39 已落齐——12:50/13:54/14:55 三轮重复取数零新增、白烧 ~126 万输入 token + 3200 万 cache 读（其中 4 个会话绕过 run_scan.sh 直接 `hermes -z`：无超时看护无幂等检查，12:50 那轮还在用部署前的旧 prompt 重读 58KB sources.yaml、12 个文件 125KB）。三道修复：①**取数幂等锁** `data/raw/<日期>/.fetch-done`——取数段跑过且交付（rc=0 或已有存档）即写标记，之后任何取数请求（含手动）看到标记直接跳过进加工，强制重取必须显式 `--refetch`（超时且 0 存档不写标记，允许下一轮重取）；②**日预算刹车** `scripts/token_budget.py`（只读 `~/.hermes/state.db`，可用 `HERMES_STATE_DB` 改路径，fail-open）——东八区当日 Hermes 折合消耗（input+output+cache_read×0.1，`SCAN_CACHE_WEIGHT` 覆盖）≥ 预算（默认 400 万，`SCAN_TOKEN_DAILY_BUDGET` 覆盖）时取数段不再启动，降级为只加工已有存档（数据不丢，损失止于当日增量），并在 search-log.md 留痕；③**统一发射口** `--stage fetch`——会话/人工补数一律走 run_scan.sh（自带超时看护/幂等锁/预算刹车，scope 强制 none 不碰推送），**严禁自行拼 hermes -z 扫描 prompt 或复刻取数指令**（global-policy-search skill 红线已同步）。
   - **取数分块 + 通道确定性预探(2026-10-24 P1, 10-25 晨跑再修)**：取数单作业不收敛——10-24 两轮 90/90、两轮 50/50 打满；10-25 必扫 21 源对单组仍 50/50 打满且 Agent 把候选**囤在对话里 0 交付**——①**按 6 源对/块切块**：`scan_targets.py` 把当日全部源对（必扫+轮转，按固定优先级序）按 `GROUP_CHUNK=6` 切成 K 块，`--group N` 渲染第 N 块、`--groups` 输出变长 `n1=.. nK=..`；run_scan.sh 逐块发起、超时按源对数加权（保底 360s）、单块打满只废单块（存档边存边写不受牵连），prompt 模板 `@@COUNTRY_BLOCK@@` 逐块替换、纪律含「进度自检：扫到第 3 个通道时 data/raw 下必须已有存档」；解析失败退回单组全量旧口径；②**通道 HTTP 探测前移出 Agent**：新增 `scripts/probe_channels.py`（curl 8 并发、单通道 6s、只看状态码，[dead]=非 2xx/3xx 或连接失败，与 channel_health「不可用」同口径），状态清单注入 prompt，Agent 对 [dead] 只记 search-log 一行不再花工具调用——治理后一轮仍有 26 terminal + 25 execute_code 的探测/摘录调用，这是砍掉的第一块；③`SCOPE_MAX_AGE_MINUTES` 60→75（分块后最坏 ~70 分钟，防止"这一轮还在跑"的合法广播锁被误判过期）。
-  - **空输入短接(2026-10-25 晨跑事故后引入, P4 前后共用)**：取数 0 交付（0 存档且无候选/抽取记录）时，加工段**不派 Agent**——run_scan.sh 直接 `report.py --excel --docx` 确定性出报、按范围锁确定性推送（broadcast/review 才推）、自动补一份说明性 policy-findings.md。实测 10-25：空清单下加工 Agent 无视「不联网检索」红线自发联网重做取数（194 万折合、50 轮打满、入库/出报一步没跑到）。
+  - **空输入短接(2026-10-25 晨跑事故后引入, P4 前后共用)**：取数 0 交付（0 存档且无候选/抽取记录）时，加工段**不派 Agent**——run_scan.sh 直接 `report.py`（只出 Markdown，Excel/Word 按需）确定性出报、按范围锁确定性推送（broadcast/review 才推）、自动补一份说明性 policy-findings.md。实测 10-25：空清单下加工 Agent 无视「不联网检索」红线自发联网重做取数（194 万折合、50 轮打满、入库/出报一步没跑到）。
   - **P4 确定性管线(2026-10-25 定稿, 10 分钟硬约束驱动)**：Agent 会话对「轮次上限 / Token Plan 耗尽(429) / 阶段超时」任一死法都是**整轮全损**(10-25 三连败实证: 50/50 打满 0 落盘、空输入抢跑、429 切断), 而用户约束全链路 ≤10 分钟。方案=脚本开车、LLM 只当顾问: ①`scripts/fetch_pages.py` 确定性取数(probe_channels 预探复用跳死通道 → curl 8 并发抓入口页 → 链接抽取 + 多语种日期窗口过滤(7 天) → collect.py 存档 ≤2/源 ≤12/日 → candidates.jsonl 逐条追加 → search-log 逐源留痕), **零 LLM**; ②`scripts/extract_records.py` 每份存档**一次** hermes -z 单轮微调用(prompt=字段模板+snip≤4KB 摘录, 输出 key=value 行, 本地解析嵌套 source.* 并校验 url/quote), 研判四维并入同一次调用, `--stage risk` 在 normalize 后按当日 url→event_id 确定性写回; 单份失败(429/超时/坏输出)重试 1 次后跳过留痕, **429 快速失败不烧重试**; ③`run_scan.sh policy` 默认走此管线, `--agent` 回退旧路径; prompt 模板与输出均不含 ASCII 双引号/反引号/$。**诚实取舍**: 链接启发式召回率低于 Agent 浏览(无日期线索只记 search-log 线索; 需 web_search 发现的条目如输华议定书类暂不覆盖), 覆盖率后续按源补 pattern(ePing 优先)。
   - **工具输出硬上限(2026-10-24 P2)**：「≤2KB 摘录 / 8KB 单次红线」从 prompt 纪律升级为**脚本保证**——新增 `scripts/jsonl_append.py`（JSONL 单行追加器：只回执一行 `ok +N`、点号键落嵌套 `source.*`、空值存 null、缺标题/URL 拒追加防残行）与 `scripts/snip.py`（摘录器：默认/--grep 都硬性截到 ≤2KB 并带截断标注），取数/加工 prompt 已钉死两者用法，并**内联抽取键值模板**（顺带补上 92dbe1e 的缺口：prompt 禁读仓库文件、却让 Agent「按 prompts/policy-extraction.md 的字段规则」抽——字段规则既不在上下文里又不许读）。网关侧 `~/.hermes/config.yaml` 的 `tool_output.max_bytes` 部署时 50000→12000（全局硬兜底， 与 max_turns 同属 VPS 侧配置， 不在仓库内）。
   - **生产更新**：`bash scripts/deploy_update.sh policy`（git pull + 依赖 + 自检）。仓库只有 clone 没有更新机制，生产不 pull = 闸门加固根本没生效——这正是 10-20 事故的载体。
   - **现场诊断**：`python scripts/diagnose_push.py` 一次打印：运行代码 commit（与远端是否一致）、当日范围锁/待审/已推标记、渠道配置（自动读 `~/.hermes/.env`，只配一个渠道时会提示"先在微信审阅"跑不通）、crontab 是否显式声明范围、调度日志尾部（自动找 `cron.log`/`scan.log`，有无 `scope=` 标记＝新旧版 run_scan.sh）。推送内容尾部也带 `代码 <commit>` 指纹，`.pushed` 标记带**范围与声明来源**。
-- **Word 附件闭环（2026-10-20 现场新发现）**：Word 日报由 `report.py --docx` 生成，而这一步是 **Agent 照 prompt 执行**的——实测 10-20 的跑批漏了 `--docx`，只产出 csv/md/xlsx；而推送侧原本是 `if isfile(docx_path)` **静默跳过附件**，用户收到纯文本却以为带 Word，事后从推送记录里完全查不出。现在有两道确定性兜底 + 如实标注：
-  - `report.py --ensure-docx`：Word 缺失才补生成（幂等），补不上返回 1 并打 `[WARN]`。`run_scan.sh` 跑批结束调一次，`push_report.py` 推送前再兜一次（覆盖手工跑/面板跑/Agent 直接跑等所有入口）。
-  - 补不上就在正文页脚明确写「⚠️ 本次无 Word 附件」，不再无条件宣称"全文见 Markdown / Word / Excel"；`send_hermes` / `send_mail` 附件缺失时打 `[WARN]`。
+- **Word 附件（2026-10-20 现场发现 → 2026-10-25 调整为按需）**：10-20 的事故形态是"Word 由 Agent 照 prompt 执行 `--docx`、跑批漏了、推送侧 `if isfile` 静默跳过附件，用户以为有 Word 却只有正文"。当时修法是跑批/推送两道 `--ensure-docx` 自动补齐 + 如实标注。**2026-10-25 起语义反转：跑批只产 Markdown 日报，Excel/Word 按需人工生成**（`report.py --excel/--docx` 或面板一键生成），跑批与推送都不再自动生成/补齐：
+  - 推送按"文件在才带附件"执行：Word 存在就随邮件/Hermes 附上；不存在正文页脚写「⚠️ 本次无 Word 附件(Word 按需生成: report.py --docx)」，控制台打 `[提示]`，`send_hermes` / `send_mail` 附件缺失仍打 `[WARN]` 不静默。
+  - `report.py --ensure-docx` 保留为**人工按需入口**（幂等；md 缺失不补，防空壳 Word 掩盖跑批失败——10-22 教训）。
   - `report.py --docx` 的异常一律优雅降级但留痕（不崩、不装没看见）。
 
 ## 约定与注意事项

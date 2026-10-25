@@ -149,7 +149,7 @@ def index():
 
 @app.get("/api/summary")
 def api_summary():
-    events = report.collect(biz_today(), 3650)
+    events = report.collect(biz_today())
     if events is None:
         return jsonify({"record_type": "policy", "total": 0, "today_new": 0,
                         "focus_now": 0, "high": 0, "unverified": 0,

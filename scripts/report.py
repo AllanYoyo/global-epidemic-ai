@@ -79,16 +79,19 @@ def sort_key(policy):
             str(policy.get("effective_date") or policy.get("event_date") or ""))
 
 
-def collect(date, days_back, db_path=None):
-    """汇总某日日报所需的三组记录。
+def collect(date, db_path=None):
+    """汇总某日日报所需的记录组。
 
     date 必须是合法的 YYYY-MM-DD: 解析失败直接抛 ValueError(调用方转成中文错误提示
     并以非零码退出)。2026-10-19 修正: 原先 _date() 解析失败返回 None, 而本函数
     拿它做日期减法, 导致 `report.py --date 2026-13-45` / `push_report.py --date ...`
     抛裸 TypeError, 当天日报与推送一起丢(库里非空时必崩)。
+
+    2026-10-25 移除"近期变动跟踪"桶(原 days_back=14 的 active/covered): 政策的
+    后续动静由每日持续检索重新捕获, 报告不再机械重复旧条目; 历史查询走数据库
+    与 webapp 面板。日报即当日快照, 所有栏目只基于今日新增(first_seen==date)。
     """
-    base = _date(date)
-    if base is None:
+    if _date(date) is None:
         raise ValueError("日期格式非法: %r(应为 YYYY-MM-DD)" % (date,))
     con = open_db(db_path)
     all_events = [e for e in load_events(con) if e.get("record_type") == "policy"]
@@ -106,26 +109,8 @@ def collect(date, days_back, db_path=None):
                   "(event_date=%r, effective_date=%r)"
                   % (policy_title(e), e.get("country_en") or "?",
                      e.get("event_date"), e.get("effective_date")))
-    lo, hi = base - datetime.timedelta(days=days_back), base
-    new_ids = {e["event_id"] for e in new}
-    active = []
-    for e in all_events:
-        if e.get("verification_status") == "merged" or e["event_id"] in new_ids or not e.get("event_date"):
-            continue
-        d = _date(e["event_date"])
-        if d is None:
-            # 已知风险见 known-issues.md A3: 单条脏数据不应让整个 report 崩
-            print("[WARN] 跳过 event_date 无法解析的记录: %s @ %s (event_date=%r)"
-                  % (e.get("title_cn") or e.get("title_en") or "（无标题）",
-                     e.get("country_en") or "?", e.get("event_date")))
-            continue
-        if not (lo <= d <= hi):
-            continue
-        active.append(e)
     new.sort(key=sort_key)
-    active.sort(key=sort_key)
-    return {"all": all_events, "new": new, "active": active,
-            "covered": sorted(new + active, key=sort_key)}
+    return {"all": all_events, "new": new}
 
 
 def policy_row(index, policy):
@@ -149,34 +134,33 @@ def make_policy_table(events):
                       [policy_row(i, e) for i, e in enumerate(events, 1)]) + "\n"
 
 
-def policy_headline_items(new, active):
-    if not new and not active:
+def policy_headline_items(new):
+    if not new:
         return ["本期无新增政策变化记录。"]
-    covered = new + active
     countries = sorted({p.get("country_cn") for p in new if p.get("country_cn")})
     domains = sorted({DOMAIN_LABEL.get(p.get("policy_domain"), p.get("policy_domain"))
                       for p in new if p.get("policy_domain")})
-    high = sum(1 for p in covered if p.get("impact_level") == "高影响")
-    medium = sum(1 for p in covered if p.get("impact_level") == "中影响")
-    low = sum(1 for p in covered if p.get("impact_level") == "低影响")
-    focus = [p for p in covered if p.get("impact_level") == "高影响" or p.get("action_type") == "收紧"]
-    unverified = sum(1 for p in covered if p.get("verification_status") == "unverified")
+    high = sum(1 for p in new if p.get("impact_level") == "高影响")
+    medium = sum(1 for p in new if p.get("impact_level") == "中影响")
+    low = sum(1 for p in new if p.get("impact_level") == "低影响")
+    focus = [p for p in new if p.get("impact_level") == "高影响" or p.get("action_type") == "收紧"]
+    unverified = sum(1 for p in new if p.get("verification_status") == "unverified")
     return [
-        "变化了多少: 本期新增 %d 条政策变化(收紧 %d / 放松或恢复 %d / 其他 %d), 另有 %d 条近期变动跟踪中。" % (
+        "变化了多少: 本期新增 %d 条政策变化(收紧 %d / 放松或恢复 %d / 其他 %d)。" % (
             len(new), sum(1 for p in new if p.get("action_type") == "收紧"),
             sum(1 for p in new if p.get("action_type") in ("放松", "恢复")),
-            sum(1 for p in new if p.get("action_type") not in ("收紧", "放松", "恢复")), len(active)),
+            sum(1 for p in new if p.get("action_type") not in ("收紧", "放松", "恢复"))),
         "涉及国家: %d 个: %s。" % (len(countries), "、".join(countries[:8]) or "—"),
         "涉及领域: %s。" % ("、".join(domains) if domains else "—"),
         "对华影响: 高影响 %d 条 / 中影响 %d 条 / 低影响 %d 条 / 未研判 %d 条。" % (
-            high, medium, low, len(covered) - high - medium - low),
+            high, medium, low, len(new) - high - medium - low),
         "重点关注: %s" % ("; ".join("%s(%s)" % (policy_title(p)[:24], p.get("country_cn"))
                            for p in focus[:5]) if focus else "本期无。"),
     ] + (["待核实: %d 条, 见待核实信息栏。" % unverified] if unverified else [])
 
 
-def make_policy_headline(new, active):
-    return "\n".join("- " + item for item in policy_headline_items(new, active))
+def make_policy_headline(new):
+    return "\n".join("- " + item for item in policy_headline_items(new))
 
 
 def make_policy_detail(events):
@@ -251,13 +235,13 @@ def make_open_items(events):
     return "\n".join(lines) + "\n" if lines else "_无待核实/待研判政策记录。_\n"
 
 
-def make_stats(all_events, new, active):
+def make_stats(all_events, new):
     by_status = {}
     for e in all_events:
         by_status[e.get("verification_status")] = by_status.get(e.get("verification_status"), 0) + 1
     detail = " / ".join("%s %d" % (k, v) for k, v in sorted(by_status.items(), key=lambda kv: -kv[1]))
-    return "- 政策库累计: %d 条(%s)\n- 本期覆盖: 新增 %d 条, 近期变动 %d 条\n" % (
-        len(all_events), detail, len(new), len(active))
+    return "- 政策库累计: %d 条(%s)\n- 本期新增: %d 条\n" % (
+        len(all_events), detail, len(new))
 
 
 def make_sources(events):
@@ -360,7 +344,7 @@ def ensure_docx(date, db_path=None):
 
 def main():
     ap = argparse.ArgumentParser(description="生成政策监测日报")
-    ap.add_argument("--date", default=biz_today()); ap.add_argument("--days-back", type=int, default=14)
+    ap.add_argument("--date", default=biz_today())
     ap.add_argument("--policy", action="store_true", help="(已废弃, 无效果) 政策为唯一模式, 兼容旧定时/面板命令")
     ap.add_argument("--excel", action="store_true"); ap.add_argument("--docx", action="store_true"); ap.add_argument("--db-path")
     ap.add_argument("--ensure-docx", action="store_true",
@@ -369,27 +353,27 @@ def main():
     if args.ensure_docx:
         return ensure_docx(args.date, args.db_path)
     try:
-        data = collect(args.date, args.days_back, args.db_path)
+        data = collect(args.date, args.db_path)
     except ValueError as exc:
         print("[错误] %s" % exc)
         return 2
-    if data is None: data = {"all": [], "new": [], "active": [], "covered": []}
-    new, active, covered = data["new"], data["active"], data["covered"]
-    replacements = {"{{date}}": args.date, "{{generated_at}}": now(), "{{days_back}}": str(args.days_back), "{{headline}}": make_policy_headline(new, active), "{{new_table}}": make_policy_table(new), "{{active_table}}": make_policy_table(active), "{{focus_detail}}": make_policy_detail(covered), "{{impact_summary}}": make_policy_impact_summary(covered), "{{watchlist_diff}}": make_policy_watchlist_diff(covered), "{{unverified}}": make_open_items(covered), "{{stats}}": make_stats(data["all"], new, active), "{{sources}}": make_sources(covered)}
+    if data is None: data = {"all": [], "new": []}
+    new = data["new"]
+    replacements = {"{{date}}": args.date, "{{generated_at}}": now(), "{{headline}}": make_policy_headline(new), "{{new_table}}": make_policy_table(new), "{{focus_detail}}": make_policy_detail(new), "{{impact_summary}}": make_policy_impact_summary(new), "{{watchlist_diff}}": make_policy_watchlist_diff(new), "{{unverified}}": make_open_items(new), "{{stats}}": make_stats(data["all"], new), "{{sources}}": make_sources(new)}
     base = os.path.join(DATA_DIR, "reports", "%s-policy-report" % args.date)
     with open(POLICY_TEMPLATE, encoding="utf-8") as f: report_md = f.read()
     for key, value in replacements.items(): report_md = report_md.replace(key, value)
     os.makedirs(os.path.dirname(base), exist_ok=True)
     with open(base + ".md", "w", encoding="utf-8") as f: f.write(report_md)
     print("[OK] %s.md" % base)
-    if args.excel: print("[OK] %s" % export_table(base, covered))
+    if args.excel: print("[OK] %s" % export_table(base, new))
     if args.docx:
         try:
             import report_docx; print("[OK] %s" % report_docx.build(args.date, data))
         except ImportError: print("[WARN] 未安装 python-docx, 跳过 Word 简报")
         except SystemExit as exc: print("[WARN] Word 简报生成中止: %s" % (exc or "未知原因"))
         except Exception as exc: print("[WARN] Word 简报生成失败: %s" % exc)
-    print("\n本期: 新增 %d 条, 近期变动 %d 条(政策库共 %d 条)。" % (len(new), len(active), len(data["all"])))
+    print("\n本期: 新增 %d 条(政策库共 %d 条)。" % (len(new), len(data["all"])))
     return 0
 
 

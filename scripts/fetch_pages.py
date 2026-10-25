@@ -242,7 +242,12 @@ def verify_dates(to_verify, today, per_source_cap=2):
 
 
 def fetch(date_str, max_per_source=MAX_PER_SOURCE, max_total=MAX_TOTAL,
-          log=print):
+          max_files_per_day=0, log=print):
+    """max_files_per_day: 透传给 collect.py 的当日存档文件上限。
+
+    0 = 不限(测试放量用)。日常跑批不传 —— collect 默认 12 与 MAX_TOTAL=12
+    同口径双保险; 受控测试需要抬高时由调用方显式给值, 不改_collect 默认。
+    """
     today = datetime.date.fromisoformat(date_str)
     raw_dir = os.path.join(DATA_DIR, "raw", date_str)
     os.makedirs(raw_dir, exist_ok=True)
@@ -305,7 +310,8 @@ def fetch(date_str, max_per_source=MAX_PER_SOURCE, max_total=MAX_TOTAL,
                 continue
             p = subprocess.run(
                 [sys.executable, os.path.join(REPO, "scripts", "collect.py"),
-                 "--url", link, "--title", title[:80], "--date", date_str],
+                 "--url", link, "--title", title[:80], "--date", date_str,
+                 "--max-files-per-day", str(max_files_per_day)],
                 capture_output=True, text=True, timeout=60)
             if p.returncode != 0:
                 out = (p.stdout or "") + (p.stderr or "")
@@ -333,9 +339,12 @@ def main():
     ap.add_argument("--date", default=biz_today(), help="业务日期 YYYY-MM-DD(默认东八区今天)")
     ap.add_argument("--max-per-source", type=int, default=MAX_PER_SOURCE)
     ap.add_argument("--max-total", type=int, default=MAX_TOTAL)
+    ap.add_argument("--max-files-per-day", type=int, default=12,
+                    help="透传 collect.py 的当日存档文件上限(默认 12 与日常同口径; 0=不限, 测试放量用)")
     args = ap.parse_args()
     try:
-        n, log_lines, capped = fetch(args.date, args.max_per_source, args.max_total)
+        n, log_lines, capped = fetch(args.date, args.max_per_source, args.max_total,
+                                     args.max_files_per_day)
     except (OSError, ValueError) as exc:
         print("[fetch_pages][错误] %s" % exc)
         return 2

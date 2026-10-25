@@ -37,7 +37,7 @@ usage() {
   两者都不给                cron 上下文自动按定时任务处理; 其它上下文本轮不推送
   --stage fetch            只跑取数段(不加工不推送), 结束写 .fetch-done 幂等标记
   --refetch                清除当日取数标记强制重取(与幂等锁配对, 显式留痕)
-  --only-group <1|2>       只跑指定组取数(1=必扫档, 2=当日轮转档; 小token测试用,
+  --only-group <N>           只跑第 N 块取数(每块约 6 源对; 小token测试用,
                           不写 .fetch-done, 不会挡住之后的正式取数)
 EOF
 }
@@ -62,12 +62,15 @@ while [ $# -gt 0 ]; do
       STAGE="$2"; shift 2 ;;
     --stage=*) STAGE="${1#*=}"; shift ;;
     --only-group)
-      if [ $# -lt 2 ]; then echo "[错误] --only-group 需要参数(1|2)"; usage; exit 2; fi
-      case "$2" in 1|2) ONLY_GROUP="$2" ;; *) echo "[错误] --only-group 只认 1|2"; usage; exit 2 ;; esac
-      shift 2 ;;
+      if [ $# -lt 2 ]; then echo "[错误] --only-group 需要块号参数(≥1)"; usage; exit 2; fi
+      case "$2" in ''|*[!0-9]*) echo "[错误] --only-group 只认正整数块号"; usage; exit 2 ;; esac
+      [ "$2" -ge 1 ] || { echo "[错误] --only-group 从 1 起"; exit 2; }
+      ONLY_GROUP="$2"; shift 2 ;;
     --only-group=*)
-      case "${1#*=}" in 1|2) ONLY_GROUP="${1#*=}" ;; *) echo "[错误] --only-group 只认 1|2"; usage; exit 2 ;; esac
-      shift ;;
+      _og="${1#*=}"
+      case "$_og" in ''|*[!0-9]*) echo "[错误] --only-group 只认正整数块号"; usage; exit 2 ;; esac
+      [ "$_og" -ge 1 ] || { echo "[错误] --only-group 从 1 起"; exit 2; }
+      ONLY_GROUP="$_og"; shift ;;
     --refetch) REFETCH=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "未知参数: $1"; usage; exit 2 ;;
@@ -283,10 +286,11 @@ case "$MODE" in
 2) 抓任何页面**先落盘**(collect.py 或 curl -o), 需要判断内容时只用 python3 scripts/snip.py <存档文件> --grep <关键词>(脚本硬性只回显 ≤2KB); 严禁把整页正文留在对话里; 单次工具输出超过 8KB 即违规。
 3) web_search 本段不超过 15 次; 同一工具连败 2 次就换; 浏览器失败就弃用浏览器。
 4) WTO ePing 只走列表页: 行式列表存盘后用 python3 scripts/parse_eping.py <列表文件> --days 7 预筛, 只对窗口内条目下载, PDF 直链就在列表行里不要自己拼。
-5) 每找到一条**立刻**三步, 不留到收尾:
+5) 每找到一条**立刻**三步, 不留到收尾(2026-10-25 实测教训: Agent 把 13 条候选囤在对话里打算收尾统一存档, 50 轮打满只留下文本清单、0 条落盘):
    ① 存档: python3 scripts/collect.py --url <直链> --title <标题>;
    ② 候选: python3 scripts/jsonl_append.py data/raw/$SCAN_DATE/candidates.jsonl title=<标题> url=<直链> country_en=<英文国名> publish_date=<YYYY-MM-DD> source_name=<源> brief=<一句话> —— 脚本只回执一行(ok +1), **不打印记录内容**; 参数值含空格用单引号括起;
    ③ 抽取: 先用 snip.py 从刚落盘的存档摘标题/发布日期/关键句, 再用 python3 scripts/jsonl_append.py data/raw/$SCAN_DATE/extracted-policy.jsonl 追加一行, 键值模板: record_type=policy title_cn=<中文标题> title_en=<英文标题> country_cn=<国名> country_en=<英文国名> policy_domain=<animal|plant|both|trade|measures> action_type=<收紧|放松|调整|恢复> event_date=<YYYY-MM-DD> effective_date=<YYYY-MM-DD> products=<英文逗号分隔> summary_cn=<中文摘要> source.tier=<1|3> source.name=<源名> source.url=<直链> source.publish_date=<YYYY-MM-DD> source.quote=<≤120字逐字摘录> —— 原文没有的信息留空(存 null), **不打印记录内容**。
+   **进度自检**: 扫到第 3 个通道时 data/raw/$SCAN_DATE/ 下必须已有存档文件 —— 没有就说明你在囤积候选, 立即停下先把已找到的存档入库再继续。本轮结束前清单里的候选若还没存档, 视为未完成。
    写完不回读、不打印验证 —— 记录对不对由加工段 normalize 校验兜底。
 6) 每条必须有 source.url 与 source.quote(≤120 字, 逐字摘自存档文件); source.publish_date 用页面自己的发布日期, 不得用抓取日; 原文没有的信息填 null, 严禁编造; 旧闻(超 7 天)与第三方站点不写入, 只在 search-log.md 记一行线索。
 7) 当日存档上限 12 个文件(约 6 条), 触顶即停, 剩余通道记进 search-log.md; 时间到立刻交卷。
@@ -297,7 +301,7 @@ case "$MODE" in
 2) 入库: python3 scripts/normalize.py --input data/raw/$SCAN_DATE/extracted-policy.jsonl --out data/events/$SCAN_DATE/ --db --max-age-days 7。tier=1 只认官方域名; 第三方站点整条拒收, 只在 search-log.md 记为线索。
 3) 研判: 对已入库 verified 记录逐条写回四维与结论, 先用 python3 scripts/risk.py --list-pending 看缺哪些, 再逐条 python3 scripts/risk.py --event-id <id> --impact-type <约束|机会|中性> --china-relevance <直接涉及中国|间接影响|暂无明显关联> --action <...> --rationale <...> --dim trade=N --dim biosecurity=N --dim response=N --dim alignment=N。
 4) 出报(无论几条都必须执行): python3 scripts/report.py --date $SCAN_DATE --excel --docx; 补写 data/raw/$SCAN_DATE/policy-findings.md。
-【红线】严禁 --broadcast; 严禁为了让日报好看而入库旧闻; 严禁编造 quote; 不做新的联网检索。
+【红线】严禁 --broadcast; 严禁为了让日报好看而入库旧闻; 严禁编造 quote; **严禁联网检索与 collect.py 抓取新原文**(2026-10-25 实测: 空输入下加工 Agent 自发联网重做取数, 194 万折合白烧、50 轮打满 —— 本段只处理 data/raw/$SCAN_DATE/ 已有存档, 没有就直接出报, 日报显示 0 新增是诚实结果)。
 $PUSH_INSTRUCTION"
     PROMPT="$PROMPT_PROCESS" ;;
   *) echo "用法: $0 [am|pm|policy] [--review-channel <渠道> | --broadcast]"; exit 2 ;;
@@ -463,41 +467,50 @@ if [ -n "${HERMES_RUN_CMD:-}" ]; then
         HEALTH_BLOCK="$(printf '%s' "$HEALTH_BLOCK" | sed -e 's/"/」/g' -e 's/`//g' -e 's/\$//g')"
         echo "[$(date '+%F %T')] 已注入通道体检名单($(echo "$HEALTH_BLOCK" | grep -c '^-' ) 条)"
       fi
-      # ---- 国别分组取数(2026-10-24 P1): 单作业装不下全部通道, 按档位拆组 ----
-      # 实证: 当天两轮 90/90、两轮 50/50 打满 max_turns, 打满即整轮作废重来;
-      # 拆组后单组打满只废单组(存档边存边写, 其它组的成果不受牵连)。
-      # 超时按各组源对数加权(保底 360s), 总时长仍受 FETCH_TIMEOUT 约束。
+      # ---- 国别分块取数(2026-10-24 P1 引入, 10-25 晨跑再修) ----
+      # 实证: 10-24 两轮 90/90、两轮 50/50 打满; 10-25 必扫 21 源对单组仍
+      # 50/50 打满且 Agent 把候选囤在对话里 0 交付 —— 改为按 6 源对/块切成
+      # K 块逐块发起(约 4-5 轮/源, 6 对/块 ≈ 30 轮内收敛)。单块打满只废单块
+      # (存档边存边写不受牵连); 超时按各块源对数加权(保底 360s)。
       GROUPS_INFO="$("$PY" "$REPO/scripts/scan_targets.py" --date "$SCAN_DATE" --groups 2>/dev/null || true)"
-      G1_N="$(printf '%s' "$GROUPS_INFO" | sed -n 's/^n1=\([0-9][0-9]*\) n2=[0-9][0-9]*$/\1/p')"
-      G2_N="$(printf '%s' "$GROUPS_INFO" | sed -n 's/^n1=[0-9][0-9]* n2=\([0-9][0-9]*\)$/\1/p')"
+      # 解析 "n1=6 n2=6 ... nK=3"(块数随当日源对数浮动)
       GROUP_LIST=""
-      case "${G1_N:-x}" in [0-9]*) [ "$G1_N" -gt 0 ] && GROUP_LIST="1" ;; esac
-      case "${G2_N:-x}" in [0-9]*) [ "$G2_N" -gt 0 ] && GROUP_LIST="$GROUP_LIST 2" ;; esac
+      N_TOTAL=0
+      for _kv in $GROUPS_INFO; do
+        case "$_kv" in
+          n[0-9]*=[0-9]*)
+            _g="${_kv%%=*}"; _g="${_g#n}"; _v="${_kv##*=}"
+            case "${_g}${_v}" in *[!0-9]*|'') continue ;; esac
+            [ "$_v" -gt 0 ] || continue
+            N_TOTAL=$((N_TOTAL + _v))
+            GROUP_LIST="$GROUP_LIST $_g"
+            ;;
+        esac
+      done
       if [ -z "$GROUP_LIST" ]; then
-        # 分组解析失败(格式漂移) → 退回单组全量旧口径, 不阻塞跑批
+        # 分块解析失败(格式漂移) → 退回单组全量旧口径, 不阻塞跑批
         GROUP_LIST="x"
-        echo "[WARN] 当日分组解析失败(收到: $GROUPS_INFO), 本轮退回单组全量取数"
+        echo "[WARN] 当日分块解析失败(收到: $GROUPS_INFO), 本轮退回单组全量取数"
       fi
-      # --only-group N(小token测试/补单组): 只发起指定组, 其余组不跑 ——
-      # 测试语义**不写 .fetch-done**(单组跑完 ≠ 当日取数已交付, 不能挡正式取数)
+      # --only-group N(小token测试/补单块): 只发起指定块, 其余块不跑 ——
+      # 测试语义**不写 .fetch-done**(单块跑完 ≠ 当日取数已交付, 不能挡正式取数)
       if [ -n "$ONLY_GROUP" ]; then
         case " $GROUP_LIST " in
           *" $ONLY_GROUP "*)
             GROUP_LIST="$ONLY_GROUP"
-            echo "[INFO] --only-group $ONLY_GROUP: 本轮只取该组, 不写取数完成标记" ;;
+            echo "[INFO] --only-group $ONLY_GROUP: 本轮只取该块, 不写取数完成标记" ;;
           *)
-            echo "[WARN] --only-group $ONLY_GROUP: 当日该组无源对($GROUPS_INFO), 本轮不取数"
+            echo "[WARN] --only-group $ONLY_GROUP: 当日无此块($GROUPS_INFO), 本轮不取数"
             GROUP_LIST="" ;;
         esac
       fi
       GROUP_TOTAL="$(echo $GROUP_LIST | wc -w | tr -d ' ')"
-      N_TOTAL=$(( ${G1_N:-0} + ${G2_N:-0} ))
       FRC=0
       for G in $GROUP_LIST; do
-        # 组间预算复查(小token测试与生产双重保险): 前一组烧完若已达预算, 剩余组
+        # 块间预算复查(小token测试与生产双重保险): 前一块烧完若已达预算, 剩余块
         # 不再发起 —— 半途而废比全烧完强, 已存档数据不受影响(边存边写)
         if ! "$PY" "$REPO/scripts/token_budget.py" --date "$SCAN_DATE" >/dev/null 2>&1; then
-          echo "[WARN] 组间预算复查已达上限, 剩余组(含组$G)本轮不发起, 直接进加工"
+          echo "[WARN] 块间预算复查已达上限, 剩余块(含块$G)本轮不发起, 直接进加工"
           break
         fi
         if [ "$G" = "x" ]; then
@@ -507,7 +520,8 @@ if [ -n "${HERMES_RUN_CMD:-}" ]; then
         else
           GROUP_BLOCK="$("$PY" "$REPO/scripts/scan_targets.py" --date "$SCAN_DATE" --group "$G" 2>/dev/null || true)"
           PROBE_BLOCK="$("$PY" "$REPO/scripts/probe_channels.py" --date "$SCAN_DATE" --group "$G" 2>/dev/null || true)"
-          case "$G" in 1) G_N="$G1_N" ;; 2) G_N="$G2_N" ;; esac
+          G_N="$(printf '%s' "$GROUPS_INFO" | tr ' ' '\n' | sed -n "s/^n$G=//p")"
+          case "$G_N" in ''|*[!0-9]*) G_N=0 ;; esac
         fi
         # 两道清洗同 COUNTRY_BLOCK: 注入内容不得含 ASCII 双引号/反引号/$
         GROUP_BLOCK="$(printf '%s' "$GROUP_BLOCK" | sed -e 's/"/」/g' -e 's/`//g' -e 's/\$//g')"
@@ -527,20 +541,20 @@ if [ -n "${HERMES_RUN_CMD:-}" ]; then
 $PROBE_BLOCK"
         [ -n "$HEALTH_BLOCK" ] && PROMPT_FETCH="$PROMPT_FETCH
 $HEALTH_BLOCK"
-        echo "[$(date '+%F %T')] 阶段 1/2 取数存档 · 组$G/$GROUP_TOTAL(源对 ${G_N:-?}, 上限 ${G_TIMEOUT}s)"
+        echo "[$(date '+%F %T')] 阶段 1/2 取数存档 · 块$G/$GROUP_TOTAL(源对 ${G_N:-?}, 上限 ${G_TIMEOUT}s)"
         FETCH_RAN=1
         eval "timeout -k 30 ${G_TIMEOUT} ${HERMES_RUN_CMD/\{PROMPT\}/$PROMPT_FETCH}"
         GRC=$?
         [ "$GRC" -gt "$FRC" ] && FRC="$GRC"
         if [ "$GRC" -eq 124 ] || [ "$GRC" -eq 137 ]; then
-          echo "[失败] 组$G 取数超时(${G_TIMEOUT}s), 已终止"
+          echo "[失败] 块$G 取数超时(${G_TIMEOUT}s), 已终止"
           _abort_gateway_orphans
         else
-          echo "[$(date '+%F %T')] 组$G 取数结束 rc=$GRC"
+          echo "[$(date '+%F %T')] 块$G 取数结束 rc=$GRC"
         fi
       done
       if [ "$FRC" -eq 0 ]; then
-        echo "[$(date '+%F %T')] 阶段 1/2 全部组结束 rc=0, 继续加工出报"
+        echo "[$(date '+%F %T')] 阶段 1/2 全部块结束 rc=0, 继续加工出报"
       fi
       fi
     else
@@ -553,13 +567,23 @@ $HEALTH_BLOCK"
     # 抽取规则从原文补齐。脚本幂等、不联网、不编造(见 synth_candidates.py)。
     "$PY" "$REPO/scripts/synth_candidates.py" --date "$SCAN_DATE" || \
       echo "[WARN] synth_candidates 失败(不影响继续, 加工段将看不到候选清单兜底)"
+    # ---- 产物统一计数(幂等标记与空输入短接共用; 2026-10-25 修: 文件缺失时 ----
+    # 不再让 wc 的重定向抛 bash 报错行)
+    RAW_N_NOW="$(find "$FETCH_DIR" -maxdepth 1 -type f -name '*.meta.json' 2>/dev/null | wc -l | tr -d ' ')"
+    CAND_N=0
+    if [ -f "$FETCH_DIR/candidates.jsonl" ]; then
+      CAND_N="$(wc -l < "$FETCH_DIR/candidates.jsonl" | tr -d ' ')"
+    fi
+    case "$CAND_N" in ''|*[!0-9]*) CAND_N=0 ;; esac
+    EXTRACT_N=0
+    if [ -f "$FETCH_DIR/extracted-policy.jsonl" ]; then
+      EXTRACT_N="$(wc -l < "$FETCH_DIR/extracted-policy.jsonl" | tr -d ' ')"
+    fi
+    case "$EXTRACT_N" in ''|*[!0-9]*) EXTRACT_N=0 ;; esac
     # ---- 取数完成标记: 只有本轮真的跑了取数才写(跳过的不改写原标记的完成时刻) ----
     # rc=0(正常收尾, 哪怕 0 条的安静日)或已有存档(取到了东西, 值得保留断点)才写;
-    # 超时且 0 存档 → 不写, 下一轮允许重取。--only-group 是测试/补单组语义, 不写。
+    # 超时且 0 存档 → 不写, 下一轮允许重取。--only-group 是测试/补单块语义, 不写。
     if [ "$FETCH_RAN" = "1" ] && [ -z "$ONLY_GROUP" ]; then
-      RAW_N_NOW="$(find "$FETCH_DIR" -maxdepth 1 -type f -name '*.meta.json' 2>/dev/null | wc -l | tr -d ' ')"
-      CAND_N="$(wc -l < "$FETCH_DIR/candidates.jsonl" 2>/dev/null | tr -d ' ')"
-      case "$CAND_N" in ''|*[!0-9]*) CAND_N=0 ;; esac
       if [ "$FRC" -eq 0 ] || [ "${RAW_N_NOW:-0}" -gt 0 ]; then
         mkdir -p "$FETCH_DIR" 2>/dev/null || true
         { echo "done_at=$(date '+%F %T')"; echo "fetch_rc=$FRC";
@@ -584,6 +608,32 @@ $HEALTH_BLOCK"
       echo "[失败] --stage fetch 未正常结束且无存档(未写取数标记)"
       exit 1
     fi
+    # ---- 空输入短接(2026-10-25 晨跑事故后引入) ----
+    # 实测: 取数 0 交付(空清单)时, 加工 Agent 无视「不联网检索」红线自发重做
+    # 取数 —— 194 万折合、50 轮打满、入库/出报一步没跑到。0 存档且无候选/抽取
+    # 记录时, 出报是纯确定性工作, 直接 report.py 完成, 不给 Agent 即兴舞台;
+    # 推送同样按范围锁确定性执行(broadcast/review 才推, none 不推)。
+    if [ "${RAW_N_NOW:-0}" -eq 0 ] && [ "${EXTRACT_N:-0}" -eq 0 ] && [ "${CAND_N:-0}" -eq 0 ]; then
+      echo "[WARN] 当日 0 存档且无候选/抽取记录 —— 加工段不派 Agent, 直接确定性出报"
+      mkdir -p "$FETCH_DIR" 2>/dev/null || true
+      if [ ! -f "$FETCH_DIR/policy-findings.md" ]; then
+        printf '# 政策变化发现 · %s(东八区)\n\n- 本轮自动生成: 取数段交付 0 条存档(原因见 search-log.md 与调度日志), 加工段按空输入确定性出报, 未派 Agent。\n' \
+          "$SCAN_DATE" > "$FETCH_DIR/policy-findings.md" 2>/dev/null || true
+      fi
+      "$PY" "$REPO/scripts/report.py" --date "$SCAN_DATE" --excel --docx
+      RC=$?
+      PR_RC=0
+      case "$SCOPE" in
+        broadcast) "$PY" "$REPO/scripts/push_report.py" --date "$SCAN_DATE" --broadcast; PR_RC=$? ;;
+        review)    "$PY" "$REPO/scripts/push_report.py" --date "$SCAN_DATE" --review-channel "$SCOPE_CHANNEL"; PR_RC=$? ;;
+      esac
+      if [ "$RC" -ne 0 ] || [ "$PR_RC" -ne 0 ]; then
+        echo "[失败] 空输入确定性出报/推送异常(出报 rc=$RC, 推送 rc=$PR_RC)"
+        RC=1
+      else
+        echo "[$(date '+%F %T')] 空输入确定性出报完成(未派加工 Agent)"
+      fi
+    else
     echo "[$(date '+%F %T')] 阶段 2/2 加工出报(上限 ${PROCESS_TIMEOUT}s)"
     _run_agent "$PROCESS_TIMEOUT" "$PROMPT_PROCESS"
     RC=$?
@@ -591,6 +641,7 @@ $HEALTH_BLOCK"
       echo "[失败] 加工阶段超时(${PROCESS_TIMEOUT}s), 已终止"
       RC=1
       _abort_gateway_orphans
+    fi
     fi
   else
     echo "[$(date '+%F %T')] 开始扫描(上限 ${SCAN_TIMEOUT}s)"

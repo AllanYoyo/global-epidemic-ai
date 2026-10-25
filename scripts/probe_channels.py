@@ -104,8 +104,8 @@ def render_probe(date_str, group=None):
 def main():
     ap = argparse.ArgumentParser(description="当日源入口确定性预探(注入取数 prompt)")
     ap.add_argument("--date", default=biz_today(), help="业务日期 YYYY-MM-DD(默认东八区今天)")
-    ap.add_argument("--group", type=int, choices=(1, 2), default=None,
-                    help="只探该组(1=必扫档, 2=当日轮转档); 缺省=全部")
+    ap.add_argument("--group", type=int, default=None,
+                    help="只探该块(≥1, 与 scan_targets 分块同口径); 缺省=全部")
     args = ap.parse_args()
     try:
         out = render_probe(args.date, args.group)

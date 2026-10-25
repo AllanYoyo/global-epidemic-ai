@@ -2005,37 +2005,42 @@ class TokenBudgetBrakeTests(unittest.TestCase):
 
 
 class FetchGroupingTests(unittest.TestCase):
-    """取数国别分组 + 通道确定性预探(2026-10-24 P1)。
+    """取数分块 + 通道确定性预探(2026-10-24 P1, 10-25 晨跑再修)。
 
-    单作业不收敛的实证(当天两轮 90/90、两轮 50/50 打满 max_turns, 打满即整轮
-    作废重来)→ 按档位拆组逐个发起; 通道 HTTP 探测前移出 Agent(治理后一轮仍有
-    26 terminal + 25 execute_code 的探测/摘录调用)。
+    10-25 晨跑实证: 必扫 21 源对单组 50 轮仍打满, 且 Agent 把候选囤在对话里
+    0 交付 → 按 GROUP_CHUNK=6 源对/块切, 每块 ≈30 轮内收敛; HTTP 探测前移出
+    Agent(治理后一轮仍有 26 terminal + 25 execute_code 的探测/摘录调用)。
     """
 
-    def test_scan_targets_group_split(self):
-        # 组1=必扫档, 组2=当日轮转档; 周六(ISO 6)有 state_level, 周二只有必扫档
+    def test_scan_targets_chunking_invariants(self):
+        # 不变量: 块号连续从1; 每块 ≤ GROUP_CHUNK; 各块之和 = 全量; 块K = 全量按序的第 K 段
         import scan_targets
-        sat_g1, n1 = scan_targets.render("2026-10-24", group=1)
-        sat_g2, n2 = scan_targets.render("2026-10-24", group=2)
-        self.assertIn("[priority_1]", sat_g1)
-        self.assertIn("[regional]", sat_g1)
-        self.assertNotIn("[state_level]", sat_g1)
-        self.assertIn("[state_level]", sat_g2)
-        self.assertNotIn("[priority_1]", sat_g2)
-        self.assertGreater(n1, 0)
-        info = scan_targets.groups_info("2026-10-27")   # 周二
-        self.assertGreater(info[1], 0)
-        self.assertEqual(info[2], 0)
+        for date in ("2026-10-25", "2026-10-26", "2026-10-27"):
+            info = scan_targets.groups_info(date)
+            self.assertEqual(sorted(info), list(range(1, len(info) + 1)), date)
+            self.assertTrue(all(0 < v <= scan_targets.GROUP_CHUNK for v in info.values()), date)
+            full = scan_targets._pick(date)
+            self.assertEqual(sum(info.values()), len(full), date)
+            for k in info:
+                self.assertEqual(scan_targets._pick(date, k),
+                                 full[(k - 1) * scan_targets.GROUP_CHUNK:
+                                      k * scan_targets.GROUP_CHUNK], date)
+        # 周日(10-25)无轮转: 21 对 → 6/6/6/3 四块(钉死防回归)
+        self.assertEqual(scan_targets.groups_info("2026-10-25"),
+                         {1: 6, 2: 6, 3: 6, 4: 3})
 
     def test_scan_targets_groups_cli_machine_readable(self):
-        # run_scan.sh 靠正则解析 n1=.. n2=.. —— 格式漂移会让分组退化, 这里钉死
+        # run_scan.sh 逐 token 解析 n1=.. nK=.. —— 格式钉死防漂移(块数可变)
         import scan_targets
         out = io.StringIO()
-        with mock.patch("sys.argv", ["scan_targets.py", "--date", "2026-10-24",
+        with mock.patch("sys.argv", ["scan_targets.py", "--date", "2026-10-25",
                                      "--groups"]), redirect_stdout(out):
             rc = scan_targets.main()
         self.assertEqual(rc, 0)
-        self.assertRegex(out.getvalue(), r"^n1=[0-9]+ n2=[0-9]+\n$")
+        self.assertRegex(out.getvalue(), r"^n1=[0-9]+( n[0-9]+=[0-9]+)*\n$")
+        info = scan_targets.groups_info("2026-10-25")
+        self.assertIn(" ".join("n%d=%d" % kv for kv in sorted(info.items())),
+                      out.getvalue())
 
     def test_probe_channels_classify_and_clean(self):
         # ok/dead 口径与 channel_health 的「不可用」一致; 输出会被拼进 prompt, 必须洗净
@@ -2055,20 +2060,22 @@ class FetchGroupingTests(unittest.TestCase):
             return f.read()
 
     def test_run_scan_fetch_loop_over_groups(self):
-        # 拆组循环: 模板占位符逐组替换 + 分组解析 + 探测前移 + 加权超时
+        # 分块循环: 变长块解析 + 模板占位符逐块替换 + 探测前移 + 加权超时
         text = self._run_scan_text()
         self.assertIn("@@COUNTRY_BLOCK@@", text)
         self.assertIn('"$REPO/scripts/scan_targets.py" --date "$SCAN_DATE" --groups', text)
+        self.assertIn("for _kv in $GROUPS_INFO", text)     # 变长 nK=.. 解析(10-25 改分块)
         self.assertIn("probe_channels.py", text)
         self.assertIn("G_TIMEOUT", text)
-        self.assertIn("组$G 取数超时", text)
+        self.assertIn("块$G 取数超时", text)
         # 模板改名 PROMPT_FETCH_TPL 后, policy 分支条件若仍查旧变量名会静默
         # 退化成单轮流程(干跑实测抓到过) —— 钉死条件必须查模板变量
         cond = 'if [ "$MODE" = "policy" ] && [ -n "${PROMPT_FETCH_TPL:-}" ]; then'
         self.assertIn(cond, text)
-        # token 经济纪律不得在重构中丢失
+        # token 经济纪律不得在重构中丢失; 10-25 教训: 囤积候选不落盘 → 进度自检
         self.assertIn("严禁 read_file", text)
         self.assertIn("extracted-policy.jsonl", text)
+        self.assertIn("进度自检", text)
 
     def test_run_scan_requires_explicit_mode(self):
         # 无参数不得静默默认 am 起真实扫描(2026-10-24 现场手滑实测);
@@ -2077,12 +2084,26 @@ class FetchGroupingTests(unittest.TestCase):
         self.assertIn("未指定模式", text)
         self.assertNotIn('MODE="${MODE:-am}"', text)
 
+    def test_run_scan_empty_input_short_circuit(self):
+        # 2026-10-25 晨跑事故: 空输入下加工 Agent 自发联网重做取数(194万折合白烧、
+        # 50 轮打满、入库/出报没跑到) → 0 存档且无候选/抽取记录时不派 Agent,
+        # 直接确定性出报 + 按范围锁确定性推送
+        text = self._run_scan_text()
+        self.assertIn("加工段不派 Agent", text)
+        self.assertIn("直接确定性出报", text)
+        self.assertIn('"$REPO/scripts/report.py" --date "$SCAN_DATE" --excel --docx', text)
+        self.assertIn('"$REPO/scripts/push_report.py" --date "$SCAN_DATE" --broadcast', text)
+        self.assertIn('"$REPO/scripts/push_report.py" --date "$SCAN_DATE" --review-channel "$SCOPE_CHANNEL"', text)
+        # 三重计数护栏(文件缺失时 wc 不再抛 bash 报错行)
+        self.assertIn('[ -f "$FETCH_DIR/candidates.jsonl" ]', text)
+        self.assertIn('[ -f "$FETCH_DIR/extracted-policy.jsonl" ]', text)
+
     def test_run_scan_only_group_test_mode(self):
-        # 小token测试开关: 只跑指定组 + 不写幂等标记(不挡正式取数) + 组间预算复查
+        # 小token测试开关: 只跑指定块 + 不写幂等标记(不挡正式取数) + 块间预算复查
         text = self._run_scan_text()
         self.assertIn("--only-group", text)
         self.assertIn('[ -z "$ONLY_GROUP" ]', text)      # 测试语义不写 .fetch-done
-        self.assertIn("组间预算复查", text)               # 前一组烧超, 剩余组不再发起
+        self.assertIn("块间预算复查", text)               # 前一块烧超, 剩余块不再发起
 
     def test_run_scan_stage_timeouts_beat_hermes_env(self):
         # 2026-10-24 二级测试实测: STAGE_FETCH_TIMEOUT=600 被 ~/.hermes/.env 的

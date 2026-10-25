@@ -519,7 +519,10 @@ def main():
     # 不得扩散到其它渠道(2026-10-19 修复闸门漏法 3/4: 原实现 --message 完全
     # 绕过闸门, 待审期间钉钉群照样收到提醒)。
     if args.message:
-        text = args.message
+        # 自定义文本统一追加版本指纹落款(2026-10-25): 日报卡片一直带「代码 <短哈希>」
+        # 而 message 路径靠发送方手工记得 —— 手工路径必然有遗漏(当日实测), 复盘时
+        # 看不出现场版本。现在由脚本保证: 任何推送尾部都有版本指纹, 不靠自觉。
+        text = "%s\n\n> AI 辅助生成 · 仅供情报参考 · 代码 %s" % (args.message, code_fingerprint())
         docx = None
         # 审阅渠道(Hermes 型)要显式纳入本次集合, 否则只发钉钉就发不到微信
         review_key = channel_key_for_label(review_label) if review_label else None

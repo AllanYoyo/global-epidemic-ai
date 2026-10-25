@@ -35,8 +35,14 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SOURCES_PATH = os.path.join(REPO, "config", "sources.yaml")
 BIZ_TZ_OFFSET_HOURS = 8  # 与 normalize.biz_today 同口径
 
-# 必扫档: 不参与周轮转, 每天都要扫
-ALWAYS_TIERS = ("priority_1", "regional", "priority_2")
+# 每日全扫(2026-10-25 起): 全部档位每天都进清单。P4 确定性取数(curl, 零 LLM)
+# 后, 源数不再消耗 token —— 抽取成本只跟存档数走(每日 ≤12 硬上限), 周轮转
+# 分片失去省 token 的存在前提。此前 10-24 引入本脚本时 ALWAYS_TIERS 只列了
+# 3 个必扫档, 而 weekly_shards 周一~五/周日 scan 全空 —— border_neighbours/
+# export_partners 两档 23 个源**没有任何调度日**(俄/越/哈/蒙等 10-14 特意
+# 标注"高疫区邻国每日扫"的源全部失明), 属配置断裂, 见 known-issues H17。
+ALWAYS_TIERS = ("priority_1", "regional", "priority_2",
+                "border_neighbours", "export_partners", "state_level")
 
 # 每块源对上限(2026-10-25): 21 对单组 50 轮打满 → 按 6 对/块切
 GROUP_CHUNK = 6
@@ -141,17 +147,21 @@ def _pick(date_str, group=None):
 
     d = datetime.date.fromisoformat(date_str)
     iso = d.isoweekday()
-    tier_today = list(ALWAYS_TIERS) + weekly.get(iso, [])
+    # 档位全列 + 去重保序(weekly_shards 若仍引用某档, 防同档重复进清单)
+    tier_today = list(dict.fromkeys(list(ALWAYS_TIERS) + weekly.get(iso, [])))
 
     picked = []
+    seen_sid = set()
     for tier in tier_today:
         for c in tiers.get(tier, []):
-            if c["shard"] and str(iso) not in c["shard"].split():
-                continue
+            # shard 过滤已随周轮转废弃(每日全扫); 字段保留解析仅为兼容旧 YAML
             for sid in c["source_ids"]:
+                if sid in seen_sid:
+                    continue  # 同源跨档/跨国重复挂载, 只扫一次(取首个挂载档位)
                 src = sources.get(sid) or {}
                 if src.get("track") not in (None, "policy"):
                     continue
+                seen_sid.add(sid)
                 url = src.get("url") or "(无入口URL, 用官方站检索)"
                 picked.append((tier, c["cn"], c["en"], sid, url))
     if group is not None:

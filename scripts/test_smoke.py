@@ -1826,18 +1826,32 @@ class TokenEconomyTests(unittest.TestCase):
         # 旧指令不得残留: "追加写入 ... candidates.json"(读改写整个 JSON 的病根)
         self.assertNotIn("追加写入 data/raw/$SCAN_DATE/candidates.json", text)
 
-    def test_scan_targets_respects_weekly_shards(self):
-        # 周轮转档: 周六(ISO 6)按 weekly_shards 扫 state_level; 周二只扫必扫档
+    def test_scan_targets_daily_full_scan(self):
+        # 2026-10-25 起每日全扫(P4 零 token 取数后周轮转废弃): 任意两天清单一致,
+        # 六档全在, 轮转档源(俄/英/日等)不再有"无调度日"。防 10-24 配置断裂回归
+        # (当时 border_neighbours/export_partners 23 个源没有任何调度日, H17)。
         import scan_targets
-        sat, n_sat = scan_targets.render("2026-10-24")   # 周六
-        tue, n_tue = scan_targets.render("2026-10-27")   # 周二
-        self.assertIn("[state_level]", sat)
-        self.assertIn("[priority_1]", sat)
-        self.assertIn("[regional]", sat)
-        self.assertNotIn("[state_level]", tue)
-        self.assertNotIn("[border_neighbours]", tue)
-        self.assertGreaterEqual(n_sat, 10)               # fail-visible 自检线
-        self.assertGreaterEqual(n_tue, 10)
+        import datetime
+        days = [datetime.date(2026, 10, d).isoformat() for d in range(24, 31)]
+        lists = [[(t, sid) for t, _cn, _en, sid, _u in scan_targets._pick(d)] for d in days]
+        first = lists[0]
+        for d, lst in zip(days[1:], lists[1:]):
+            self.assertEqual(lst, first, d)  # 每日清单完全一致
+        tiers_seen = {t for t, _ in first}
+        for tier in ("priority_1", "regional", "priority_2",
+                     "border_neighbours", "export_partners", "state_level"):
+            self.assertIn(tier, tiers_seen, "档位缺失: %s" % tier)
+        sids = {sid for _t, sid in first}
+        for sid in ("ru-fsvps", "uk-defra", "jp-maff", "vn-mard", "au-agriculture"):
+            self.assertIn(sid, sids, "轮转档源失明: %s" % sid)
+        # 同源跨档重复挂载只扫一次
+        self.assertEqual(len(sids), len(first))
+        self.assertGreaterEqual(len(first), 40)  # 47 policy 源的量级下限
+        # 7 天并集 = 每日清单(全扫不变量)
+        union = set(sids)
+        for lst in lists[1:]:
+            union |= {sid for _t, sid in lst}
+        self.assertEqual(union, sids)
 
     def test_scan_targets_injects_source_urls(self):
         # 清单必须直出源入口 URL, Agent 才不需要读 sources.yaml
@@ -2022,9 +2036,9 @@ class FetchGroupingTests(unittest.TestCase):
                 self.assertEqual(scan_targets._pick(date, k),
                                  full[(k - 1) * scan_targets.GROUP_CHUNK:
                                       k * scan_targets.GROUP_CHUNK], date)
-        # 周日(10-25)无轮转: 21 对 → 6/6/6/3 四块(钉死防回归)
+        # 每日全扫(2026-10-25): 47 源(跨档重复挂载去重) → 8 块(6×7+5, 钉死防回归)
         self.assertEqual(scan_targets.groups_info("2026-10-25"),
-                         {1: 6, 2: 6, 3: 6, 4: 3})
+                         {1: 6, 2: 6, 3: 6, 4: 6, 5: 6, 6: 6, 7: 6, 8: 5})
 
     def test_scan_targets_groups_cli_machine_readable(self):
         # run_scan.sh 逐 token 解析 n1=.. nK=.. —— 格式钉死防漂移(块数可变)

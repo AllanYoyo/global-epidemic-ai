@@ -17,19 +17,18 @@
 runs:
   policy: {time: "07:30", desc: 外国政府政策变化扫, 产出: 政策日报+Word+Excel+推送, track: [policy]}
 
-# ---- 周轮转分片(ISO 星期: 1=周一 .. 7=周日) ----
-# 每日只扫当天分片的条目, 保证 7 天全覆盖而单日检索量不随国别数线性膨胀。
-# priority_1 / regional / priority_2 无 shard, 每日必扫(18 源)。
-# 条目级 shard 优先于档位级 scan: 条目写了 shard 就只在该日扫; 未写的按 scan 整档扫。
-# 取值范围 1-7, 同一档内用空格分隔多个星期(如 shard: "1 4" 表示周一与周四)。
-# 排期原则: 高价值(欧盟/ePing/邻国)每日或高频; 低频国别分散到 2-3 天一轮。
+# ---- 周轮转分片(已废弃, 2026-10-25 起每日全扫) ----
+# 2026-10-25 起每日全扫(见 scan_targets.ALWAYS_TIERS): P4 确定性取数零 LLM 后
+# 源数不再烧 token, 周轮转分片失去存在前提, 全部档位每天进清单。
+# 本段保留仅为兼容 scan_targets 解析器与旧配置习惯, scan 一律留空。
+# 国别条目里的 shard 字段同样废弃(保留不报错, 不再有过滤效果)。
 weekly_shards:
   1: {desc: 周一, scan: []}
   2: {desc: 周二, scan: []}
   3: {desc: 周三, scan: []}
   4: {desc: 周四, scan: []}
   5: {desc: 周五, scan: []}
-  6: {desc: 周六, scan: [state_level]}
+  6: {desc: 周六, scan: []}
   7: {desc: 周日, scan: []}
 # 周一附加: sources.yaml 中 schedule=weekly 的源(周更通报源, EPPO/NAPPO/FAO 沙漠蝗等)
 

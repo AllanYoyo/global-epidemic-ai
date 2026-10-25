@@ -249,18 +249,27 @@ def _log_line(raw_dir, line):
 def writeback_risk(date_str, log=print):
     """normalize 之后: 对当日新入库且带研判字段的记录, 确定性写回 risk.py。
 
-    匹配: 抽取记录的 source.url → 当日 events 里的 url → event_id。
+    匹配: 抽取记录的 source.url → 当日 events(impact_level 为空)的 url → event_id。
+    表结构实测(2026-10-25): first_seen 在 payload JSON 里、impact_level 是表列 ——
+    初版查询用错列名抛 sqlite3.OperationalError 且被调用方 || true 吞掉, 5 条
+    记录研判静默缺失, 本版修正并自带异常留痕。
     """
     import sqlite3
     from normalize import DB_PATH
     raw_path = os.path.join(DATA_DIR, "raw", date_str, "extracted-policy.jsonl")
     if not os.path.isfile(raw_path):
         return
-    con = sqlite3.connect(DB_PATH)
-    rows = con.execute(
-        "SELECT event_id, json_extract(payload, '$.source.url') FROM events "
-        "WHERE first_seen LIKE ?", (date_str + "%",)).fetchall()
-    con.close()
+    try:
+        con = sqlite3.connect("file:%s?mode=ro" % DB_PATH, uri=True)
+        rows = con.execute(
+            "SELECT event_id, json_extract(payload, '$.source.url') FROM events "
+            "WHERE impact_level IS NULL "
+            "AND json_extract(payload, '$.first_seen') LIKE ?",
+            (date_str + "%",)).fetchall()
+        con.close()
+    except sqlite3.Error as exc:
+        log("[extract_records][WARN] 研判写回查询失败(留待 risk.py --list-pending 人工): %s" % exc)
+        return
     by_url = {u: eid for eid, u in rows if u}
     n = 0
     with open(raw_path, encoding="utf-8") as f:

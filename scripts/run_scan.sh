@@ -37,8 +37,10 @@ usage() {
   两者都不给                cron 上下文自动按定时任务处理; 其它上下文本轮不推送
   --stage fetch            只跑取数段(不加工不推送), 结束写 .fetch-done 幂等标记
   --refetch                清除当日取数标记强制重取(与幂等锁配对, 显式留痕)
-  --only-group <N>           只跑第 N 块取数(每块约 6 源对; 小token测试用,
-                          不写 .fetch-done, 不会挡住之后的正式取数)
+  --only-group <N>         只跑第 N 块取数(每块约 6 源对; 小token测试用,
+                          不写 .fetch-done, 不会挡住之后的正式取数; 仅 --agent 模式)
+  --agent                  取数/加工退回 Agent 会话模式(默认: 确定性管线,
+                          fetch_pages 零LLM取数 + extract_records 单轮微调用抽取)
 EOF
 }
 
@@ -48,7 +50,8 @@ SCOPE_CHANNEL=""
 STAGE="all"         # all | process(policy 档: 跳过取数, 直接加工 data/raw 已有的存档)
                     #    | fetch (policy 档: 只跑取数段, 不加工不推送 —— 会话/人工补数入口)
 REFETCH=0           # 1 = 清除当日 .fetch-done 标记, 无视幂等锁强制重取
-ONLY_GROUP=""       # 1|2 = 只跑该组取数(小token测试/补单组; 测试语义, 不写完成标记)
+ONLY_GROUP=""       # N = 只跑该块取数(小token测试/补单块; 仅 --agent 模式, 测试语义不写完成标记)
+AGENT_MODE=0        # 1 = 取数/加工用 Agent 会话(旧路径); 0 = 确定性管线(P4 默认)
 while [ $# -gt 0 ]; do
   case "$1" in
     am|pm|policy) MODE="$1"; shift ;;
@@ -72,6 +75,7 @@ while [ $# -gt 0 ]; do
       [ "$_og" -ge 1 ] || { echo "[错误] --only-group 从 1 起"; exit 2; }
       ONLY_GROUP="$_og"; shift ;;
     --refetch) REFETCH=1; shift ;;
+    --agent) AGENT_MODE=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "未知参数: $1"; usage; exit 2 ;;
   esac
@@ -454,6 +458,21 @@ if [ -n "${HERMES_RUN_CMD:-}" ]; then
       if [ -n "$FETCH_SKIP" ]; then
         echo "[WARN] 跳过取数段(原因: $FETCH_SKIP), 直接用 data/raw/$SCAN_DATE/ 已有存档加工。"
         echo "       如确需重取: scripts/run_scan.sh policy --refetch"
+      elif [ "$AGENT_MODE" != "1" ]; then
+      # ---- P4 确定性取数(2026-10-25 起默认): 零 LLM ----
+      # 设计目标(用户约束: 全链路 ≤10 分钟)与依据: Agent 取数对「轮次上限」与
+      # 「Token Plan 耗尽(429)」任一死法都是整轮全损(10-25 三连败实证: 50/50
+      # 打满 0 落盘 / 空输入抢跑 / 429 切断), 确定性取数把这两种风险从取数段
+      # 整体移除 —— 预探复用 + curl 并行抓入口页 + 日期窗口过滤 + collect 存档,
+      # 全程零 token, 失败只影响单源(逐源留痕 search-log)。
+      if [ -n "$ONLY_GROUP" ]; then
+        echo "[WARN] --only-group 仅 --agent 模式有意义(确定性取数无分块), 已忽略。"
+      fi
+      echo "[$(date '+%F %T')] 阶段 1/2 确定性取数(fetch_pages, 零 LLM)"
+      FETCH_RAN=1
+      "$PY" "$REPO/scripts/fetch_pages.py" --date "$SCAN_DATE"
+      FRC=$?
+      echo "[$(date '+%F %T')] 确定性取数结束 rc=$FRC"
       else
       # ---- 死通道跳过名单(2026-10-23 引入, 确定性) ----
       # 10-22/10-23 实测: 约 20 个通道连续两日一字不差地不可用(403/连接失败/
@@ -632,6 +651,36 @@ $HEALTH_BLOCK"
         RC=1
       else
         echo "[$(date '+%F %T')] 空输入确定性出报完成(未派加工 Agent)"
+      fi
+    elif [ "$AGENT_MODE" != "1" ]; then
+      # ---- P4 确定性加工(默认): 单轮微调用抽取 → 入库 → 研判写回 → 出报 → 推送 ----
+      # 每份存档一次 hermes -z 单轮调用(约 20-40 秒/份), 429/超时/坏输出只废那一份
+      # (重试 1 次后跳过并留痕), 不存在"整轮作废"; 研判字段并入同一次调用, 写回由
+      # extract_records --stage risk 在 normalize 之后确定性完成。
+      echo "[$(date '+%F %T')] 阶段 2/2 确定性加工(单轮微调用抽取)"
+      RC=0
+      "$PY" "$REPO/scripts/extract_records.py" --date "$SCAN_DATE" || RC=$?
+      if [ "$RC" -eq 0 ] && [ -f "$FETCH_DIR/extracted-policy.jsonl" ]; then
+        "$PY" "$REPO/scripts/normalize.py" --input "$FETCH_DIR/extracted-policy.jsonl" \
+          --out "$DATA_DIR/events/$SCAN_DATE/" --db --max-age-days 7 || RC=$?
+      fi
+      if [ "$RC" -eq 0 ]; then
+        # 研判写回失败不阻塞出报(记录留待 --list-pending)
+        "$PY" "$REPO/scripts/extract_records.py" --date "$SCAN_DATE" --stage risk || true
+      fi
+      if [ "$RC" -eq 0 ]; then
+        "$PY" "$REPO/scripts/report.py" --date "$SCAN_DATE" --excel --docx || RC=$?
+      fi
+      PR_RC=0
+      case "$SCOPE" in
+        broadcast) "$PY" "$REPO/scripts/push_report.py" --date "$SCAN_DATE" --broadcast; PR_RC=$? ;;
+        review)    "$PY" "$REPO/scripts/push_report.py" --date "$SCAN_DATE" --review-channel "$SCOPE_CHANNEL"; PR_RC=$? ;;
+      esac
+      if [ "$RC" -ne 0 ] || [ "$PR_RC" -ne 0 ]; then
+        echo "[失败] 确定性加工/推送异常(加工 rc=$RC, 推送 rc=$PR_RC)"
+        RC=1
+      else
+        echo "[$(date '+%F %T')] 确定性加工完成(单轮微调用, 无 Agent 会话)"
       fi
     else
     echo "[$(date '+%F %T')] 阶段 2/2 加工出报(上限 ${PROCESS_TIMEOUT}s)"

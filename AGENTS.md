@@ -2,15 +2,20 @@
 
 外国政府/国际组织动植物检疫**政策变化**监测系统。数据合同只允许 `record_type=policy`（疫情事件管线已在本分支移除，勿重新引入）。中国海关总署公告**不作为政策采集源**，仅在影响研判时作背景。Agent 全流程（检索→抽取→核验→研判）由 Hermes 执行；`scripts/` 是确定性工具层。
 
-## 生产链路
+## 生产链路（2026-10-25 P4 起：脚本开车，LLM 只当顾问；全链路目标 ≤10 分钟）
 
 ```
-global-policy-search (skill, 检索入口)
-  → prompts/policy-extraction.md (结构化抽取)
-  → policy-verification (skill, 官方核验)
-  → prompts/policy-impact.md (对华影响研判)
+run_scan.sh policy (定时入口, 默认确定性管线)
+  → scripts/fetch_pages.py        (零LLM取数: probe_channels 预探 + curl 并行抓入口页
+                                    + 链接日期窗口过滤 + collect.py 存档 ≤12/日)
+  → scripts/extract_records.py    (每份存档一次 hermes -z 单轮微调用: 抽取+研判字段,
+                                    key=value 输出, 429/坏输出只废单份)
+  → scripts/normalize.py          (入库) → extract_records --stage risk (研判写回)
   → scripts/report.py + report_docx.py (日报) → scripts/push_report.py (推送)
 ```
+
+`--agent` 参数回退旧 Agent 会话路径（分块取数 + 会话加工，仅排障/对照用）。
+global-policy-search skill 仍为交互式检索入口（会话补数走 `run_scan.sh policy --stage fetch`）。
 
 - 检索词库/源清单/国家优先级全部在 `config/sources.yaml`。
 - 政策影响写回用 `scripts/risk.py`（支持 `--list-pending` 列出待研判记录）。
@@ -53,6 +58,7 @@ scripts/run_scan.sh policy --broadcast                      # 定时任务扫描
 scripts/run_scan.sh policy --stage fetch                    # 只跑取数段（会话/人工补数入口；写 .fetch-done 幂等标记）
 scripts/run_scan.sh policy --refetch                        # 强制重取（清当日 .fetch-done 标记，显式留痕）
 scripts/run_scan.sh policy --stage fetch --only-group 4     # 小token测试：只跑第 4 块（每块约 6 源对；不写标记、不挡正式取数）
+scripts/run_scan.sh policy --agent                          # 回退旧 Agent 会话路径（默认为 P4 确定性管线）
 python scripts/token_budget.py --date YYYY-MM-DD            # 当日 Hermes token 用量/预算检查（只读 state.db）
 bash scripts/deploy_update.sh policy                        # 生产更新（git pull + 依赖 + 自检）
 ```
@@ -85,7 +91,8 @@ bash scripts/deploy_update.sh policy                        # 生产更新（git
   - **孤儿 turn 终止（2026-10-23 引入）**：受控实验确认 `hermes -z` 只是把 prompt 经 websocket 提交给网关，turn 由网关守护进程执行——`timeout` 杀掉的 CLI 只是断开 ws（agent.log 可见 `client_disconnect`），网关侧照跑到 max_turns（10-22 实测孤儿跑满 90 轮 ≈ 8M token；10-23 取数段孤儿超时后仍多跑并抢跑 normalize）。网关没有按会话终止的 CLI（`pause` 只挡新 turn、`sessions` 无 stop、控制套接字无 interrupt 动词、`--resume` 新 turn 只会在 FIFO 里排队），且网关看门狗是**不活动**触发——活跃的孤儿永远打不断。唯一确定性手段：阶段超时（rc 124/137）后 `hermes gateway restart`——`restart_drain_timeout=0` 立即硬中断所有在跑 turn，被中断会话按 Hermes 语义"下条消息续跑"，用户微信在途消息只是晚点回。run_scan.sh 的 `_abort_gateway_orphans` 在取数/加工/单轮三处超时分支调用，重启后等待网关就绪再进下一段；`SCAN_ORPHAN_RESTART=0` 可关闭。
   - **取数幂等锁 + 日预算刹车(2026-10-24 token 爆量事故后引入, 红线级)**：当天 6 个扫描会话烧穿 Token Plan（429，连微信对话都调不动），而 6 条存档 09:39 已落齐——12:50/13:54/14:55 三轮重复取数零新增、白烧 ~126 万输入 token + 3200 万 cache 读（其中 4 个会话绕过 run_scan.sh 直接 `hermes -z`：无超时看护无幂等检查，12:50 那轮还在用部署前的旧 prompt 重读 58KB sources.yaml、12 个文件 125KB）。三道修复：①**取数幂等锁** `data/raw/<日期>/.fetch-done`——取数段跑过且交付（rc=0 或已有存档）即写标记，之后任何取数请求（含手动）看到标记直接跳过进加工，强制重取必须显式 `--refetch`（超时且 0 存档不写标记，允许下一轮重取）；②**日预算刹车** `scripts/token_budget.py`（只读 `~/.hermes/state.db`，可用 `HERMES_STATE_DB` 改路径，fail-open）——东八区当日 Hermes 折合消耗（input+output+cache_read×0.1，`SCAN_CACHE_WEIGHT` 覆盖）≥ 预算（默认 400 万，`SCAN_TOKEN_DAILY_BUDGET` 覆盖）时取数段不再启动，降级为只加工已有存档（数据不丢，损失止于当日增量），并在 search-log.md 留痕；③**统一发射口** `--stage fetch`——会话/人工补数一律走 run_scan.sh（自带超时看护/幂等锁/预算刹车，scope 强制 none 不碰推送），**严禁自行拼 hermes -z 扫描 prompt 或复刻取数指令**（global-policy-search skill 红线已同步）。
   - **取数分块 + 通道确定性预探(2026-10-24 P1, 10-25 晨跑再修)**：取数单作业不收敛——10-24 两轮 90/90、两轮 50/50 打满；10-25 必扫 21 源对单组仍 50/50 打满且 Agent 把候选**囤在对话里 0 交付**——①**按 6 源对/块切块**：`scan_targets.py` 把当日全部源对（必扫+轮转，按固定优先级序）按 `GROUP_CHUNK=6` 切成 K 块，`--group N` 渲染第 N 块、`--groups` 输出变长 `n1=.. nK=..`；run_scan.sh 逐块发起、超时按源对数加权（保底 360s）、单块打满只废单块（存档边存边写不受牵连），prompt 模板 `@@COUNTRY_BLOCK@@` 逐块替换、纪律含「进度自检：扫到第 3 个通道时 data/raw 下必须已有存档」；解析失败退回单组全量旧口径；②**通道 HTTP 探测前移出 Agent**：新增 `scripts/probe_channels.py`（curl 8 并发、单通道 6s、只看状态码，[dead]=非 2xx/3xx 或连接失败，与 channel_health「不可用」同口径），状态清单注入 prompt，Agent 对 [dead] 只记 search-log 一行不再花工具调用——治理后一轮仍有 26 terminal + 25 execute_code 的探测/摘录调用，这是砍掉的第一块；③`SCOPE_MAX_AGE_MINUTES` 60→75（分块后最坏 ~70 分钟，防止"这一轮还在跑"的合法广播锁被误判过期）。
-  - **空输入短接(2026-10-25 晨跑事故后引入)**：取数 0 交付（0 存档且无候选/抽取记录）时，加工段**不再派 Agent**——run_scan.sh 直接 `report.py --excel --docx` 确定性出报、按范围锁确定性推送（broadcast/review 才推）、自动补一份说明性 policy-findings.md。实测 10-25：空清单下加工 Agent 无视「不联网检索」红线自发联网重做取数（194 万折合、50 轮打满、入库/出报一步没跑到）——出报本是纯确定性工作，不该给 Agent 即兴舞台；加工段红线同步加「严禁联网检索与 collect.py 抓取新原文」。
+  - **空输入短接(2026-10-25 晨跑事故后引入, P4 前后共用)**：取数 0 交付（0 存档且无候选/抽取记录）时，加工段**不派 Agent**——run_scan.sh 直接 `report.py --excel --docx` 确定性出报、按范围锁确定性推送（broadcast/review 才推）、自动补一份说明性 policy-findings.md。实测 10-25：空清单下加工 Agent 无视「不联网检索」红线自发联网重做取数（194 万折合、50 轮打满、入库/出报一步没跑到）。
+  - **P4 确定性管线(2026-10-25 定稿, 10 分钟硬约束驱动)**：Agent 会话对「轮次上限 / Token Plan 耗尽(429) / 阶段超时」任一死法都是**整轮全损**(10-25 三连败实证: 50/50 打满 0 落盘、空输入抢跑、429 切断), 而用户约束全链路 ≤10 分钟。方案=脚本开车、LLM 只当顾问: ①`scripts/fetch_pages.py` 确定性取数(probe_channels 预探复用跳死通道 → curl 8 并发抓入口页 → 链接抽取 + 多语种日期窗口过滤(7 天) → collect.py 存档 ≤2/源 ≤12/日 → candidates.jsonl 逐条追加 → search-log 逐源留痕), **零 LLM**; ②`scripts/extract_records.py` 每份存档**一次** hermes -z 单轮微调用(prompt=字段模板+snip≤4KB 摘录, 输出 key=value 行, 本地解析嵌套 source.* 并校验 url/quote), 研判四维并入同一次调用, `--stage risk` 在 normalize 后按当日 url→event_id 确定性写回; 单份失败(429/超时/坏输出)重试 1 次后跳过留痕, **429 快速失败不烧重试**; ③`run_scan.sh policy` 默认走此管线, `--agent` 回退旧路径; prompt 模板与输出均不含 ASCII 双引号/反引号/$。**诚实取舍**: 链接启发式召回率低于 Agent 浏览(无日期线索只记 search-log 线索; 需 web_search 发现的条目如输华议定书类暂不覆盖), 覆盖率后续按源补 pattern(ePing 优先)。
   - **工具输出硬上限(2026-10-24 P2)**：「≤2KB 摘录 / 8KB 单次红线」从 prompt 纪律升级为**脚本保证**——新增 `scripts/jsonl_append.py`（JSONL 单行追加器：只回执一行 `ok +N`、点号键落嵌套 `source.*`、空值存 null、缺标题/URL 拒追加防残行）与 `scripts/snip.py`（摘录器：默认/--grep 都硬性截到 ≤2KB 并带截断标注），取数/加工 prompt 已钉死两者用法，并**内联抽取键值模板**（顺带补上 92dbe1e 的缺口：prompt 禁读仓库文件、却让 Agent「按 prompts/policy-extraction.md 的字段规则」抽——字段规则既不在上下文里又不许读）。网关侧 `~/.hermes/config.yaml` 的 `tool_output.max_bytes` 部署时 50000→12000（全局硬兜底， 与 max_turns 同属 VPS 侧配置， 不在仓库内）。
   - **生产更新**：`bash scripts/deploy_update.sh policy`（git pull + 依赖 + 自检）。仓库只有 clone 没有更新机制，生产不 pull = 闸门加固根本没生效——这正是 10-20 事故的载体。
   - **现场诊断**：`python scripts/diagnose_push.py` 一次打印：运行代码 commit（与远端是否一致）、当日范围锁/待审/已推标记、渠道配置（自动读 `~/.hermes/.env`，只配一个渠道时会提示"先在微信审阅"跑不通）、crontab 是否显式声明范围、调度日志尾部（自动找 `cron.log`/`scan.log`，有无 `scope=` 标记＝新旧版 run_scan.sh）。推送内容尾部也带 `代码 <commit>` 指纹，`.pushed` 标记带**范围与声明来源**。

@@ -2219,6 +2219,123 @@ class ToolOutputCapTests(unittest.TestCase):
         self.assertIn("source.publish_date=<YYYY-MM-DD>", text)   # 抽取键值模板内联
 
 
+class PipelineP4Tests(unittest.TestCase):
+    """P4 确定性管线(2026-10-25 定稿, 用户约束: 全链路 ≤10 分钟)。
+
+    Agent 会话对「轮次上限/Token 耗尽/阶段超时」任一死法都是整轮全损
+    (10-25 三连败) → 脚本开车: fetch_pages 零LLM取数 + extract_records
+    每份存档一次单轮微调用; 单份失败只废那一份。
+    """
+
+    def test_fetch_pages_date_parsing(self):
+        # 多语种日期形态: ISO / 欧序 / 中文 / 英文月份
+        import fetch_pages
+        import datetime as dt
+        self.assertEqual(fetch_pages.parse_date("发布 2026-10-22（JSON-LD）"), dt.date(2026, 10, 22))
+        self.assertEqual(fetch_pages.parse_date("18/10/2026 NORMAS"), dt.date(2026, 10, 18))
+        self.assertEqual(fetch_pages.parse_date("2026年10月18日"), dt.date(2026, 10, 18))
+        self.assertEqual(fetch_pages.parse_date("Oct 20, 2026"), dt.date(2026, 10, 20))
+        self.assertIsNone(fetch_pages.parse_date("no date here"))
+        self.assertIsNone(fetch_pages.parse_date("13/13/2026"))   # 非法月日不炸
+
+    def test_fetch_pages_candidate_filter(self):
+        # 两段式: 列表页带窗内日期 → 确认; 无日期但像文章 → 进验证队列(文章页验日期);
+        # 出窗日期/异站/导航路径 → 直接丢弃
+        import fetch_pages
+        import datetime as dt
+        today = dt.date(2026, 10, 25)
+        links = [
+            ("https://www.sag.gob.cl/noticias/nueva-resolucion-2026-10-24", "Resolución 24/10"),
+            ("https://www.sag.gob.cl/noticias/old-2026-09-01", "antiguo 01/09"),
+            ("https://www.sag.gob.cl/noticias/sin-fecha-titulo-largo-del-articulo", "sin fecha"),
+            ("https://otro-sitio.cl/noticias/x-2026-10-24", "otro sitio"),
+            ("https://www.sag.gob.cl/contacto", "contacto 2026-10-24"),
+        ]
+        entry = "https://www.sag.gob.cl/"
+        confirmed, to_verify = fetch_pages.pick_candidates(links, entry, today)
+        self.assertEqual([c[0] for c in confirmed],
+                         ["https://www.sag.gob.cl/noticias/nueva-resolucion-2026-10-24"])
+        # 无日期的文章型链接进验证队列(sin-fecha), 出窗的(09-01)与导航/异站不进
+        self.assertEqual([c[0] for c in to_verify],
+                         ["https://www.sag.gob.cl/noticias/sin-fecha-titulo-largo-del-articulo"])
+        # verify_dates: 窗内文章页日期 → 保留; 窗外 → 丢弃(mock curl 免网络)
+        def fake_curl(url, **kw):
+            body = "<p>Publicado el 24/10/2026</p>" if "sin-fecha" in url else \
+                   "<p>Publicado el 01/09/2026</p>"
+            return 200, body
+        with mock.patch.object(fetch_pages, "curl", side_effect=fake_curl):
+            got = fetch_pages.verify_dates(to_verify, today)
+        self.assertEqual([g[0] for g in got],
+                         ["https://www.sag.gob.cl/noticias/sin-fecha-titulo-largo-del-articulo"])
+
+    def test_extract_records_parse_and_validate(self):
+        # key=value 输出 → 嵌套 source.*; quote >120 截断; 缺标题拒收
+        import extract_records as er
+        rec = er.parse_kv_output(
+            "title_cn=泰国暂停进口\nsource_url=https://a.b/c\nsource_quote=" + "长" * 200 +
+            "\ndim_trade=4\n这行没有等号\nimpact_type=约束")
+        self.assertEqual(rec["title_cn"], "泰国暂停进口")
+        self.assertEqual(rec["source"]["url"], "https://a.b/c")
+        self.assertIsNone(er.validate(rec, "https://a.b/c"))
+        self.assertEqual(len(rec["source"]["quote"]), 120)   # validate 截断而非拒收
+        bad = {"source": {"url": "https://a.b/c", "quote": "x"}}
+        self.assertEqual(er.validate(bad, "https://a.b/c"), "缺标题")
+        wrong = {"title_cn": "x", "source": {"url": "https://evil/x", "quote": "x"}}
+        self.assertIn("url 与存档不符", er.validate(wrong, "https://a.b/c"))
+
+    def test_extract_records_429_fast_fail(self):
+        # Token Plan 耗尽: 不烧第二次重试, 剩余文档留待下轮, search-log 留痕
+        import extract_records as er
+        raw_dir = os.path.join(TMP, "raw", "2026-10-26")
+        os.makedirs(raw_dir, exist_ok=True)
+        with open(os.path.join(raw_dir, "01-x.meta.json"), "w", encoding="utf-8") as f:
+            json.dump({"title": "甲", "url": "https://official.example/a"}, f)
+        with open(os.path.join(raw_dir, "01-x.txt"), "w", encoding="utf-8") as f:
+            f.write("原文内容 甲政策 2026-10-20")
+        calls = []
+
+        def fake_call(prompt):
+            calls.append(prompt)
+            return 1, "HTTP 429: 当前已达到 Token Plan 用量上限"
+        try:
+            with mock.patch.object(er, "call_model", side_effect=fake_call), \
+                    mock.patch.object(er, "DATA_DIR", TMP):
+                n_ok, n_fail = er.extract("2026-10-26")
+            self.assertEqual((n_ok, n_fail), (0, 1))
+            self.assertEqual(len(calls), 1, "429 不得重试")
+            with open(os.path.join(raw_dir, "search-log.md"), encoding="utf-8") as f:
+                self.assertIn("Token Plan 耗尽", f.read())
+        finally:
+            shutil.rmtree(raw_dir, ignore_errors=True)
+
+    def _run_scan_text(self):
+        with open(os.path.join(REPO, "scripts", "run_scan.sh"), encoding="utf-8") as f:
+            return f.read()
+
+    def test_run_scan_p4_default_pipeline(self):
+        # 默认确定性管线: fetch_pages(零LLM) + extract_records(微调用) + normalize/risk;
+        # --agent 才走旧会话路径
+        text = self._run_scan_text()
+        self.assertIn("--agent", text)
+        self.assertIn("AGENT_MODE", text)
+        self.assertIn('"$REPO/scripts/fetch_pages.py" --date "$SCAN_DATE"', text)
+        self.assertIn('"$REPO/scripts/extract_records.py" --date "$SCAN_DATE"', text)
+        self.assertIn('--stage risk', text)
+        # 默认(非 agent)分支必须先判定(elif AGENT_MODE != 1 在 Agent 分支体之前),
+        # 否则默认路径永远走不到
+        self.assertLess(text.index("fetch_pages.py"), text.index("死通道跳过名单"))
+        self.assertLess(text.index("确定性加工(单轮微调用抽取)"),
+                        text.index("加工出报(上限"))
+
+    def test_extract_records_prompt_no_forbidden_chars(self):
+        # prompt 经 shell 双引号拼进 hermes -z: 模板本身不得含 ASCII 双引号/反引号/$
+        import extract_records as er
+        prompt = er.build_prompt({"title": "t"}, "https://a.b/c", "正文" * 100, "2026-10-25")
+        self.assertNotIn('"', prompt)
+        self.assertNotIn("`", prompt)
+        self.assertNotIn("$", prompt)
+
+
 class BriefTextFocusTests(unittest.TestCase):
     """IM 卡片"重点关注"口径必须与 report.py 一致(2026-10-19 修复)。
 

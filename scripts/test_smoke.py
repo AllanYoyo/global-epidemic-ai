@@ -2786,6 +2786,78 @@ class FalsePositiveExclusionTests(unittest.TestCase):
         self.assertNotIn("表彰新闻", txt)
 
 
+class FlagNonPolicyToolTests(unittest.TestCase):
+    """scripts/flag_non_policy.py: 存量非政策记录批量标记(默认只预览, --apply 才写)。"""
+
+    def setUp(self):
+        import normalize
+        import flag_non_policy
+        self.n, self.tool = normalize, flag_non_policy
+        self.db = os.path.join(tempfile.mkdtemp(prefix="flag-"), "t.db")
+
+    def _insert(self, eid, title, summary, status="unverified"):
+        con = self.n.open_db(self.db)
+        e = self.n.fill_defaults(_source_event(event_id=eid, title_cn=title,
+                                               summary_cn=summary))
+        e["verification_status"] = status
+        e["first_seen"] = "2026-10-27T08:00:00"
+        con.execute("INSERT OR REPLACE INTO events "
+                    "(event_id,payload,category,event_date,record_type,verification_status) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (eid, json.dumps(e, ensure_ascii=False), "policy",
+                     e["event_date"], "policy", status))
+        con.commit()
+        con.close()
+        return e
+
+    def _run(self, extra=None):
+        argv = ["flag_non_policy.py", "--db-path", self.db] + (extra or [])
+        with mock.patch("sys.argv", argv), redirect_stdout(io.StringIO()) as buf:
+            rc = self.tool.main()
+        return rc, buf.getvalue()
+
+    def test_preview_lists_but_does_not_write(self):
+        self._insert("e-fp", "表彰福布斯百强榜女性同仁",
+                     "巴西农业部长公开表彰入选福布斯全球农业百强榜的女性研究人员。")
+        rc, out = self._run()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("命中非政策内容 1 条", out)
+        self.assertIn("仅预览", out)
+        con = self.n.open_db(self.db)
+        try:
+            rows = {r["event_id"]: r for r in self.n.load_events(con)}
+        finally:
+            con.close()
+        self.assertEqual(rows["e-fp"]["verification_status"], "unverified")
+
+    def test_apply_marks_false_positive_and_keeps_first_seen(self):
+        e = self._insert("e-fp", "SPG 会议前瞻",
+                          "国际植物保护公约发布战略规划小组会议预告，属多边治理议程安排。")
+        first_seen = e["first_seen"]
+        rc, out = self._run(["--apply"])
+        self.assertEqual(rc, 0, out)
+        con = self.n.open_db(self.db)
+        try:
+            rows = {r["event_id"]: r for r in self.n.load_events(con)}
+        finally:
+            con.close()
+        self.assertEqual(rows["e-fp"]["verification_status"], "false_positive")
+        self.assertEqual(rows["e-fp"]["first_seen"], first_seen)
+        self.assertIn("非政策内容", rows["e-fp"].get("verification_notes") or "")
+
+    def test_real_policy_is_not_marked(self):
+        self._insert("e-ok", "得克萨斯州修订新大陆螺旋蝇疫区范围",
+                     "美国动植物卫生检验局通报得克萨斯州修订了新大陆螺旋蝇疫区的划定范围。")
+        rc, out = self._run(["--apply"])
+        self.assertEqual(rc, 0, out)
+        con = self.n.open_db(self.db)
+        try:
+            rows = {r["event_id"]: r for r in self.n.load_events(con)}
+        finally:
+            con.close()
+        self.assertEqual(rows["e-ok"]["verification_status"], "unverified")
+
+
 class NormalizeValidateTests(unittest.TestCase):
     """P1#2: event_id 关联对象必填, 缺时 validate 拒收。"""
 

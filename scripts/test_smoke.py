@@ -2687,6 +2687,52 @@ class NonPolicyScreenTests(unittest.TestCase):
             summary_cn="存档为IPPC活动页面，摘录内容仅为DataTable脚本，未见具体检疫政策措施文本。"))
         self.assertTrue(reject)
 
+    def test_trade_measure_not_killed_by_quarantine_negation(self):
+        # 回归(2026-10-27 生产实测差点误杀): 「属贸易争端措施而非检疫措施」是
+        # **整体性政策**(禁止进口 + 50% 关税), 不能因为出现"非检疫措施"就判非政策。
+        reject, why = self.ex.screen_non_policy(self._rec(
+            title_cn="美国自9月29日起禁止进口部分加拿大乳制品并维持50%关税(乳业争端反制)",
+            summary_cn=("美国以《1930年关税法》第338条为据发布总统公告：因加拿大乳业对美歧视性措施，"
+                        "自2026-09-29起附件所列部分加拿大产品(乳制品等)禁止进口，此前进口未报关货物"
+                        "维持50%附加关税。属贸易争端措施而非检疫措施，可能导致乳制品贸易转移。"),
+            source={"quote": "certain products of Canada, are excluded from importation"}))
+        self.assertFalse(reject, why)
+
+    def test_law_compilation_index_page_rejected(self):
+        reject, _ = self.ex.screen_non_policy(self._rec(
+            title_cn="土耳其农业产区（Tarım Havzaları）法规汇编页面",
+            summary_cn=("土耳其农业部农业产区页面汇总产区生产与支持模式、相关法律/法规/总统令/通告目录，"
+                        "本摘录仅含页面关键词元数据，未见具体检疫措施条款。")))
+        self.assertTrue(reject)
+
+    def test_ippc_event_snapshot_rejected(self):
+        reject, _ = self.ex.screen_non_policy(self._rec(
+            title_cn="国际植物保护公约（IPPC）活动页面（2026-10-25，存档未含可核验政策正文）",
+            summary_cn=("该存档为IPPC活动页快照，抓取内容仅含前端脚本与数据表初始化代码，"
+                        "未见任何可核验的政策动作、适用商品或生效日期。")))
+        self.assertTrue(reject)
+
+    def test_column_page_no_policy_text_rejected(self):
+        reject, _ = self.ex.screen_non_policy(self._rec(
+            title_cn="土耳其土壤保护与土地评估栏目页",
+            summary_cn=("该存档仅为土耳其农业与林业部网站「土壤保护与土地评估」栏目页面标题，"
+                        "摘录中不含任何具体检疫措施或政策正文，无可抽取的政策动作细节。")))
+        self.assertTrue(reject)
+
+    def test_news_list_page_rejected(self):
+        reject, _ = self.ex.screen_non_policy(self._rec(
+            title_cn="沙特环境、水与农业部新闻页（All News，无政策正文）",
+            summary_cn=("存档仅抓取到沙特环境水与农业部新闻列表页的导航脚本片段，"
+                        "未含任何可识别的政策正文，无法判定具体政策动作。")))
+        self.assertTrue(reject)
+
+    def test_weak_verb_does_not_rescue_shipment_news(self):
+        # 「通过」是弱动词: 「货物已通过检疫」是履约事实, 不是政策动作
+        reject, _ = self.ex.screen_non_policy(self._rec(
+            title_cn="首批输华牛肉已通过检疫装船发运",
+            summary_cn="该批牛肉已通过检疫并装船发运，部长到场见证。"))
+        self.assertTrue(reject)
+
     def test_real_policy_kept(self):
         reject, why = self.ex.screen_non_policy(self._rec(
             title_cn="得克萨斯州修订新大陆螺旋蝇疫区范围",

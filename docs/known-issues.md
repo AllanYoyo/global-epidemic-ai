@@ -186,6 +186,33 @@
 
 ## 已修复 (历史)
 
+### 2026-10-25 傍晚 · 20/47 死源分诊与修复(5 源复活)
+
+#### H18 · 47 源中 20 个预探死亡, 覆盖缺口致"巴西居多"观感
+- 位置: `scripts/probe_channels.py`(http_get 降级链)、`scripts/fetch_pages.py`(curl 委托)、
+  `config/sources.yaml`(ru-fsvps 入口)
+- 实证(2026-10-25 双 UA 分诊 + 逐源 curl 错误码): 20 死源三种死因 ——
+  A 类参数可救: ca-cfia/th-doa/no-mattilsynet(SSL 证书链不完整, curl 退出 60,
+  且 6s 超时先于证书错误出现)、au-agriculture(HTTP/2 流错误 err 92)、
+  co-minagricultura(504 慢站); B 类配置: usda-aphis(WAF 拦爬虫 UA,
+  默认 UA 反而 200)、ru-fsvps(入口路径 404, 站点根 200);
+  C 类真封锁: 403 反爬(cn-sps-aggregator/in-ppqs/id-dvs)与连接超时
+  (朝/老/缅/越/南非/印度 dahd/德 FLI 等), curl 无解。
+- 修法(220a77b + 6f1cf68 + 5ffc018 三连, 第三笔抓到真凶):
+  ①`http_get` 四层降级: --http1.1 常驻 / SSL 错误或超时 → -k + 超时三倍重试 /
+  403 → 去 UA 重试 / 5xx → 加长重试, 触发留 note; ②真凶: TLS 失败时 `-w` 仍输出
+  000(stdout 非空), 按"stdout 空"判连接层失败永远不触发重试 —— 改 rc!=0 即判;
+  ③fetch_pages.curl 委托 http_get(探活与取数同口径, 消灭两份 curl 拼装);
+  ④ru-fsvps 入口改站点根(normalize 的 fsvps host 防护是 host+路径联合判断,
+  /news/ 深文章放行, 可端到端入库)。
+- 验证: 220 测试全绿(降级链逐层桩验证, 桩曾两次与真实 curl 行为不符被
+  生产实测抓回); 生产探活 20 → 16 dead, 复活 ca-cfia/th-doa/no-mattilsynet/
+  usda-aphis(输出带 no-ua-retry)/ru-fsvps 五源; usda-aphis 当轮即产出第一条
+  一手存档(德州新世界螺旋蝇通报)。
+- 遗留: C 类 16 源(真封锁/超时)curl 无解, 由 ePing 接入兜底(parse_eping.py
+  已存在, 待挂入确定性管线) —— 下一杠杆; az-afsa/rs-minpolj 属间歇抖动,
+  每日预探自然覆盖。
+
 ### 2026-10-25 午后 · 轮转档 23 个政策源无任何调度日(每日全扫决策)
 
 #### H17 · weekly_shards 配置断裂: border_neighbours/export_partners 两档永远扫不到

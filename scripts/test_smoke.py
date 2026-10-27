@@ -2121,6 +2121,20 @@ class FetchGroupingTests(unittest.TestCase):
         self.assertEqual(note, "slow-retry")
         self.assertEqual(calls[1][calls[1].index("-m") + 1], "18")  # 6*3
 
+        # 超时 → -k + 超时三倍重试(握手慢 + 证书链不完整的复合形态, ca-cfia 型)
+        calls = []
+        def timeout_then_ok(cmd, **k):
+            calls.append(cmd)
+            if len(calls) == 1:
+                raise pc.subprocess.TimeoutExpired(cmd, 6)
+            return resp(200)
+        with mock.patch.object(pc.subprocess, "run", side_effect=timeout_then_ok):
+            code, _body, note = pc.http_get("https://x/", 6)
+        self.assertEqual(code, 200)
+        self.assertEqual(note, "ssl-retry")
+        self.assertIn("-k", calls[1])
+        self.assertEqual(calls[1][calls[1].index("-m") + 1], "18")  # 6*3
+
         # 全部失败: 保持死判, 不抛异常
         with mock.patch.object(pc.subprocess, "run", side_effect=lambda *a, **k: resp_fail(60)):
             code, _body, _note = pc.http_get("https://x/", 5)

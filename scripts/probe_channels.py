@@ -58,9 +58,10 @@ def http_get(url, timeout, want_body=False, max_bytes=None):
     """三层降级 GET(2026-10-25 死源分诊驱动, 20 死源中 7 个可由此复活):
 
     ① 始终 --http1.1 —— agriculture.gov.au 型 HTTP/2 流错误(err 92);
-    ② curl 退出码 60(SSL 证书链不完整/自签链) → 追加 -k 重试一次 ——
-       ca-cfia/th-doa/mattilsynet 型。只读公开政府新闻场景可接受(内容有
-       url+quote 溯源, 异常文本过不了 normalize 官方域校验与人工复核);
+    ② 首次尝试 SSL 链错误(curl 退出 6x)**或超时** → 追加 -k 且超时加长三倍重试
+       —— ca-cfia/th-doa/mattilsynet 型: 服务端证书链不完整 + TLS 握手慢
+       (实测 6s 握手不完 → 超时, 12s 完成握手后报 60)。只读公开政府新闻场景
+       可接受(内容有 url+quote 溯源, 异常文本过不了 normalize 官方域校验);
     ③ HTTP 403 → 去掉自定义 UA 重试一次 —— aphis.usda.gov 型 WAF:
        伪装浏览器的爬虫 UA 反而被拦, curl 默认 UA(不带 -A)反而 200;
     ④ HTTP 5xx → 超时加长三倍重试一次 —— co-minagricultura 型慢站网关超时。
@@ -78,8 +79,10 @@ def http_get(url, timeout, want_body=False, max_bytes=None):
         try:
             p = subprocess.run(cmd, capture_output=True, text=True,
                                errors="replace", timeout=timeout_run + 5)
-        except (OSError, subprocess.TimeoutExpired):
-            return 0, "", ""
+        except subprocess.TimeoutExpired:
+            return 0, "", "timeout"
+        except OSError:
+            return 0, "", "curl-missing"
         if p.returncode != 0 and not p.stdout:
             return 0, "", "curl-exit-%s" % p.returncode
         body, _, tail = p.stdout.rpartition("\n")
@@ -90,9 +93,9 @@ def http_get(url, timeout, want_body=False, max_bytes=None):
         return code, body, ""
 
     note = ""
-    code, body, _ = _run([], timeout)
-    if code == 0 and _.startswith("curl-exit-6"):
-        code, body, _ = _run(["-k"], timeout)          # ② SSL 链宽松重试
+    code, body, why = _run([], timeout)
+    if code == 0 and (why.startswith("curl-exit-6") or why == "timeout"):
+        code, body, _ = _run(["-k"], timeout * 3)       # ② SSL 宽松 + 握手加长
         if code:
             note = (note + " ssl-retry").strip()
     if code == 403:

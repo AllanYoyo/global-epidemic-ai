@@ -2538,6 +2538,101 @@ class BriefTextFocusTests(unittest.TestCase):
         self.assertIn("重点政策", txt.split("其他新增", 1)[1])
 
 
+class BriefTextContentTests(unittest.TestCase):
+    """推送卡片内容口径(2026-10-27 用户定): 标题超链 + 正文是整个政策的简介。
+
+    用户原话: "推送内容的检索标题可以超链, 内容是整个政策的简介" 以及
+    "推微信侧的测试内容, 需要和正式推送钉钉的要一致, 不然就不是测试了"。
+    两条合起来的约束:
+      ① 每条 = 标题(指向原文的链接) + 简介全文(不截断);
+      ② 所有渠道同一份文本 —— 微信侧审阅推送的就是钉钉那份正式内容。
+    """
+
+    def setUp(self):
+        import push_report
+        self.pr = push_report
+
+    def _card(self, records, **kw):
+        return self.pr.brief_text("2026-10-27", {"new": records}, **kw)
+
+    def _rec(self, **kw):
+        base = {"event_id": "e1", "title_cn": "测试政策", "country_cn": "美国",
+                "action_type": "调整", "impact_type": "约束", "impact_level": "高影响",
+                "summary_cn": "美国动植物卫生检验局通报得克萨斯州修订了新大陆螺旋蝇疫区范围。",
+                "source": {"url": "https://example.gov/notice/1"}}
+        base.update(kw)
+        return base
+
+    def test_title_is_hyperlink_to_source(self):
+        txt = self._card([self._rec()])
+        self.assertIn("[测试政策](https://example.gov/notice/1)", txt)
+
+    def test_body_is_full_summary_not_truncated(self):
+        summary = ("美国动植物卫生检验局通报得克萨斯州修订了新大陆螺旋蝇疫区的划定范围, "
+                   "属进口活牛等易感动物检疫风险区管理的调整, 涉及州际运输与放行条件。")
+        self.assertGreater(len(summary), 60, "样本简介应超过旧口径的 60 字截断线")
+        txt = self._card([self._rec(summary_cn=summary)])
+        self.assertIn(summary, txt)
+        self.assertIn("简介:", txt)
+
+    def test_rationale_no_longer_replaces_summary(self):
+        # 研判理由只留在完整报告里, 不再截断后顶替卡片正文
+        rationale = "研判理由" * 20
+        txt = self._card([self._rec(impact_rationale=rationale)])
+        self.assertNotIn(rationale, txt)
+
+    def test_entries_separated_by_blank_line(self):
+        # 微信单条 2000 字且按 markdown 块打包: 条目之间不留空行, 整段超限会被
+        # 静默截断(丢政策); 留空行后每个条目自成一个块, 按条目边界切成多条。
+        txt = self._card([self._rec(event_id="e1"),
+                          self._rec(event_id="e2", title_cn="第二条政策")])
+        self.assertIn("\n\n- [第二条政策]", txt)
+
+    def test_missing_url_has_no_empty_link(self):
+        txt = self._card([self._rec(source={})])
+        self.assertNotIn("]()", txt)
+        self.assertIn("测试政策", txt)
+
+    def test_summary_falls_back_to_english_then_empty(self):
+        txt = self._card([self._rec(summary_cn=None, summary_en="English summary line")])
+        self.assertIn("English summary line", txt)
+        txt2 = self._card([self._rec(summary_cn=None)])
+        self.assertNotIn("简介:", txt2)
+
+    def test_all_channels_receive_identical_body(self):
+        # "测试=正式": 微信侧审阅推送与钉钉正式推送必须是同一份内容
+        sent = []
+
+        def rec(name, idx):
+            def fn(*a, **kw):
+                sent.append((name, a[idx]))
+            return fn
+
+        env = {"WECHAT_WEBHOOK": "https://qyapi.example/x",
+               "DINGTALK_WEBHOOK": "https://oapi.example/x",
+               "SMTP_HOST": "smtp.example.com"}
+        with mock.patch.dict(os.environ, env, clear=False), \
+             mock.patch.object(self.pr, "send_wechat", side_effect=rec("企业微信", 0)), \
+             mock.patch.object(self.pr, "send_dingtalk", side_effect=rec("钉钉", 0)), \
+             mock.patch.object(self.pr, "send_mail", side_effect=rec("邮箱", 1)), \
+             mock.patch.object(self.pr, "send_hermes", side_effect=rec("微信", 0)), \
+             mock.patch.object(self.pr, "channel_available", return_value=True):
+            channels = self.pr._build_channels("统一正文", "2026-10-27", None,
+                                               extra_keys=["weixin"])
+            for _name, fn in channels:
+                fn()
+        self.assertTrue(sent, "没有任何渠道被调用")
+        for name, body in sent:
+            self.assertEqual(body, "统一正文", name)
+
+    def test_cut_marks_truncation_instead_of_silent_drop(self):
+        # 渠道字节上限截断必须显式标注(与"Word 附件缺失如实标注"同一口径)
+        out = self.pr._cut("A" * 10000, 3800)
+        self.assertIn("已截断", out)
+        self.assertLessEqual(len(out.encode("utf-8")), 3800)
+        self.assertEqual(self.pr._cut("短文本", 3800), "短文本")
+
+
 class NormalizeValidateTests(unittest.TestCase):
     """P1#2: event_id 关联对象必填, 缺时 validate 拒收。"""
 

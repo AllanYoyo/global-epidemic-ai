@@ -113,18 +113,20 @@ PENDING_DIR = os.path.join(DATA_DIR, "reports", ".review-pending")
 
 
 def _cut(text, nbytes):
+    """按字节上限截断(企业微信/钉钉各有上限), 截断时**显式标注**。
+
+    原实现直接砍掉尾巴, 用户收到半截日报却以为看全了 —— 与"推送如实标注"
+    的口径冲突(Word 附件缺失那次同理)。现在截断必带提示, 不静默丢内容。
+    """
     raw = text.encode("utf-8")
-    return raw[:nbytes].decode("utf-8", errors="ignore") if len(raw) > nbytes else text
-
-
-def _cut_sentence(text, limit=60):
-    """按句子截断, 避免依据被拦腰切断。"""
-    text = str(text or "").strip()
-    if len(text) <= limit:
+    if len(raw) <= nbytes:
         return text
-    head = text[:limit]
-    pos = head.find("。")
-    return head[:pos + 1] if pos > 10 else head.rstrip("，、；") + "…"
+    marker = "\n\n…(内容超出渠道长度上限, 已截断; 完整日报见面板)"
+    mb = marker.encode("utf-8")
+    if len(mb) >= nbytes:
+        # 上限太小, 连提示都放不下 —— 只能硬截(极端情况)
+        return raw[:nbytes].decode("utf-8", errors="ignore")
+    return raw[:nbytes - len(mb)].decode("utf-8", errors="ignore") + marker
 
 
 def _title(e):
@@ -134,17 +136,58 @@ def _title(e):
     return e.get("title_cn") or e.get("title_en") or e.get("summary_cn") or "（无标题）"
 
 
-def brief_text(date, data, docx_ok=True):
-    """政策日报 IM 卡片摘要: 重点关注(中影响/收紧) + 其他新增, 每条附原文链接。
+def _summary(e):
+    """政策简介(摘要)全文 —— 推送条目的正文内容。
 
-    docx_ok=False 时页脚如实说明"本次无 Word 附件" —— 原来无条件写"全文见
-    Markdown / Word / Excel", 而 Word 可能压根没生成(见 report.ensure_docx 的说明),
-    用户会以为带附件却只收到正文。
+    数据合同里的「简介」= 抽取阶段写的 summary_cn(中文摘要); 缺失时退到
+    summary_en。都没有就留空 —— 不拿标题冒充简介, 也不编造(可溯源硬要求)。
+    """
+    for key in ("summary_cn", "summary_en"):
+        s = str(e.get(key) or "").strip()
+        if s:
+            return s
+    return ""
+
+
+def _entry_block(e):
+    """一条政策的推送块: 标题(超链) + 类型标签 + 简介全文。
+
+    标题用 Markdown 超链 `[标题](原文URL)`: 钉钉/企业微信渲染成可点的标题,
+    微信纯文本里 URL 仍被客户端自动识别为可点链接(微信不支持富文本超链,
+    只认裸 URL —— 见 docs/known-issues.md 的投递通道说明)。
+    """
+    url = (e.get("source") or {}).get("url") or ""
+    title = _title(e)
+    head = "[%s](%s)" % (title, url) if url else title
+    meta = "%s@%s · %s/%s" % (e.get("action_type") or "-", e.get("country_cn") or "-",
+                              e.get("impact_type") or "未研判",
+                              e.get("impact_level") or "未研判")
+    lines = ["- %s %s" % (head, meta)]
+    body = _summary(e)
+    if body:
+        lines.append("  简介: %s" % body)
+    return "\n".join(lines)
+
+
+def brief_text(date, data, docx_ok=True):
+    """政策日报 IM 卡片: 重点关注(高/中影响或收紧) + 其他新增, 每条 = 标题(超链) + 简介全文。
+
+    内容口径(2026-10-27 定, 用户明确要求):
+    · **标题超链**: 标题指向原文, 点开即看原文。
+    · **正文是整个政策的简介**: 用抽取阶段写的 summary_cn **全文**;
+      不再拿截断到 60 字的研判理由顶替(研判理由仍在完整 Markdown/Word 报告里,
+      卡片只保留动作/国家/类型/等级标签)。
+    · **所有渠道同一份文本**: 微信侧审阅推送的就是钉钉那份正式内容 ——
+      微信发的若是"测试版", 测试就没有意义了, 因此不做渠道特供渲染。
+
+    条目之间留空行: 微信单条上限 2000 字且按 markdown 块打包, 整段超限会被
+    **静默截断**(丢政策, 实测过 greedy_pack_blocks 的 overflow 分支); 留空行后
+    每个条目自成一个块, 超限时按条目边界切成多条发出, 一条政策都不丢。
     """
     new = data["new"]
     countries = sorted({e.get("country_cn") for e in new if e.get("country_cn")})
     act = {"收紧": 0, "调整": 1, "放松": 2, "恢复": 3}
-    lines = [
+    header = "\n".join([
         "# 🛃 疫见全球 · 政策监测日报 %s" % date, "",
         "**新增 %d 条** · 收紧 %d · 调整 %d · 放松/恢复 %d · 待核实 %d" % (
             len(new),
@@ -153,7 +196,7 @@ def brief_text(date, data, docx_ok=True):
             sum(1 for e in new if e.get("action_type") in ("放松", "恢复")),
             sum(1 for e in new if e.get("verification_status") == "unverified")), "",
         "**涉及国家**: %s" % ("、".join(countries[:8]) + ("等" if len(countries) > 8 else "") if countries else "—"),
-    ]
+    ])
     # 重点关注口径与 report.py 保持一致(2026-10-19 修正): 原实现只看"中影响 or 收紧",
     # 把合同里最重的一档"高影响"漏进"其他新增" —— 用户第一眼看的 IM 卡片反而把
     # 最该关注的政策藏起来了。排序: 高影响 > 中影响 > 收紧。
@@ -165,32 +208,21 @@ def brief_text(date, data, docx_ok=True):
                               act.get(e.get("action_type"), 9)))
     rest.sort(key=lambda e: (act.get(e.get("action_type"), 9),
                               {"高影响": 0, "中影响": 1, "低影响": 2}.get(e.get("impact_level"), 3)))
+    blocks = [header]
     if focus:
-        lines += ["", "**重点关注** ⚠️"]
-        for e in focus:
-            line = "- [%s](%s) %s@%s · %s/%s" % (
-                _title(e), (e.get("source") or {}).get("url") or "",
-                e.get("action_type") or "-", e.get("country_cn") or "-",
-                e.get("impact_type") or "未研判", e.get("impact_level") or "未研判")
-            if e.get("impact_level") in ("高影响", "中影响") and e.get("impact_rationale"):
-                line += " — " + _cut_sentence(e["impact_rationale"])
-            lines.append(line)
+        blocks.append("**重点关注** ⚠️\n\n"
+                      + "\n\n".join(_entry_block(e) for e in focus))
     if rest:
-        lines += ["", "**其他新增**:"]
-        for e in rest:
-            lines.append("- [%s](%s) %s@%s · %s/%s" % (
-                _title(e), (e.get("source") or {}).get("url") or "",
-                e.get("action_type") or "-", e.get("country_cn") or "-",
-                e.get("impact_type") or "未研判", e.get("impact_level") or "未研判"))
+        blocks.append("**其他新增**\n\n"
+                      + "\n\n".join(_entry_block(e) for e in rest))
     if docx_ok:
         tail = "全文见政策 Markdown / Word / Excel 报告(面板可下载)"
     else:
         tail = ("全文见政策 Markdown 报告(面板可下载); "
                 "⚠️ 本次无 Word 附件(Word 按需生成: report.py --docx)")
-    lines += ["", "---",
-              tail,
-              "> AI 辅助生成 · 仅供情报参考 · 代码 %s" % code_fingerprint()]
-    return "\n".join(lines)
+    blocks.append("---\n" + tail
+                  + "\n> AI 辅助生成 · 仅供情报参考 · 代码 %s" % code_fingerprint())
+    return "\n\n".join(blocks)
 
 
 def _post_json(url, payload):

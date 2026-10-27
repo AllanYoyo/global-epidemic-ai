@@ -2,7 +2,7 @@
 
 > 体检沉淀与工单跟踪。本文件登记代码库**已识别但未修复**的问题,按"高/中/低"分档。
 > 修复后从"未修复"移入"已修复"区,保留作为历史与回归参考。
-> 上次体检: **2026-10-24** (全量代码审查: 推送链路 / 扫描编排 / 数据合同与展示层三线并行, 高危 H1/H2/H4/H5 当日修复, 见文末 2026-10-24 小节)。
+> 上次体检: **2026-10-27**(P4 管线代码走查: 存档配额口径 / 空输入语义 / 研判写回 / 抽取契约四组问题; H19 当日闭环, H20 与 M14-M16 入册), 此前 **2026-10-24**(全量代码审查: 推送链路 / 扫描编排 / 数据合同与展示层三线并行, 高危 H1/H2/H4/H5 当日修复, 见文末 2026-10-24 小节)。
 
 ---
 
@@ -18,6 +18,20 @@
   → cron 记成功; 且该形态不触发孤儿清理, 网关侧孤儿 turn 继续烧配额。
 - 建议处理: FRC 非 0 时置 MISSING 或至少记录失败因子, 与 1afdbbd 的"有存档 0 入库
   判失败"对偶补上"取数没跑成也不许判成功"。
+
+#### H20 · "取数全挂"与"安静日"不可区分 —— 0 存档即推"今日无新增", rc=0 假成功
+- 位置: `scripts/run_scan.sh`(确定性取数分支 ~:471-477、:605-614、:635-654 空输入短接)、`scripts/fetch_pages.py`(返回码)
+- 现象: 取数段 rc 不为 0 时只打一行日志就继续; 而"47 个源全部预探 dead"这种**取数全挂**的
+  形态里 `fetch_pages.py` 返回的**恰恰是 0**(逐源记 search-log 后正常收尾)—— 于是两条路都落到
+  "0 存档 → 空输入短接 → 确定性出报 → 按范围锁推送 → 产物校验全过 → exit 0"。
+  推送出去的是"今日无新增 0 条", 而真实原因是网络/网关/证书全线故障。
+  `known-issues` 的 H3(取数失败被静默吞掉)在 Agent 分支已修, **P4 确定性分支等价形态仍在**。
+- 关键点: 只把 `FRC≠0` 判失败**不够** —— 全挂时 rc 本来就是 0。
+- 建议处理: `fetch_pages` 把预探结论(存活源数 / 全灭标记)写进当日 `search-log.md` 或独立状态文件,
+  `run_scan.sh` 读它: 存活源数为 0 → 判**基础设施故障**(失败, 不推送"今日无新增"),
+  并与"确有窗口内条目但一条没命中"区分开; 同时把 `FRC≠0` 也纳入失败因子(与 H1/H2 对偶)。
+- 附带: `fetch_pages.py` 的 `already` 计数已改为复用 `collect.count_archives()`(H19 口径统一后),
+  这也是把"预探存活数"一并落盘的自然落点。
 
 #### H6 · 展示/投递层注入三连(数据源自外部网页, 攻击面真实)
 - 位置与形态:
@@ -112,6 +126,35 @@
   超大响应全量入内存; 30s timeout 是 per-blocking-op, 慢滴流可拖更久。
 - 建议处理: 二进制 Content-Type 直接落盘不解码; 流式读设上限(如 5MB)。
 
+#### M14 · 研判写回按 source.url 唯一匹配 —— 同 URL 多条政策只有一条拿到四维
+- 位置: `scripts/extract_records.py` writeback_risk(约 :273 `by_url = {u: eid for eid, u in rows if u}`)
+- 现象: 匹配靠 `source.url → event_id` 的字典映射, **同 URL 出现多次时后者覆盖前者**。
+  一份存档含多条政策(同一页面公告多个措施), 或多国引用同一份 EUR-Lex 文件时,
+  只有最后一条被写回研判, 其余静默留在 `risk.py --list-pending` 里, 不报错也不告警。
+- 建议处理: 改为"抽取记录 → event_id 列表"的一对多映射, 逐个写回; 或在抽取阶段就按
+  (url + 政策主体)生成稳定关联键, 避免只靠 url 单键匹配。
+
+#### M15 · `recommended_action` 在 P4 抽取模板里缺位 —— 建议动作栏被摘要顶替
+- 位置: `scripts/extract_records.py` FIELD_TEMPLATE(无 `recommended_action` 键)、
+  writeback_risk(约 :296 `--action` 传 `(rec.get("summary_cn") or "")[:60]`)
+- 现象: `risk.py:70` 校验 `recommended_action` 必填, 而抽取侧没有这个字段 → 写回时拿
+  **中文摘要**顶替。日报"建议动作"栏于是显示的是摘要文本, 不是动作建议
+  ("立即核查准入" / "持续跟踪最终法规"这类)。
+- 建议处理: FIELD_TEMPLATE 补 `recommended_action=<具体后续动作>` 键, 写回改用它;
+  `summary_cn` 只作摘要。同时核对 `prompts/policy-impact.md` 的字段清单(它已要求
+  `recommended_action`, 但 P4 模板未同步 —— 属 AGENTS.md 说的"改字段需同步多处")。
+
+#### M16 · 抽取的非法枚举值导致整条拒收(兜底只对"缺失"生效, 不对"非法"生效)
+- 位置: `scripts/extract_records.py` parse_kv_output/validate(只校验标题/url/quote)、
+  `scripts/normalize.py` validate(约 :560-563 枚举强校验)与 fill_defaults(约 :608-609)
+- 现象: 模型把 `action_type` 写成"严格"、"policy_domain` 写成"进出口"这类**非法值**时,
+  一路活到 normalize 校验才被**整条拒收** —— 一份存档的抽取成本(一次 LLM 调用)全额作废。
+  而 normalize 的兜底(`action_type="调整"` / `policy_domain="measures"`)是 `setdefault`,
+  **只对字段缺失生效, 对字段存在但取值非法不生效**。
+- 建议处理: 在抽取侧(`extract_records.validate`)加一层枚举归一 —— 取值不在枚举内时
+  映射到对应哨兵值并在 `search-log.md` 留痕, 而不是把整条记录推向拒收;
+  或在 normalize 侧把"非法枚举"与"缺必填"分级处理(前者降级为哨兵, 后者才拒收)。
+
 ### 中 (建议排期修) · 历史遗留
 
 #### B1 · `normalize.upsert()` 缺事务边界, 并发写有 read-modify-write 丢数据风险
@@ -185,6 +228,25 @@
 ---
 
 ## 已修复 (历史)
+
+### 2026-10-27 · 存档日上限口径错配: 标称 ≤12 条/日, 实际只存得下 6 条
+
+#### H19 · collect.py 按目录文件总数判上限 —— 每条存档占两个文件, 交付文件还挤占配额
+- 位置: `scripts/collect.py`(上限判定)、`scripts/fetch_pages.py`(already 计数与透传)
+- 实证(隔离实测, 临时目录, 上限 12): 修复前第 6 次成功(目录 12 个文件 / **6 条存档**),
+  第 7 次被拒 —— 因为 `collect.py` 用 `len(os.listdir(out_dir))` 数**目录文件总数**,
+  而每条存档产出**两个**文件(正文 + `.meta.json`), 取数段还会写 `candidates.jsonl` /
+  `search-log.md` / `extracted-policy.jsonl` / `.fetch-done` 等交付文件。
+  而 `fetch_pages` 的 `already` 与 `run_scan.sh` 的 `RAW_N` 终检都按 `*.meta.json`
+  计**存档条数** —— 两套口径不一致, 系统各处以为能存 12 条, 真实每日只有 6 条,
+  47 个源的每日覆盖被悄悄压掉一半。
+- 修法(当日闭环): ①`collect.count_archives()` 统一口径(数 `*.meta.json`, 交付文件不占配额),
+  两处上限判定(抓取前/抓取后)都改用它; ②`fetch_pages` 复用同一函数算 `already`,
+  透传参数改名 `--max-archives-per-day`(旧名 `--max-files-per-day` 保留为别名;
+  两个都给且不一致 → 报错退出, fail-closed); ③`run_scan.sh` 的 `RAW_N` 口径本已正确, 无需改动。
+- 验证: 隔离实测(预置 4 个交付文件 + 逐次存档)第 12 次成功、第 13 次被拒;
+  自测 222 项全绿(含新增 3 项: 条数口径触顶 / 交付文件不占配额 / 参数别名与冲突拒绝)。
+- 遗留: 无。**后续新增交付文件不再影响配额** —— 口径已收口到单一函数。
 
 ### 2026-10-25 傍晚 · 20/47 死源分诊与修复(5 源复活)
 

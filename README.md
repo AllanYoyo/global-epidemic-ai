@@ -6,19 +6,20 @@
 
 ## 生产链路
 
+> **2026-10-25 P4 起：脚本开车、LLM 只当顾问。** 定时链路默认走确定性管线——取数**零 LLM**，抽取每份存档一次单轮微调用，全链路目标 ≤10 分钟。旧的 Agent 会话链路保留在 `run_scan.sh policy --agent` 后（仅排障/对照用）。
+
 ```text
-外国官方公告 / WTO ePing SPS 通报
-        ↓
- global-policy-search       政策变化侦察与原文存档
-        ↓
- policy-extraction          结构化政策记录
-        ↓
- policy-verification        官方出处与政策状态核验
-        ↓
- policy-impact              对华影响研判
-        ↓
- policy-report              Markdown + Word + Excel + 推送
+run_scan.sh policy (定时入口, 默认确定性管线)
+  → scripts/fetch_pages.py      零 LLM 取数: 通道预探 → curl 并行抓入口页
+                                → 链接日期窗口过滤(7天) → 原文存档(≤12 条/日)
+  → scripts/extract_records.py  每份存档一次 hermes -z 单轮微调用: 抽取 + 研判字段
+  → scripts/normalize.py        校验 + event_id + 入库
+  → scripts/extract_records.py --stage risk   按 url→event_id 确定性写回研判
+  → scripts/report.py           Markdown 日报(Excel/Word 按需人工生成)
+  → scripts/push_report.py      推送(读范围锁执行)
 ```
+
+会话内的交互式检索入口仍是 `skills/global-policy-search`；会话补数走 `run_scan.sh policy --stage fetch`（带超时看护 / 幂等锁 / 预算刹车）。
 
 生产数据合同只有 `record_type=policy`。未来如果重新建设疫情检测,另建数据合同与管线。
 
@@ -42,9 +43,9 @@ pip install openpyxl python-docx
 # 政策公告存档
 python scripts/collect.py --url "https://example.com/notice" --title "外国官方检疫公告"
 
-# 抽取后的政策 JSON 入库(重复入库按 event_id 自动合并, 不覆盖已完成的核验/研判; 整行替换需显式 --replace)
+# 抽取后的政策记录入库(逐行 JSONL, 重复入库按 event_id 自动合并, 不覆盖已完成的核验/研判; 整行替换需显式 --replace)
 # 默认只收发布时间在近 7 天内的新记录, 检索撞到的旧公告页会被"旧闻拒收"(回补历史传 --max-age-days N, 0 关闭)
-python scripts/normalize.py --input data/raw/<日期>/extracted-policy.json \
+python scripts/normalize.py --input data/raw/<日期>/extracted-policy.jsonl \
   --out data/events/<日期>/ --db
 
 # 写回影响研判(四维齐全时 score/level/focus 由代码按加权合同推导并强校验)
@@ -79,21 +80,33 @@ python scripts/report.py --excel --docx
 
 ## 输出
 
-| 输出 | 内容 |
-|---|---|
-| Markdown | 政策速览、动作方向、政策状态、影响类型/等级、中国关联、建议动作、来源 |
-| Word | 政策变化表、收紧/调整/高影响详情、影响综述、待核实和来源索引 |
-| Excel | “政策变化台账”工作表，支持筛选、冻结表头、换行和打印 |
-| 网页 | 政策影响地图、政策台账、动作/领域/影响类型/核验筛选和政策报告下载 |
-| 推送 | 当日新增摘要：**重点关注**(中影响/收紧) + 其他新增, 每条附原文出处链接 |
+| 输出 | 内容 | 产出时机 |
+|---|---|---|
+| Markdown | 政策速览、动作方向、政策状态、影响类型/等级、中国关联、建议动作、来源 | **跑批默认产出** |
+| Word | 政策变化表、收紧/调整/高影响详情、影响综述、待核实和来源索引 | 按需 `report.py --docx` |
+| Excel | "政策变化台账"工作表，支持筛选、冻结表头、换行和打印 | 按需 `report.py --excel` |
+| 网页 | 政策影响地图、政策台账、动作/领域/影响类型/核验筛选和政策报告下载 | 面板常驻 |
+| 推送 | 当日新增摘要：**重点关注**(中影响/收紧) + 其他新增, 每条附原文出处链接 | 按推送范围锁 |
+
+跑批**只产 Markdown**；Word/Excel 由人工或面板按需生成。推送时 Word 在就带附件、不在就在正文如实标注"本次无 Word 附件"。
 
 ## 定时运行
 
 ```bash
-scripts/run_scan.sh policy --broadcast   # 政策扫(建议每日 07:30): 检索→抽取→核验→研判→日报→全量推送
+scripts/run_scan.sh policy --broadcast   # 政策扫(建议每日 07:30): 取数→抽取→入库→研判→日报→全量推送
 ```
 
 扫描完成后自动用 push_report.py 推送当日日报。另有 `am`(晨扫全量, 06:30) 和 `pm`(晚扫增量, 18:00) 两档, 见 `config/crontab.example`。网页生成按钮默认执行政策日报、Word 和 Excel；自定义生成命令使用 `RADAR_POLICY_GENERATE_CMD`。
+
+常用的人工入口：
+
+```bash
+scripts/run_scan.sh policy --stage fetch      # 只补数(带看护/幂等锁/预算刹车, 不推送)
+scripts/run_scan.sh policy --stage process    # 只加工已有存档(不联网检索)
+scripts/run_scan.sh policy --refetch          # 强制重取(清当日 .fetch-done 标记)
+python scripts/diagnose_push.py                # 现场诊断: 代码版本/范围锁/渠道/crontab/日志
+python scripts/token_budget.py --date $(date +%F)   # 当日 Hermes token 用量/预算
+```
 
 ### 推送范围锁(2026-10-20 起)
 
@@ -150,16 +163,23 @@ python3 scripts/diagnose_push.py          # 单独诊断：代码版本/范围�
 ## 目录
 
 ```text
-ARCHITECTURE.md                    架构与数据流、schema、Hermes 调度
+ARCHITECTURE.md                    架构与数据流、schema、调度分层
 CONTRIBUTING.md                    新增情报源 / 改提示词 / PR 清单
 TROUBLESHOOTING.md                 常见故障排查
 docs/event-schema.md               数据字段权威定义
-skills/global-policy-search/       政策变化侦察
+docs/known-issues.md               已知问题与限制(工单册)
+skills/global-policy-search/       政策变化侦察(会话内交互式检索入口)
 skills/policy-verification/        政策官方出处核验
 skills/daily-report/               政策日报交付
 prompts/policy-extraction.md       政策抽取
 prompts/policy-impact.md           对华影响研判
+scripts/run_scan.sh                跑批编排入口(范围声明/看护/产物终检)
+scripts/fetch_pages.py             确定性取数(零 LLM: 预探 + 抓页 + 日期过滤 + 存档)
+scripts/probe_channels.py          通道 HTTP 预探(四层降级, [dead] 直接跳过)
+scripts/scan_targets.py            当日源清单渲染(六档每日全扫)
+scripts/extract_records.py         单轮微调用抽取 + 研判写回(--stage risk)
 scripts/collect.py                 原文存档(可溯源链第一环)
+scripts/snip.py / jsonl_append.py  摘录器 / JSONL 追加器(工具输出硬上限)
 scripts/normalize.py               政策数据合同与入库
 scripts/risk.py                    政策影响写回
 scripts/report.py                  Markdown/Word/Excel 入口
@@ -167,6 +187,7 @@ scripts/report_docx.py             政策 Word 简报
 scripts/push_report.py             政策推送
 scripts/push_scope.py              推送范围锁(声明本轮允许发到哪些渠道)
 scripts/diagnose_push.py           推送链路现场诊断(只读)
+scripts/token_budget.py            当日 Hermes token 用量/预算检查
 scripts/deploy_update.sh           生产更新(pull + 依赖 + 自检)
 scripts/buildinfo.py               运行代码版本指纹(推送内容尾部标注 commit)
 webapp/app.py                      政策监测面板

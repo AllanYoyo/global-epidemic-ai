@@ -18,12 +18,12 @@ description: 监测各国政府动植物检疫与进出口管控政策变化。�
     - `track: policy` —— 外国政府/国际组织的政策动作源, **policy 档只扫这些**;
     - `track: outbreak` —— 疫情事件源(WAHIS / EMPRES-i / ProMED / 行业媒体等), 本分支不扫, 仅在影响研判时作背景;
     - `track: background` —— 中国侧与标准名录源(gacc / mara / tbtsps / foodmate 等), 只作背景, 不进采集台账;
-  - `policy_watch_countries`:检索主干, 6 个档位——`priority_1`(对华进口来源地, 每日必扫)、
-    `regional`(区域/国际机构措施: 欧盟 SANTE、WTO ePing、IPPC, 每日必扫)、
-    `priority_2`(主要贸易伙伴联邦级措施, 每日必扫)、
+  - `policy_watch_countries`:检索主干, 6 个档位——`priority_1`(对华进口来源地)、
+    `regional`(区域/国际机构措施: 欧盟 SANTE、WTO ePing、IPPC)、
+    `priority_2`(主要贸易伙伴联邦级措施)、
     `border_neighbours`(陆路边境邻国, 传入路径优先)、`export_partners`(对华出口大户, 反向措施)、
-    `state_level`(次国家/州级部门)。后三档按 `weekly_shards` 周轮转, 每条含 source_ids 与别名;
-  - `weekly_shards`:ISO 星期(1=周一..7=周日) → 当天要扫的档位;每日必扫档不在其中列出;
+    `state_level`(次国家/州级部门)。**六档全部每天进清单**(2026-10-25 起, 见下方"国别主干"), 每条含 source_ids 与别名;
+  - `weekly_shards`:ISO 星期(1=周一..7=周日) → 当天要扫的档位。**已废弃**(2026-10-25 起每日全扫; 段保留仅为兼容解析器, 无过滤效果);
   - `policy_keywords`:政策关键词词库(组织机制/商品生物材料/活动物/植物/疫病风险/证书流程/法规标准/输华议定书/文书类型,每条 {cn, en, aliases[]});
   - `policy_queries`:按主题分组的检索模板。
 
@@ -41,13 +41,15 @@ description: 监测各国政府动植物检疫与进出口管控政策变化。�
 > 4. **官方域直击**(`site:{official_domain}`) —— 必须用**短英文术语**
 >    (`import requirements` / `quarantine` / `resolution`), 不要拼长自然语言句子。
 
-> **国别主干按周轮转**:`priority_1` / `regional` / `priority_2` 每日必扫;
-> 其余条目按 `shard` 字段指定的 ISO 星期扫描(条目级优先于档位级 `scan`),
-> 高疫区邻国(俄/越/哈/蒙)显式写全周 `1 2 3 4 5 6 7` 即等于每日扫。
-> 这样 7 天全覆盖, 单日检索量不随国别数线性膨胀。
-> **排期变更后必须自检**:`weekly_shards` 生效日按当天 ISO 星期取当天条目,
-> 并在 `search-log.md` 头部注明当天星期与实际扫描的条目, 便于复盘"某国这周没产出是漏扫还是真无变化"。
-> 新增国别必须给 `shard`, 否则该国永远不会被扫到(仓库已有校验脚本历史教训)。
+> **国别主干每日全扫**(2026-10-25 起):`policy_watch_countries` 六档**全部每天进清单**。
+> 此前 `priority_1`/`regional`/`priority_2` 每日必扫, 其余条目按 `shard` 字段指定的 ISO 星期轮转;
+> 但 P4 确定性取数(curl, 零 LLM)后**源数不再消耗 token** —— 抽取成本只跟**存档条数**走
+> (每日 ≤12 条硬上限), 周轮转失去省 token 的存在前提。更要紧的是轮转档曾因
+> `weekly_shards` 配置断裂导致 23 个源**没有任何调度日**(含俄/越/哈/蒙等特意标注
+> "高疫区邻国每日扫"的源), 属配置断裂缺陷 —— 每日全扫后该类缺陷整体消除。
+> `shard` 字段与 `weekly_shards` 段已废弃(保留仅为兼容解析器, 无过滤效果)。
+> **新增 policy 源必须挂到某个国别的 `source_ids`**, 否则不会被主动定位到。
+> 每日实际扫到的条目清单记在 `search-log.md`, 便于复盘"某国这周没产出是漏扫还是真无变化"。
 
 ## 监测范围(什么算"政策变化")
 
@@ -69,7 +71,7 @@ description: 监测各国政府动植物检疫与进出口管控政策变化。�
 ## 步骤
 
 1. **定窗口**:确认时间窗(默认今天;常规运行只收最近 24-48 小时的新发布,首次运行放宽到 7 天)。运行标识为当天日期 `YYYY-MM-DD`,并记下窗口下限「今天-N 天」(N 与入库校验一致,默认 7):只有发布时间落在窗口内的条目才算"新信息"。
-2. **按优先级组合检索**:先按当天 ISO 星期取应扫条目,再并入每日必扫档:
+2. **按优先级组合检索**:当日**六档全部进清单**(2026-10-25 起每日全扫, 不再按 ISO 星期挑条目):
    - **取数工具纪律(2026-10-22 强制, 事故级)**:
      > **10-22 实测**: 检索阶段把 `web_search` 打了 50 次仍无进展, Agent 自行放弃,
      > 整轮扫描烧了 44 分钟后以 **rc=0 "成功"** 结束 —— 一条没入库、一份日报没出,
@@ -102,7 +104,9 @@ description: 监测各国政府动植物检疫与进出口管控政策变化。�
      >   (`members.wto.org/crnattachments/...`), 不要自己去拼。
      > - **不许为了「按措施主体找」去拉全量包**: 措施主体(如 EAEU)走
      >   `regulation.eaeunion.org` 或中文聚合站, 不在 ePing 的成员列表里。
-     > - **单轮硬上限: 下载 PDF ≤ 6 个、存档文件 ≤ 12 个**(10-21 实际只存了 2 个)。
+     > - **单轮硬上限: 下载 PDF ≤ 6 个、存档 ≤ 12 条**(10-21 实际只存了 2 个)。
+     >   存档上限按**条数**计(`collect.count_archives()` 数 `*.meta.json`; 每条存档 = 1 个正文 + 1 个
+     >   `.meta.json`, `candidates.jsonl` / `search-log.md` 等交付文件**不占配额**)。
      >   触顶就在 `search-log.md` 标「本轮不穷举, 留待下一轮」并继续下一通道。
      > - **预筛用现成脚本, 不要自己写解析代码**(2026-10-22 新增):
      >   列表页拿到的行式文本或 JSON, 一条命令完成「日期窗口 + 措施动作」预筛:
@@ -115,9 +119,8 @@ description: 监测各国政府动植物检疫与进出口管控政策变化。�
      >   脚本支持多语言标题(西/葡/法)与音标折叠, 纯「评议期通知」类会被自动排除。
      >   **行式字段按内容判定**(不按下标), 所以行首有没有序号列、文号标题是否分开
      >   都能正确解析 —— 但**请原样保留列表页抓下来的分隔符 `|`**, 不要自己重排列。
-   - **每日必扫**:`priority_1` → `regional` → `priority_2`(含欧盟 SANTE 与 WTO ePing);
-   - **当天轮转条目**:`border_neighbours` / `export_partners` / `state_level` 中 `shard` 含当天星期的条目,
-     以及 `weekly_shards[当天].scan` 里的整档;
+   - **当日全部六档**:`priority_1` → `regional` → `priority_2`(含欧盟 SANTE 与 WTO ePing)→ `border_neighbours` → `export_partners` → `state_level`;
+     档位内的条目**不再按 shard 过滤**(2026-10-25 起每日全扫, 见上方"国别主干每日全扫");
    - 周一附加扫 `sources.yaml` 中 `schedule: weekly` 的政策源;
    - **只扫 `track: policy` 的源**;`track: outbreak` / `background` 的源不主动扫(需要背景时再按需查);
    - **WTO ePing 与欧盟 SANTE SERS 是第一高产源, 每日必扫**(均归 `regional` 档):ePing 平台主域为
@@ -152,10 +155,10 @@ description: 监测各国政府动植物检疫与进出口管控政策变化。�
         `normalize.py` 的 `LIST_URL_PATH_FRAGMENTS` 是兜底黑名单(命中即拒收)。
    - 网页:`python scripts/collect.py --url "<URL>" --title "<标题>"`(存到 `data/raw/<日期>/`);
    - 搜索摘要:写入 `data/raw/<日期>/search-log.md`(每行:国家 | 主题 | 动作 | 来源 | 标题 | URL | 摘要 | 命中查询)。
-4. **抽取入库**:按 `prompts/policy-extraction.md` 抽取为 `record_type=policy` 的记录(字段见 `docs/event-schema.md`),抽取时在 <<<RAW_FEED>>> 头部第一行注明「窗口下限: YYYY-MM-DD」。汇总到 `data/raw/<日期>/extracted-policy.json` 后:
+4. **抽取入库**:按 `prompts/policy-extraction.md` 抽取为 `record_type=policy` 的记录(字段见 `docs/event-schema.md`),抽取时在 <<<RAW_FEED>>> 头部第一行注明「窗口下限: YYYY-MM-DD」。汇总到 `data/raw/<日期>/extracted-policy.jsonl`(逐行 JSON, 一行一条记录) 后:
 
    ```bash
-   python scripts/normalize.py --input data/raw/<日期>/extracted-policy.json --out data/events/<日期>/ --db --max-age-days <N 与窗口一致, 缺省 7>
+   python scripts/normalize.py --input data/raw/<日期>/extracted-policy.jsonl --out data/events/<日期>/ --db --max-age-days <N 与窗口一致, 缺省 7>
    ```
 
    event_id 已存在时自动合并更新, 空值与默认状态不覆盖已完成的核验/研判结论。normalize.py 会按 `source.publish_date`(缺省 `event_date`)把窗口外的**新增**记录判为旧闻拒收;确属新线索被误拦时,先核实页面日期,再用 `--max-age-days` 放宽重放。

@@ -105,6 +105,13 @@ bash scripts/deploy_update.sh policy                        # 生产更新（git
   - 推送按"文件在才带附件"执行：Word 存在就随邮件/Hermes 附上；不存在正文页脚写「⚠️ 本次无 Word 附件(Word 按需生成: report.py --docx)」，控制台打 `[提示]`，`send_hermes` / `send_mail` 附件缺失仍打 `[WARN]` 不静默。
   - `report.py --ensure-docx` 保留为**人工按需入口**（幂等；md 缺失不补，防空壳 Word 掩盖跑批失败——10-22 教训）。
   - `report.py --docx` 的异常一律优雅降级但留痕（不崩、不装没看见）。
+- **推送卡片内容口径（2026-10-27 用户定）**：IM 卡片每条 = **标题（超链到原文）+ 正文是整个政策的简介**。
+  - 正文用抽取阶段写的 `summary_cn` **全文**（缺失退 `summary_en`，再缺则不写正文行——不拿标题冒充简介、不编造）；**不再**拿截断到 60 字的 `impact_rationale` 顶替（研判理由仍留在完整 Markdown/Word 报告里）。
+  - 标题保留 `[标题](原文URL)`；无 URL 时不写空链接 `]()`。
+  - **所有渠道同一份文本**：微信侧审阅推送的就是钉钉那份正式内容（用户原话「推微信侧的测试内容，需要和正式推送钉钉的要一致，不然就不是测试了」）——不做渠道特供渲染。
+  - **条目之间留空行**：微信单条上限 2000 字且按 markdown 块打包，整段超限会被**静默截断**（`gateway/platforms/helpers.py` 的 `greedy_pack_blocks` overflow 分支）；留空行后每个条目自成一个块，超限时按条目边界切成多条，一条政策都不丢。
+  - `_cut` 按渠道字节上限截断时必带「已截断」提示，不静默丢内容（企业微信 3800 字节上限的遗留见 `docs/known-issues.md` M18）。
+  - 微信投递报错 `iLink sendmessage session not ready` 是**会话未就绪**（需对方先给机器人发消息），与 target 解析无关，**不要**为此加重试或改 `.env` target——见 `docs/known-issues.md` M17。
 
 ## 约定与注意事项
 

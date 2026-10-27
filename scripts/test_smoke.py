@@ -1756,12 +1756,17 @@ class ScanFailureGuardTests(unittest.TestCase):
 
     def test_collect_enforces_daily_archive_cap(self):
         # 存档量上限必须是**代码强制**(不依赖 Agent 自律), 且在抓取之前就拒绝
+        # 2026-10-27(A1): 上限口径 = **存档条数**(数 *.meta.json)。原实现数的是
+        # 目录文件总数, 而每条存档产出两个文件(正文 + .meta.json), 再叠加取数段的
+        # 交付文件, 于是"上限 12"实际只存得下 6 条 —— 而全链路其余环节
+        # (fetch_pages 的 already / run_scan.sh 的 RAW_N 终检)都按条数计,
+        # 两套口径不一致, 每日覆盖被悄悄压掉一半。
         import collect
         raw_dir = os.path.join(self.tmp, "raw", "2026-10-22")
         os.makedirs(raw_dir, exist_ok=True)
         for i in range(12):
-            with open(os.path.join(raw_dir, "%02d-x.html" % i), "w", encoding="utf-8") as f:
-                f.write("x")
+            with open(os.path.join(raw_dir, "%02d-x.meta.json" % i), "w", encoding="utf-8") as f:
+                f.write("{}")
         buf = io.StringIO()
         with mock.patch.object(collect, "DATA_DIR", self.tmp), \
              mock.patch("sys.argv", ["collect.py", "--url", "https://example.com/1",
@@ -1770,8 +1775,69 @@ class ScanFailureGuardTests(unittest.TestCase):
             rc = collect.main()
         self.assertEqual(rc, 1)
         self.assertIn("[拒绝]", buf.getvalue())
+        self.assertIn("已有 12 条存档", buf.getvalue())
         # 触顶后不应新增文件
         self.assertEqual(len(os.listdir(raw_dir)), 12)
+
+    def test_collect_delivery_files_do_not_consume_archive_quota(self):
+        # A1 的另一半: 交付文件(candidates.jsonl / search-log.md /
+        # extracted-policy.jsonl / .fetch-done)是取数段的过程产物, **不占存档配额**。
+        # 修复前它们被计入目录文件总数, 把 12 条的配额吃到只剩 6 条。
+        import collect
+        raw_dir = os.path.join(self.tmp, "raw", "2026-10-23")
+        os.makedirs(raw_dir, exist_ok=True)
+        for i in range(11):
+            with open(os.path.join(raw_dir, "%02d-x.meta.json" % i), "w", encoding="utf-8") as f:
+                f.write("{}")
+        for name in ("candidates.jsonl", "search-log.md", "extracted-policy.jsonl", ".fetch-done"):
+            with open(os.path.join(raw_dir, name), "w", encoding="utf-8") as f:
+                f.write("x")
+        body = os.path.join(self.tmp, "body-a.txt")
+        with open(body, "w", encoding="utf-8") as f:
+            f.write("正文")
+        buf = io.StringIO()
+        with mock.patch.object(collect, "DATA_DIR", self.tmp), \
+             mock.patch("sys.argv", ["collect.py", "--url", "https://example.com/1",
+                                     "--file", body, "--title", "测试",
+                                     "--date", "2026-10-23"]), \
+             redirect_stdout(buf):
+            rc = collect.main()
+        self.assertEqual(rc, 0)
+        self.assertEqual(collect.count_archives(raw_dir), 12)
+
+    def test_collect_archive_cap_param_alias(self):
+        # 2026-10-27: 上限参数改名 --max-archives-per-day(语义=存档条数),
+        # 旧名 --max-files-per-day 保留为别名; 两个都给且不一致 → 报错退出
+        # (上限口径的歧义会让"今天能存几条"变成猜)。
+        import collect
+        raw_dir = os.path.join(self.tmp, "raw", "2026-10-24")
+        os.makedirs(raw_dir, exist_ok=True)
+        body = os.path.join(self.tmp, "body-b.txt")
+        with open(body, "w", encoding="utf-8") as f:
+            f.write("正文")
+        # 旧名仍可用
+        buf = io.StringIO()
+        with mock.patch.object(collect, "DATA_DIR", self.tmp), \
+             mock.patch("sys.argv", ["collect.py", "--url", "https://example.com/1",
+                                     "--file", body, "--title", "旧名",
+                                     "--date", "2026-10-24",
+                                     "--max-files-per-day", "5"]), \
+             redirect_stdout(buf):
+            rc = collect.main()
+        self.assertEqual(rc, 0)
+        self.assertEqual(collect.count_archives(raw_dir), 1)
+        # 新旧名冲突 → 拒绝(不猜)
+        buf2 = io.StringIO()
+        with mock.patch.object(collect, "DATA_DIR", self.tmp), \
+             mock.patch("sys.argv", ["collect.py", "--url", "https://example.com/2",
+                                     "--file", body, "--title", "冲突",
+                                     "--date", "2026-10-24",
+                                     "--max-archives-per-day", "5",
+                                     "--max-files-per-day", "9"]), \
+             redirect_stdout(buf2):
+            rc = collect.main()
+        self.assertEqual(rc, 2)
+        self.assertIn("不一致", buf2.getvalue())
 
     def test_run_scan_checks_archive_volume(self):
         # 终检: 绕过 collect.py 直接往 raw 目录倾倒也要被识破

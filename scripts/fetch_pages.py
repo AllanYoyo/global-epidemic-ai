@@ -7,7 +7,7 @@
 用户约束: 全链路 ≤10 分钟。本脚本把取数完全确定性化(零 LLM):
 
   当日源清单(scan_targets) → 探测复用(probe_channels, [dead] 跳过)
-  → curl 入口页 → 抽链接 + 日期窗口过滤(7 天) → collect.py 存档(≤12/日)
+  → curl 入口页 → 抽链接 + 日期窗口过滤(7 天) → collect.py 存档(≤12 **条**/日)
   → candidates.jsonl 逐条追加 → search-log.md 逐源留痕
 
 取舍(诚实登记): 链接启发式的召回率低于 Agent 浏览 —— 无日期线索的链接只记
@@ -33,6 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from normalize import biz_today, DATA_DIR  # 业务时区与数据目录口径
 import scan_targets
 import probe_channels
+import collect as collect_mod   # 存档计数口径与 collect.py 同源(数 *.meta.json)
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FETCH_TIMEOUT = 15          # 单页 curl 超时(秒)
@@ -232,20 +233,22 @@ def verify_dates(to_verify, today, per_source_cap=2):
 
 
 def fetch(date_str, max_per_source=MAX_PER_SOURCE, max_total=MAX_TOTAL,
-          max_files_per_day=0, log=print):
-    """max_files_per_day: 透传给 collect.py 的当日存档文件上限。
+          max_archives_per_day=0, log=print):
+    """max_archives_per_day: 透传给 collect.py 的当日存档条数上限。
 
     0 = 不限(测试放量用)。日常跑批不传 —— collect 默认 12 与 MAX_TOTAL=12
-    同口径双保险; 受控测试需要抬高时由调用方显式给值, 不改_collect 默认。
+    同口径双保险; 受控测试需要抬高时由调用方显式给值, 不改 collect 默认。
+    2026-10-27: 旧名 max_files_per_day 语义是"目录文件数", 与全链路的"存档条数"
+    口径不一致(每条存档 = 正文 + .meta.json 两个文件), 实际只存得下 6 条 ——
+    现在统一为**存档条数**。
     """
     today = datetime.date.fromisoformat(date_str)
     raw_dir = os.path.join(DATA_DIR, "raw", date_str)
     os.makedirs(raw_dir, exist_ok=True)
 
     picked = scan_targets._pick(date_str)
-    # 当日已有存档数(尊重 collect.py 的日上限, 不越过)
-    already = len([f for f in os.listdir(raw_dir) if f.endswith(".meta.json")]) \
-        if os.path.isdir(raw_dir) else 0
+    # 当日已有存档数(与 collect.py 同口径: 数 *.meta.json, 交付文件不计入)
+    already = collect_mod.count_archives(raw_dir)
 
     # 探测复用: [dead] 跳过(零工具调用, 与 Agent 版同口径); note 是降级重试留痕
     alive = {}
@@ -301,7 +304,7 @@ def fetch(date_str, max_per_source=MAX_PER_SOURCE, max_total=MAX_TOTAL,
             p = subprocess.run(
                 [sys.executable, os.path.join(REPO, "scripts", "collect.py"),
                  "--url", link, "--title", title[:80], "--date", date_str,
-                 "--max-files-per-day", str(max_files_per_day)],
+                 "--max-archives-per-day", str(max_archives_per_day)],
                 capture_output=True, text=True, timeout=60)
             if p.returncode != 0:
                 out = (p.stdout or "") + (p.stderr or "")
@@ -329,12 +332,23 @@ def main():
     ap.add_argument("--date", default=biz_today(), help="业务日期 YYYY-MM-DD(默认东八区今天)")
     ap.add_argument("--max-per-source", type=int, default=MAX_PER_SOURCE)
     ap.add_argument("--max-total", type=int, default=MAX_TOTAL)
-    ap.add_argument("--max-files-per-day", type=int, default=12,
-                    help="透传 collect.py 的当日存档文件上限(默认 12 与日常同口径; 0=不限, 测试放量用)")
+    ap.add_argument("--max-archives-per-day", type=int, default=None,
+                    help="透传 collect.py 的当日存档条数上限(默认 12 与日常同口径; 0=不限, 测试放量用)")
+    ap.add_argument("--max-files-per-day", type=int, default=None,
+                    help="[旧名, 已更名] 同 --max-archives-per-day")
     args = ap.parse_args()
+    # 新旧名解析: 两个都给且不一致 → 报错退出(上限口径歧义会让配额变成猜)
+    cap = args.max_archives_per_day
+    if args.max_files_per_day is not None:
+        if cap is not None and cap != args.max_files_per_day:
+            print("[错误] --max-archives-per-day(%s) 与 --max-files-per-day(%s) 不一致, 已中止。"
+                  % (cap, args.max_files_per_day))
+            return 2
+        cap = args.max_files_per_day
+    if cap is None:
+        cap = 12
     try:
-        n, log_lines, capped = fetch(args.date, args.max_per_source, args.max_total,
-                                     args.max_files_per_day)
+        n, log_lines, capped = fetch(args.date, args.max_per_source, args.max_total, cap)
     except (OSError, ValueError) as exc:
         print("[fetch_pages][错误] %s" % exc)
         return 2

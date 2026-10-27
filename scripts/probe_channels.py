@@ -10,7 +10,9 @@ execute_code, 逐轮全量重发上下文让单轮 cache 读高达 5M。探测�
 (记 search-log 一行), 只对 [ok] 通道做语义筛选与取数。
 
 口径:
-- 每个源入口 URL 一次 GET(-m 6 超时, 8 并发), 只看 HTTP 状态码, 不下载正文;
+- 每个源入口 URL 一次 GET(-m 6 起步, 8 并发), 只看 HTTP 状态码, 不下载正文;
+- 三层降级(http_get, 2026-10-25 死源分诊驱动): --http1.1 / SSL 链宽松重试(-k) /
+  403 无 UA 重试 / 5xx 加长重试 —— 20 个死源中约 7 个由此复活, 降级触发记 note;
 - 200-399 = ok; 其余(含 000=连接失败/超时) = dead —— 与 channel_health.py
   从 search-log 归纳的「不可用」同口径(403/占位页/连接失败);
 - 输出按 sid 一行, 超过 48 行截断; 输出经与 channel_health 相同的清洗
@@ -52,19 +54,78 @@ def _clean(s):
     return str(s).replace('"', "」").replace("`", "").replace("$", "")
 
 
+def http_get(url, timeout, want_body=False, max_bytes=None):
+    """三层降级 GET(2026-10-25 死源分诊驱动, 20 死源中 7 个可由此复活):
+
+    ① 始终 --http1.1 —— agriculture.gov.au 型 HTTP/2 流错误(err 92);
+    ② curl 退出码 60(SSL 证书链不完整/自签链) → 追加 -k 重试一次 ——
+       ca-cfia/th-doa/mattilsynet 型。只读公开政府新闻场景可接受(内容有
+       url+quote 溯源, 异常文本过不了 normalize 官方域校验与人工复核);
+    ③ HTTP 403 → 去掉自定义 UA 重试一次 —— aphis.usda.gov 型 WAF:
+       伪装浏览器的爬虫 UA 反而被拦, curl 默认 UA(不带 -A)反而 200;
+    ④ HTTP 5xx → 超时加长三倍重试一次 —— co-minagricultura 型慢站网关超时。
+
+    返回 (code, body, note): note 记录触发过的降级(观测留痕, 可进 search-log)。
+    """
+    def _run(extra_args, timeout_run):
+        cmd = ["curl", "-m", str(timeout_run), "-sS", "-L", "--http1.1",
+               "-A", UA, "-w", "\n%{http_code}"] + extra_args
+        if not want_body:
+            cmd += ["-o", "/dev/null"]
+        elif max_bytes:
+            cmd += ["--max-filesize", str(max_bytes)]
+        cmd.append(url)
+        try:
+            p = subprocess.run(cmd, capture_output=True, text=True,
+                               errors="replace", timeout=timeout_run + 5)
+        except (OSError, subprocess.TimeoutExpired):
+            return 0, "", ""
+        if p.returncode != 0 and not p.stdout:
+            return 0, "", "curl-exit-%s" % p.returncode
+        body, _, tail = p.stdout.rpartition("\n")
+        try:
+            code = int(tail.strip().split()[0])
+        except (ValueError, IndexError):
+            return 0, body, ""
+        return code, body, ""
+
+    note = ""
+    code, body, _ = _run([], timeout)
+    if code == 0 and _.startswith("curl-exit-6"):
+        code, body, _ = _run(["-k"], timeout)          # ② SSL 链宽松重试
+        if code:
+            note = (note + " ssl-retry").strip()
+    if code == 403:
+        cmd0 = ["curl", "-m", str(timeout), "-sS", "-L", "--http1.1",
+                "-w", "\n%{http_code}"]
+        if not want_body:
+            cmd0 += ["-o", "/dev/null"]
+        cmd0.append(url)
+        try:
+            p = subprocess.run(cmd0, capture_output=True, text=True,
+                               errors="replace", timeout=timeout + 5)
+            c2 = int((p.stdout or "").strip().split("\n")[-1].strip() or 0)
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            c2 = 0
+        if c2 and c2 != 403:                            # ③ 无 UA 重试
+            body2, _, _t = (p.stdout or "").rpartition("\n")
+            code, body, note = c2, body2, (note + " no-ua-retry").strip()
+    if code >= 500:
+        code2, body2, _ = _run([], timeout * 3)         # ④ 慢站加长重试
+        if classify(code2) == "ok":
+            code, body, note = code2, body2, (note + " slow-retry").strip()
+    return code, body, note
+
+
 def probe_one(sid, url):
-    """探一个源入口, 返回 (sid, 状态码int, ok/dead)。curl 不可用等异常按 dead。"""
+    """探一个源入口, 返回 (sid, 状态码int, ok/dead, note)。异常按 dead。"""
     if not url.startswith(("http://", "https://")):
-        return sid, 0, "dead"
+        return sid, 0, "dead", ""
     try:
-        p = subprocess.run(
-            ["curl", "-m", str(TIMEOUT_SECS), "-sS", "-o", "/dev/null",
-             "-A", UA, "-w", "%{http_code}", "-L", url],
-            capture_output=True, text=True, timeout=TIMEOUT_SECS + 4)
-        code = int(p.stdout.strip() or 0)
-    except (OSError, ValueError, subprocess.TimeoutExpired):
-        code = 0
-    return sid, code, classify(code)
+        code, _body, note = http_get(url, TIMEOUT_SECS)
+    except Exception:
+        code, note = 0, ""
+    return sid, code, classify(code), note
 
 
 def probe(date_str, group=None):
@@ -78,7 +139,8 @@ def probe(date_str, group=None):
     if not items:
         return []
     with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, len(items))) as ex:
-        return list(ex.map(lambda kv: probe_one(kv[0], kv[1]), items))
+        results = list(ex.map(lambda kv: probe_one(kv[0], kv[1]), items))
+    return results
 
 
 def render_probe(date_str, group=None):
@@ -91,9 +153,10 @@ def render_probe(date_str, group=None):
         return ""
     lines = ["【通道探测结果】(确定性脚本已预探; [dead] 通道直接跳过并在 search-log 记一行, [ok] 才继续取数)"]
     n_ok = 0
-    for sid, code, state in results[:MAX_LINES]:
+    for sid, code, state, note in results[:MAX_LINES]:
         n_ok += 1 if state == "ok" else 0
-        lines.append("- [%s] %s %s" % (state, _clean(sid), code or "连接失败"))
+        lines.append("- [%s] %s %s%s" % (state, _clean(sid), code or "连接失败",
+                                         (" (%s)" % note) if note else ""))
     if len(results) > MAX_LINES:
         lines.append("- …(共 %d 个源, 已截断)" % len(results))
     lines.append("(小结: %d 个源, ok %d / dead %d —— dead 不用再花任何工具调用)"

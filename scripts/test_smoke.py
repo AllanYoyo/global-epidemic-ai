@@ -2066,6 +2066,76 @@ class FetchGroupingTests(unittest.TestCase):
         self.assertNotIn("`", cleaned)
         self.assertNotIn("$", cleaned)
 
+    def test_http_get_fallback_chain(self):
+        # 2026-10-25 死源分诊修复(20死源中7个可复活): --http1.1 常驻 / SSL链错误
+        # 加 -k 重试 / 403 去 UA 重试 / 5xx 加长超时重试。桩 subprocess.run 逐层验证。
+        import probe_channels as pc
+
+        def resp(code, returncode=0):
+            return mock.Mock(returncode=returncode, stdout="\n%d" % code, stderr="")
+
+        def resp_fail(returncode):
+            # 真实 curl 在连接/SSL 阶段死亡时 stdout 为空(-w 不会执行)
+            return mock.Mock(returncode=returncode, stdout="", stderr="curl: (60) SSL")
+
+        calls = []
+        with mock.patch.object(pc.subprocess, "run",
+                               side_effect=lambda cmd, **k: (calls.append(cmd), resp(200))[1]):
+            code, _body, note = pc.http_get("https://x/", 5)
+        self.assertEqual((code, note), (200, ""))
+        self.assertIn("--http1.1", calls[0])
+        self.assertIn("-A", calls[0])
+
+        # SSL 链错误(curl 退出 60) → 第二次带 -k 重试成功
+        calls = []
+        def ssl_then_ok(cmd, **k):
+            calls.append(cmd)
+            return resp_fail(60) if len(calls) == 1 else resp(200)
+        with mock.patch.object(pc.subprocess, "run", side_effect=ssl_then_ok):
+            code, _body, note = pc.http_get("https://x/", 5)
+        self.assertEqual(code, 200)
+        self.assertEqual(note, "ssl-retry")
+        self.assertNotIn("-k", calls[0])
+        self.assertIn("-k", calls[1])
+
+        # 403 → 第二次不带 -A(无 UA)重试成功(aphis.usda.gov 型 WAF)
+        calls = []
+        def ua403_then_ok(cmd, **k):
+            calls.append(cmd)
+            return resp(403) if len(calls) == 1 else resp(200)
+        with mock.patch.object(pc.subprocess, "run", side_effect=ua403_then_ok):
+            code, _body, note = pc.http_get("https://x/", 5)
+        self.assertEqual(code, 200)
+        self.assertEqual(note, "no-ua-retry")
+        self.assertIn("-A", calls[0])
+        self.assertNotIn("-A", calls[1])
+
+        # 5xx → 加长超时重试成功(co-minagricultura 型慢站)
+        calls = []
+        def slow504_then_ok(cmd, **k):
+            calls.append(cmd)
+            return resp(504) if len(calls) == 1 else resp(200)
+        with mock.patch.object(pc.subprocess, "run", side_effect=slow504_then_ok):
+            code, _body, note = pc.http_get("https://x/", 6)
+        self.assertEqual(code, 200)
+        self.assertEqual(note, "slow-retry")
+        self.assertEqual(calls[1][calls[1].index("-m") + 1], "18")  # 6*3
+
+        # 全部失败: 保持死判, 不抛异常
+        with mock.patch.object(pc.subprocess, "run", side_effect=lambda *a, **k: resp_fail(60)):
+            code, _body, _note = pc.http_get("https://x/", 5)
+        self.assertEqual(code, 0)
+
+    def test_rufsvps_entry_url_fixed(self):
+        # B类修复: 旧路径 /ru/vse-soobshcheniya 已 404, 入口改站点根(200)
+        import scan_targets
+        for _t, _cn, _en, sid, url in scan_targets._pick("2026-10-25"):
+            if sid == "ru-fsvps":
+                self.assertEqual(url, "https://fsvps.gov.ru/")
+                break
+        else:
+            self.fail("ru-fsvps 不在当日清单")
+
     def _run_scan_text(self):
         with open(os.path.join(REPO, "scripts", "run_scan.sh"), encoding="utf-8") as f:
             return f.read()

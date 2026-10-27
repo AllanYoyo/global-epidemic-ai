@@ -336,7 +336,7 @@ sources:
   # ---- 俄罗斯(陆地边境邻国, ASF/HPAI 前线) ----
   - id: ru-fsvps
     name: 俄罗斯联邦兽医和植物检疫监督局(Rosselkhoznadzor)
-    url: https://fsvps.gov.ru/ru/vse-soobshcheniya
+    url: https://fsvps.gov.ru/
     coverage: [animal, plant]
     tier: 1
     schedule: am

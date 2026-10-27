@@ -119,21 +119,11 @@ def in_window(d, today, days=7):
 
 
 def curl(url, timeout=FETCH_TIMEOUT, max_bytes=400000):
-    """GET 一个 URL, 返回 (状态码, 文本)。失败返回 (0, '')。"""
-    try:
-        p = subprocess.run(
-            ["curl", "-m", str(timeout), "-sS", "-L", "-A", probe_channels.UA,
-             "--max-filesize", str(max_bytes), "-w", "\n%{http_code}", url],
-            capture_output=True, text=True, errors="replace", timeout=timeout + 5)
-    except (OSError, subprocess.TimeoutExpired):
-        return 0, ""
-    if p.returncode != 0 and not p.stdout:
-        return 0, ""
-    body, _, code = p.stdout.rpartition("\n")
-    try:
-        return int(code.strip() or 0), body
-    except ValueError:
-        return 0, ""
+    """GET 一个 URL, 返回 (状态码, 文本)。委托 probe_channels.http_get
+    (三层降级: --http1.1 / SSL 宽松重试 / 403 无 UA 重试 / 5xx 加长重试)。"""
+    code, body, _note = probe_channels.http_get(url, timeout,
+                                                want_body=True, max_bytes=max_bytes)
+    return code, body
 
 
 def extract_links(html, base_url):
@@ -257,9 +247,9 @@ def fetch(date_str, max_per_source=MAX_PER_SOURCE, max_total=MAX_TOTAL,
     already = len([f for f in os.listdir(raw_dir) if f.endswith(".meta.json")]) \
         if os.path.isdir(raw_dir) else 0
 
-    # 探测复用: [dead] 跳过(零工具调用, 与 Agent 版同口径)
+    # 探测复用: [dead] 跳过(零工具调用, 与 Agent 版同口径); note 是降级重试留痕
     alive = {}
-    for sid, code, state in probe_channels.probe(date_str):
+    for sid, code, state, _note in probe_channels.probe(date_str):
         alive[sid] = state == "ok"
 
     # 入口页**并行**抓取(21 源串行最坏 5 分钟会挤爆 10 分钟预算)

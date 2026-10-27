@@ -29,7 +29,7 @@
 | source.official | number | – | 官方域名库未收录该国时, 显式声明 `1` 表示该 URL 确为该国官方站点(归一化为 1); 缺省 0 |
 | source.official_note | string | 自动 | 走了 `source.official=1` 逃生口时自动写入的审计留痕: 说明该条 tier=1 **不是**官方域名库支撑、而是靠显式声明放行, 需人工复核 |
 | cross_sources | object[] | – | 其他独立来源 |
-| verification_status | string | 自动 | verified / single_source / unverified / false_positive / merged |
+| verification_status | string | 自动 | verified / single_source / unverified / false_positive / merged。**false_positive = 判定为非政策内容/误报**(会议、表彰、装运仪式、栏目页等): 2026-10-27 起这类记录**不进日报与推送卡片的"今日新增"**(只放真政策), 但仍保留在"待核实/误报"栏与台账里留痕, 可回溯、可撤销 |
 | verification_notes | string | – | 官方核验结论 |
 | checked_urls | string[] | – | 核验轨迹 |
 | first_seen / updated_at | datetime | 自动 | 首次入库/最近更新; update 不刷新 first_seen |

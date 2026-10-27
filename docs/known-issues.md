@@ -186,8 +186,24 @@
 - 建议处理: 企业微信改为**按条目边界分多条 POST**(webhook 单条上限是硬约束, 只能分条),
   或接入企微"图文卡片/markdown 卡片"接口提高单条容量。
 
-### 中 (建议排期修) · 历史遗留
+#### M19 · 同一措施被连续三天各存一条 —— event_id 依赖自由文本 policy_key, 措辞一变就换 id
+- 位置: `scripts/normalize.py`(`event_id` 计算, 主体取 `policy_key`)、
+  `scripts/extract_records.py`(`FIELD_TEMPLATE` 的 `policy_key` 行)、
+  `prompts/policy-extraction.md`(字段要点)
+- 现象(2026-10-27 生产实测): 阿根廷"因巴西禽场新城疫实施卫生措施"这一条**真政策**,
+  10-25 / 10-26 / 10-27 各存了一份, 三个 event_id 不同 —— 因为 `policy_key` 被写成
+  三种说法("巴西禽场新城疫卫生措施" / "因巴西禽场检测到新城疫出台卫生措施" / …)。
+  后果: 日报"今日新增"每天重复报同一件事; 台账里同一措施有多份, 影响统计被稀释。
+  (同期的"表彰福布斯""CPM 局会议"是**非政策内容**连存三天, 已由 2026-10-27 的
+  非政策闸门堵住; 但真政策的跨日重复仍在。)
+- 原因: `event_id = sha1(policy|country_en|policy_domain|action_type|主体|生效日期)`,
+  其中"主体"是模型**自由写就**的 `policy_key` —— 同一件事换个说法就换 id, 幂等合并失效。
+- 建议处理: ①把 `policy_key` 收敛成**规范化形态**(有文号用文号; 无文号用
+  "国家+领域+措施对象+生效日"的固定模板), 由 prompt 约束 + normalize 归一 ——
+  只改取值口径, 不动数据结构; ②或在入库端加"近 N 日同国同域同生效日"的相似合并
+  (需谨慎, 避免把不同措施误并); 建议先做 ①。
 
+### 中 (建议排期修) · 历史遗留
 #### B1 · `normalize.upsert()` 缺事务边界, 并发写有 read-modify-write 丢数据风险
 - 位置: `scripts/normalize.py:407-429`
 - 现象: `SELECT payload → 内存 merge → INSERT OR REPLACE` 没有显式 `BEGIN IMMEDIATE`。当前生产基本不并发 (cron 30-60 分钟一跑), 但 webapp "生成今日日报" 按钮触发的 `subprocess.run(report.py)` 会在另一进程再开 DB; 两个写者都读到同一行旧 payload, 各自 merge 后再 INSERT, 后写覆盖前写结果。

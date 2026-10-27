@@ -39,6 +39,8 @@ SNIP_BYTES = 4096           # 每份文档进 prompt 的摘录上限
 
 # 字段模板(与 Agent 版 prompt 同一套键, 空值模型会留空 → 存 null)
 FIELD_TEMPLATE = """record_type=policy
+is_policy_change=<yes|no>
+non_policy_note=<若 is_policy_change=no 写明类别(会议/表彰/装运/栏目页/解读等), 否则留空>
 title_cn=<中文标题>
 title_en=<英文标题>
 country_cn=<国名中文>
@@ -64,8 +66,34 @@ dim_response=<0-5 整数>
 dim_alignment=<0-5 整数>
 impact_rationale=<研判理由一句话>"""
 
+# ---- 收录范围规则(2026-10-27 补)----
+# 为什么补: 10-25~27 连续三天, 同一批非政策内容被当成政策入库 —— 表彰福布斯 3 份、
+# CPM 局会议 3 份、首批输华牛肉启运 3 份、土耳其栏目页/IPPC 活动页各 1 份。
+# 根因: Agent 路径的 prompts/policy-extraction.md 有"只收变化"和"目录页"规则, 但
+# P4 管线的 prompt 只有 FIELD_TEMPLATE(纯字段清单), **规则根本没进上下文** ——
+# 与 AGENTS.md 记的 92dbe1e 缺口同源(字段规则既不在上下文里又不许读)。
+# 现在把规则内联进 prompt, 并在脚本侧加确定性闸门(模型自判 + 关键词兜底)。
+SCOPE_RULES = """【收录范围(硬规则, 先判后抽)】
+本系统只监测**政策/措施的规则变化**:出台、修订、暂停、恢复、放宽、延期、准入/登记
+规则调整、标准/规范发布或公开征求意见、证书与标识要求、名单增删。
+先判断这段原文是不是政策变化, 再抽字段。is_policy_change=yes 只在原文能指出
+「哪条规则变了、变成什么」时才填; 否则填 no, 并在 non_policy_note 写明类别。
+下列内容**一律 is_policy_change=no**(哪怕它出现在官方网站的新闻里):
+- 会议与活动:会议/峰会/论坛/研讨会/座谈会/理事会/年会/大会/磋商期/活动公告/开幕/
+  闭幕/培训/参观/考察/调研 —— 会议本身不是措施, 会议通知更不是;
+- 领导与礼宾活动:出席/会见/接待/访问/陪同/见证/致辞/贺电/贺信/慰问/悼念/奠基/
+  揭牌/剪彩/落成/启动仪式/启运仪式/装船/首发 —— 领导出席不等于政策生效;
+- 荣誉与表彰:表彰/颁奖/获奖/入选榜单/百强榜/荣誉/嘉奖 —— 纯人物与排行新闻;
+- 栏目页与非正文页:栏目/专栏/导航/列表页/专题页/活动页/公告页/首页, 以及摘录只
+  有导航、脚本、关键词元数据、DataTable 之类的页面 —— 页面本身不是政策;
+- 解读与宣传:政策解读/宣讲/科普/综述/盘点/答记者问/宣传推广;
+- 单纯的贸易与履约事件:首批装运/到港/成交/发货/签署仪式, 除非原文同时给出
+  随之生效的准入或检疫规则(那要把规则本身抽出来, 而不是抽新闻)。
+若 is_policy_change=no, 仍然输出其余字段, 但本条会被脚本拒收不入库。"""
+
 PROMPT_TPL = """你是动植物检疫政策抽取器。从下面这份政策原文摘录里抽取一条政策记录。
 只输出 key=value 行(每行一个字段, 值内不要换行), 不输出任何解释、标题或代码块。
+%s
 字段与取值要求如下(%s 为发布日期, 超过 7 天的旧文件仍照实抽取, 入库端会拦):
 %s
 【存档元信息】
@@ -74,6 +102,55 @@ title=%s
 【原文摘录(逐字, 已截断)】
 %s
 现在只输出 key=value 行。"""
+
+
+# ---- 非政策内容筛查(确定性闸门)----
+# 第一道: 模型自判 is_policy_change=no(语义判断交给 LLM, 准确率最高)。
+# 第二道: 模型漏填/乱填时的关键词兜底 —— 命中"非政策信号"且**没有**"规范动作信号"
+#         才判非政策, 宁可放过也不误杀真政策。
+# 第三道: 模型自述"未见措施/仅含元数据"这类**自我否定**句, 直接判非政策
+#         (模型自己都说了这段没有措施, 再收录就是自欺)。
+NON_POLICY_SIGNALS = (
+    # 会议与活动
+    "会议", "会展", "论坛", "研讨会", "座谈会", "交流会", "招待会", "理事会", "年会",
+    "开幕", "闭幕", "讲座", "培训", "参观", "考察", "调研", "视察", "磋商", "研讨",
+    # 领导与礼宾
+    "出席", "会见", "接待", "访问", "陪同", "见证", "慰问", "悼念", "吊唁", "祝贺",
+    "贺电", "贺信", "致辞", "讲话", "揭牌", "揭幕", "剪彩", "奠基", "落成", "仪式",
+    "启运", "装船", "首发", "启幕", "到港", "抵达", "成交", "发货",
+    # 荣誉与表彰
+    "颁奖", "表彰", "获奖", "榜单", "百强", "荣誉", "嘉奖", "当选", "入选",
+    # 栏目页与非正文页
+    "栏目", "专栏", "导航", "列表页", "专题页", "活动页", "公告页", "首页", "专题",
+    "前瞻", "预告", "快讯", "简讯",
+    # 解读与宣传
+    "解读", "宣讲", "宣传", "推广", "科普", "综述", "盘点", "答记者问", "采访",
+    "报道", "喜讯",
+)
+# 规范动作信号: 出现这些说明原文确实动了规则, 即便同时有"会议"字样也要留
+# (例: 植物检疫措施委员会第71次会议**通过**了新标准)。
+NORMATIVE_SIGNALS = (
+    "法规", "条例", "指令", "决议", "决定", "公告", "通告", "公示", "标准", "规范",
+    "措施", "办法", "细则", "修正案", "修订", "废止", "生效", "实施", "准入", "禁止",
+    "限制", "允许", "许可", "证书", "检疫", "注册", "登记", "要求", "解禁", "暂停",
+    "恢复", "开放", "关闭", "豁免", "名录", "清单", "协议", "议定书", "草案", "征询",
+    "征求意见", "强制", "新规", "新要求",
+)
+# 文号形态(第247号令 / Portaria 962/2026 / No. 123): 强规范信号
+NORMATIVE_PATTERNS = (
+    r"第\s*\d+\s*号", r"[Nn]o\.?\s*\d+", r"[Nn]º\.?\s*\d+", r"\bG/SPS/N/", r"\bISPM\s*\d+",
+)
+# 模型自述"这段没有措施"的否定句: 直接判非政策。
+# 注意这层要盖住"领域关键词误命中"的情况 —— 例: 「多边植物检疫治理议程安排」
+# 里含"检疫"二字, 但那是机构议程不是检疫措施, 只靠关键词组合会漏放。
+NEGATION_SIGNALS = (
+    "未见具体", "未载明具体", "未见任何", "不含任何", "摘录仅含", "仅含页面",
+    "仅含关键词", "关键词元数据", "页面关键词", "无具体检疫措施", "无具体措施",
+    "未见具体检疫", "未见检疫措施", "非检疫措施", "无检疫措施", "仅为表彰",
+    "属会议安排", "属机构运行安排", "机构运行安排", "未见措施", "无相关措施",
+    "议程安排", "治理议程", "会议安排", "会务安排", "议事安排", "属机构运行",
+)
+
 
 
 def _clean(s):
@@ -114,24 +191,94 @@ def load_archives(date_str):
 
 
 def done_urls(date_str):
-    """已抽取过的 url 集合(extracted-policy.jsonl 逐行)。"""
-    p = os.path.join(DATA_DIR, "raw", date_str, "extracted-policy.jsonl")
+    """已抽取过的 url 集合(extracted-policy.jsonl 逐行) + 已拒收的 url(rejected-policy.jsonl)。
+
+    拒收的也要算"已处理": 否则同一篇会议/表彰新闻明天会被重新抽取一次,
+    白烧一次 LLM 调用, 还会反复占用当日存档配额。
+    """
     urls = set()
-    if os.path.isfile(p):
+    raw_dir = os.path.join(DATA_DIR, "raw", date_str)
+    for name in ("extracted-policy.jsonl", "rejected-policy.jsonl"):
+        p = os.path.join(raw_dir, name)
+        if not os.path.isfile(p):
+            continue
         with open(p, encoding="utf-8") as f:
             for line in f:
                 try:
-                    urls.add(json.loads(line).get("source", {}).get("url")
-                             or json.loads(line).get("url"))
+                    row = json.loads(line)
                 except ValueError:
-                    pass
-    return urls
+                    continue
+                if name == "extracted-policy.jsonl":
+                    urls.add((row.get("source") or {}).get("url") or row.get("url"))
+                else:
+                    urls.add(row.get("url"))
+    return {u for u in urls if u}
 
 
 def build_prompt(meta, url, body, today):
-    return PROMPT_TPL % (today, FIELD_TEMPLATE, _clean(url),
+    return PROMPT_TPL % (SCOPE_RULES, today, FIELD_TEMPLATE, _clean(url),
                          _clean(meta.get("title") or "")[:120],
                          _clean(body) if body else "(正文不可读, 仅凭标题与URL抽取, quote 填标题)")
+
+
+def _norm_flag(v):
+    """is_policy_change 取值归一: yes/no/是/否/true/false。"""
+    s = str(v or "").strip().lower()
+    if s in ("no", "否", "false", "n", "0"):
+        return "no"
+    if s in ("yes", "是", "true", "y", "1"):
+        return "yes"
+    return ""
+
+
+def screen_non_policy(rec):
+    """非政策内容筛查 —— 返回 (是否拒收, 原因)。三道闸门, 从严到宽。
+
+    ① 模型自判 is_policy_change=no → 拒收(模型自己说这不是政策变化);
+    ② 模型自述"未见措施/仅含元数据"等否定句 → 拒收(自我否定最可信);
+    ③ 关键词兜底: 命中"非政策信号"且**全文没有**"规范动作信号" → 拒收。
+
+    ③ 刻意保守: 宁可放过(留待人工/核验环节处理), 也不误杀真政策 —— 误杀会
+    直接丢掉一条真政策, 放过只是日报里多一条待核实项。
+    """
+    flag = _norm_flag(rec.get("is_policy_change"))
+    if flag == "no":
+        note = str(rec.get("non_policy_note") or "").strip()
+        return True, "模型判定非政策内容%s" % (("(%s)" % note[:40]) if note else "")
+
+    # 可用于判定的文本: 标题 + 摘要 + 原文引用(引用是原文原话, 信号最强)
+    src = rec.get("source") or {}
+    parts = [str(rec.get("title_cn") or ""), str(rec.get("title_en") or ""),
+             str(rec.get("summary_cn") or ""), str(src.get("quote") or "")]
+    text = " ".join(p for p in parts if p)
+    if not text.strip():
+        return False, ""
+
+    for sig in NEGATION_SIGNALS:
+        if sig in text:
+            return True, "模型自述无措施(%s)" % sig
+
+    non_hit = [s for s in NON_POLICY_SIGNALS if s in text]
+    if not non_hit:
+        return False, ""
+    norm_hit = [s for s in NORMATIVE_SIGNALS if s in text]
+    norm_hit += [p for p in NORMATIVE_PATTERNS if re.search(p, text)]
+    if norm_hit:
+        # 有规范动作信号 → 可能是"会议通过/宣布了某措施", 放行
+        return False, ""
+    return True, "非政策信号(%s)且无规范动作" % "、".join(non_hit[:3])
+
+
+def _write_rejected(raw_dir, rec, url, reason):
+    """拒收记录落盘(rejected-policy.jsonl) —— 既留审计痕迹, 也避免明天重抽同一页。"""
+    path = os.path.join(raw_dir, "rejected-policy.jsonl")
+    row = {"url": url, "title": rec.get("title_cn") or rec.get("title_en") or "",
+           "reason": reason, "source": rec.get("source") or {}}
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
 
 
 def call_model(prompt):
@@ -204,7 +351,7 @@ def extract(date_str, log=print):
         log("[extract_records] %s: 无待抽取存档(共 %d 份, 已抽 %d)"
             % (date_str, len(load_archives(date_str)), len(skip)))
         return 0, 0
-    n_ok = n_fail = 0
+    n_ok = n_fail = n_reject = 0
     log("[extract_records] %s: 待抽取 %d 份" % (date_str, len(archives)))
     for mp, meta, url, body in archives:
         prompt = build_prompt(meta, url, body, today)
@@ -231,10 +378,22 @@ def extract(date_str, log=print):
             _log_line(raw_dir, "| 抽取 | 失败 | %s %s |" % (url[:70], _clean(last)[:60]))
             log("[extract_records][WARN] 失败: %s (%s)" % (url[:70], _clean(last)[:80]))
             continue
+        # 非政策内容闸门(2026-10-27): 会议/表彰/装运/栏目页等不入库
+        reject, why = screen_non_policy(rec)
+        if reject:
+            n_reject += 1
+            _write_rejected(raw_dir, rec, url, why)
+            _log_line(raw_dir, "| 抽取 | 拒收 | 非政策内容 %s %s |"
+                      % (why[:40], url[:60]))
+            log("[extract_records] 拒收(非政策内容): %s (%s)"
+                % ((rec.get("title_cn") or url)[:60], why))
+            continue
         with open(out_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
         n_ok += 1
         log("[extract_records] ok: %s" % (rec.get("title_cn") or url)[:70])
+    if n_reject:
+        log("[extract_records] 本轮拒收非政策内容 %d 份(已写 rejected-policy.jsonl)" % n_reject)
     return n_ok, n_fail
 
 

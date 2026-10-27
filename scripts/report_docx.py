@@ -207,13 +207,15 @@ def _build_policy(date, data=None, out_dir=None, db_path=None):
                                    e.get("impact_rationale") or e.get("recommended_action") or ""))
 
     _h("待核实信息")
-    open_rows = [e for e in new if e.get("verification_status") in ("unverified", "false_positive")
+    # 待核实 + 今日被判误报(非政策)的记录: 误报不进"政策变化"正文, 但在这里留痕
+    open_rows = [e for e in (new + (data.get("flagged") or []))
+                 if e.get("verification_status") in ("unverified", "false_positive")
                  or (e.get("verification_status") == "verified" and not e.get("impact_level"))]
     if not open_rows:
         _para(doc, "无待核实/待研判政策记录。", color=GRAY)
     for e in open_rows:
         st = e.get("verification_status")
-        tag = {"unverified": "未核验", "false_positive": "存疑"}.get(st, "待研判")
+        tag = {"unverified": "未核验", "false_positive": "非政策内容(误报)"}.get(st, "待研判")
         _bullet(doc, "[%s] " % tag,
                 "%s @ %s(%s): %s" % (e.get("title_cn") or e.get("title_en") or e.get("summary_cn") or "（无标题）",
                                      e.get("country_cn") or "-", e["event_id"], e.get("summary_cn") or "见来源"),

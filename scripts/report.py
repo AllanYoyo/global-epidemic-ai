@@ -98,8 +98,12 @@ def collect(date, db_path=None):
     con.close()
     if not all_events:
         return None
-    new = [e for e in all_events if e.get("verification_status") != "merged"
-           and str(e.get("first_seen", ""))[:10] == date]
+    # 2026-10-27: 判为 false_positive(非政策内容/误报)的记录**不进"今日新增"** ——
+    # 日报与推送卡片只放真政策; 但仍保留在"待核实/误报"栏里留痕(见 make_open_items)。
+    today_all = [e for e in all_events if str(e.get("first_seen", ""))[:10] == date]
+    flagged = [e for e in today_all if e.get("verification_status") == "false_positive"]
+    new = [e for e in today_all
+           if e.get("verification_status") not in ("merged", "false_positive")]
     # 存量脏日期(入库端已拒收, 这里兜底): 今日新增桶里若还有解析不了的日期,
     # 保留条目(不能因为日期坏就把今天的政策从日报里抹掉), 但明确打 WARN,
     # 展示层标"日期异常"。
@@ -110,7 +114,8 @@ def collect(date, db_path=None):
                   % (policy_title(e), e.get("country_en") or "?",
                      e.get("event_date"), e.get("effective_date")))
     new.sort(key=sort_key)
-    return {"all": all_events, "new": new}
+    flagged.sort(key=sort_key)
+    return {"all": all_events, "new": new, "flagged": flagged}
 
 
 def policy_row(index, policy):
@@ -222,13 +227,21 @@ def make_policy_watchlist_diff(events):
 
 
 def make_open_items(events):
+    """待核实与误报清单(审计痕迹)。
+
+    2026-10-27: false_positive = 已判定为**非政策内容/误报**的记录(会议、表彰、
+    装运仪式、栏目页等)。它们不进"今日新增"(日报与推送卡片只放真政策), 但在这里
+    留一行痕, 让"我们抓到了但判定它不是政策"这件事可查、可回溯。
+    """
     icons = {"unverified": "❓", "false_positive": "⚠️"}
+    labels = {"unverified": "未核验", "false_positive": "非政策内容(误报)"}
     lines = []
     for e in events:
         status, name = e.get("verification_status"), policy_title(e)
         if status in icons:
-            lines.append("- %s %s @ %s(%s) 核验:%s: %s" % (
-                icons[status], name, e.get("country_cn"), e["event_id"], status, e.get("summary_cn") or "见来源"))
+            lines.append("- %s %s @ %s(%s) %s: %s" % (
+                icons[status], name, e.get("country_cn"), e["event_id"],
+                labels.get(status, status), e.get("summary_cn") or "见来源"))
         elif status == "verified" and not e.get("impact_level"):
             lines.append("- ⏳ %s @ %s(%s) 已核验、待影响研判: %s" % (
                 name, e.get("country_cn"), e["event_id"], e.get("summary_cn") or "见来源"))
@@ -239,7 +252,11 @@ def make_stats(all_events, new):
     by_status = {}
     for e in all_events:
         by_status[e.get("verification_status")] = by_status.get(e.get("verification_status"), 0) + 1
-    detail = " / ".join("%s %d" % (k, v) for k, v in sorted(by_status.items(), key=lambda kv: -kv[1]))
+    # 核验状态枚举在数据合同里是英文, 但面向用户的文案一律中文
+    status_cn = {"verified": "已核验", "single_source": "单源", "unverified": "未核验",
+                 "false_positive": "误报(非政策)", "merged": "已合并"}
+    detail = " / ".join("%s %d" % (status_cn.get(k, k or "未知"), v)
+                        for k, v in sorted(by_status.items(), key=lambda kv: -kv[1]))
     return "- 政策库累计: %d 条(%s)\n- 本期新增: %d 条\n" % (
         len(all_events), detail, len(new))
 
@@ -357,9 +374,11 @@ def main():
     except ValueError as exc:
         print("[错误] %s" % exc)
         return 2
-    if data is None: data = {"all": [], "new": []}
+    if data is None: data = {"all": [], "new": [], "flagged": []}
     new = data["new"]
-    replacements = {"{{date}}": args.date, "{{generated_at}}": now(), "{{headline}}": make_policy_headline(new), "{{new_table}}": make_policy_table(new), "{{focus_detail}}": make_policy_detail(new), "{{impact_summary}}": make_policy_impact_summary(new), "{{watchlist_diff}}": make_policy_watchlist_diff(new), "{{unverified}}": make_open_items(new), "{{stats}}": make_stats(data["all"], new), "{{sources}}": make_sources(new)}
+    # 待核实栏 = 今日新增里未核验的 + 今日被判误报(非政策)的 → 审计痕迹不丢
+    open_items = new + (data.get("flagged") or [])
+    replacements = {"{{date}}": args.date, "{{generated_at}}": now(), "{{headline}}": make_policy_headline(new), "{{new_table}}": make_policy_table(new), "{{focus_detail}}": make_policy_detail(new), "{{impact_summary}}": make_policy_impact_summary(new), "{{watchlist_diff}}": make_policy_watchlist_diff(new), "{{unverified}}": make_open_items(open_items), "{{stats}}": make_stats(data["all"], new), "{{sources}}": make_sources(new)}
     base = os.path.join(DATA_DIR, "reports", "%s-policy-report" % args.date)
     with open(POLICY_TEMPLATE, encoding="utf-8") as f: report_md = f.read()
     for key, value in replacements.items(): report_md = report_md.replace(key, value)

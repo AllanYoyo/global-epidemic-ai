@@ -2633,6 +2633,159 @@ class BriefTextContentTests(unittest.TestCase):
         self.assertEqual(self.pr._cut("短文本", 3800), "短文本")
 
 
+class NonPolicyScreenTests(unittest.TestCase):
+    """非政策内容闸门(2026-10-27)—— 会议/表彰/装运/栏目页不得当成政策入库。
+
+    背景: 10-25~27 连续三天, 同一批非政策内容被当成政策入库(表彰福布斯 3 份、
+    CPM 局会议 3 份、首批输华牛肉启运 3 份)。根因是 P4 管线的 prompt 只有字段清单,
+    「只收变化」的规则没进上下文(与 AGENTS.md 记的 92dbe1e 缺口同源)。
+    """
+
+    def setUp(self):
+        import extract_records
+        self.ex = extract_records
+
+    def _rec(self, **kw):
+        base = {"title_cn": "", "summary_cn": "", "source": {"quote": ""}}
+        base.update(kw)
+        return base
+
+    def test_model_says_no_is_rejected(self):
+        reject, why = self.ex.screen_non_policy(self._rec(
+            is_policy_change="no", non_policy_note="表彰新闻",
+            title_cn="巴西农业部长表彰入选福布斯全球农业百强榜的女性同仁"))
+        self.assertTrue(reject)
+        self.assertIn("非政策", why)
+
+    def test_meeting_notice_rejected(self):
+        reject, _ = self.ex.screen_non_policy(self._rec(
+            title_cn="国际植物保护公约战略规划小组（SPG）会议前瞻",
+            summary_cn="国际植物保护公约发布战略规划小组会议预告，属多边植物检疫治理议程安排。"))
+        self.assertTrue(reject)
+
+    def test_cpm_bureau_meeting_rejected(self):
+        reject, _ = self.ex.screen_non_policy(self._rec(
+            title_cn="国际植保公约植物检疫措施委员会（CPM）局将在巴西举行线下会议",
+            summary_cn="国际植保公约通报其植物检疫措施委员会局将在巴西举行线下会议，属机构运行安排通报。"))
+        self.assertTrue(reject)
+
+    def test_column_page_rejected(self):
+        reject, _ = self.ex.screen_non_policy(self._rec(
+            title_cn="土耳其农业产区（Tarım Havzaları）生产与支持模式",
+            summary_cn="土耳其农业与林业部栏目页面，摘录仅含页面关键词元数据。"))
+        self.assertTrue(reject)
+
+    def test_leader_attending_shipment_rejected(self):
+        reject, _ = self.ex.screen_non_policy(self._rec(
+            title_cn="巴西农业部长安德烈·德·保拉陪同东北部首批输华牛肉启运",
+            summary_cn="巴西农业部长赴桑托斯港见证东北部首批输华牛肉装船发运。"))
+        self.assertTrue(reject)
+
+    def test_self_negating_summary_rejected(self):
+        reject, _ = self.ex.screen_non_policy(self._rec(
+            title_cn="国际植物保护公约活动公告页(2026-10-27)",
+            summary_cn="存档为IPPC活动页面，摘录内容仅为DataTable脚本，未见具体检疫政策措施文本。"))
+        self.assertTrue(reject)
+
+    def test_real_policy_kept(self):
+        reject, why = self.ex.screen_non_policy(self._rec(
+            title_cn="得克萨斯州修订新大陆螺旋蝇疫区范围",
+            summary_cn="美国动植物卫生检验局通报得克萨斯州修订了新大陆螺旋蝇疫区的划定范围。"))
+        self.assertFalse(reject, why)
+
+    def test_meeting_that_adopts_standard_kept(self):
+        # 会议本身不是措施, 但"会议通过新标准"是措施 —— 不能误杀
+        reject, why = self.ex.screen_non_policy(self._rec(
+            title_cn="植物检疫措施委员会第71次会议通过新标准",
+            summary_cn="国际植物保护公约植物检疫措施委员会通过两项新的植物检疫标准。"))
+        self.assertFalse(reject, why)
+
+    def test_sanitary_measure_kept(self):
+        reject, why = self.ex.screen_non_policy(self._rec(
+            title_cn="因巴西禽场检测到新城疫实施的卫生措施",
+            summary_cn="阿根廷因巴西禽场检测到新城疫疫情宣布对巴西禽类及相关产品实施卫生限制措施。",
+            source={"quote": "Medidas sanitarias por deteccion de enfermedad de Newcastle"}))
+        self.assertFalse(reject, why)
+
+    def test_missing_flag_falls_back_to_keywords(self):
+        # 模型漏填 is_policy_change 时, 关键词兜底仍要拦下表彰新闻
+        reject, _ = self.ex.screen_non_policy(self._rec(
+            title_cn="农业部长向入选福布斯百强农业女性致敬",
+            summary_cn="巴西农业部网站发布新闻，宣布部长表彰入选福布斯全球农业百强影响力人物。"))
+        self.assertTrue(reject)
+
+    def test_prompt_carries_scope_rules(self):
+        # 规则必须真的进 prompt —— 否则模型无从判断(92dbe1e 同源缺口)
+        prompt = self.ex.build_prompt({"title": "t"}, "https://x/1", "正文", "2026-10-27")
+        self.assertIn("is_policy_change", prompt)
+        self.assertIn("表彰", prompt)
+        self.assertIn("只监测", prompt)
+
+    def test_rejected_urls_count_as_done(self):
+        # 拒收的 URL 也要算"已处理": 否则明天重抽同一篇, 白烧一次 LLM 调用
+        raw = tempfile.mkdtemp(prefix="rejected-")
+        day = os.path.join(raw, "raw", "2026-10-27")
+        os.makedirs(day)
+        with open(os.path.join(day, "rejected-policy.jsonl"), "w", encoding="utf-8") as f:
+            f.write(json.dumps({"url": "https://x/1", "reason": "非政策内容"},
+                               ensure_ascii=False) + "\n")
+        with mock.patch.object(self.ex, "DATA_DIR", raw):
+            urls = self.ex.done_urls("2026-10-27")
+        self.assertIn("https://x/1", urls)
+
+
+class FalsePositiveExclusionTests(unittest.TestCase):
+    """false_positive(非政策内容/误报)不进"今日新增", 但在待核实栏留痕。"""
+
+    def setUp(self):
+        import normalize
+        import report
+        self.n, self.report = normalize, report
+        self.db = os.path.join(tempfile.mkdtemp(prefix="fp-"), "t.db")
+
+    def _insert(self, eid, status, title):
+        con = self.n.open_db(self.db)
+        e = self.n.fill_defaults(_source_event(event_id=eid, title_cn=title))
+        e["verification_status"] = status
+        e["first_seen"] = "2026-10-27T08:00:00"
+        con.execute("INSERT OR REPLACE INTO events "
+                    "(event_id,payload,category,event_date,record_type,verification_status) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (eid, json.dumps(e, ensure_ascii=False), "policy",
+                     e["event_date"], "policy", status))
+        con.commit()
+        con.close()
+
+    def test_false_positive_excluded_from_new_but_kept_in_flagged(self):
+        self._insert("e-real", "unverified", "真政策")
+        self._insert("e-fp", "false_positive", "表彰新闻")
+        data = self.report.collect("2026-10-27", self.db)
+        titles = [e.get("title_cn") for e in data["new"]]
+        self.assertIn("真政策", titles)
+        self.assertNotIn("表彰新闻", titles)
+        flagged = [e.get("title_cn") for e in data.get("flagged") or []]
+        self.assertIn("表彰新闻", flagged)
+
+    def test_open_items_shows_false_positive_with_chinese_label(self):
+        e = {"verification_status": "false_positive", "title_cn": "表彰新闻",
+             "country_cn": "巴西", "event_id": "e-fp", "summary_cn": "纯表彰新闻"}
+        txt = self.report.make_open_items([e])
+        self.assertIn("非政策内容", txt)
+        self.assertNotIn("false_positive", txt)
+
+    def test_push_card_excludes_false_positive(self):
+        # 推送卡片只放真政策(卡片正文 = 今日新增)
+        import push_report
+        data = {"new": [{"event_id": "e-real", "title_cn": "真政策", "country_cn": "X",
+                         "action_type": "调整", "impact_level": "低影响",
+                         "impact_type": "中性", "summary_cn": "真政策摘要",
+                         "source": {"url": "https://x/1"}}],
+                "flagged": [{"event_id": "e-fp", "title_cn": "表彰新闻"}]}
+        txt = push_report.brief_text("2026-10-27", data)
+        self.assertIn("真政策", txt)
+        self.assertNotIn("表彰新闻", txt)
+
+
 class NormalizeValidateTests(unittest.TestCase):
     """P1#2: event_id 关联对象必填, 缺时 validate 拒收。"""
 

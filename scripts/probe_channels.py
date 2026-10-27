@@ -83,7 +83,9 @@ def http_get(url, timeout, want_body=False, max_bytes=None):
             return 0, "", "timeout"
         except OSError:
             return 0, "", "curl-missing"
-        if p.returncode != 0 and not p.stdout:
+        # 退出码非零即连接层失败(TLS 握手/证书/超时) —— 注意 -w 仍会输出 000,
+        # stdout 非空不代表拿到响应(2026-10-25 实测: rc=60 stdout="\n000")
+        if p.returncode != 0:
             return 0, "", "curl-exit-%s" % p.returncode
         body, _, tail = p.stdout.rpartition("\n")
         try:

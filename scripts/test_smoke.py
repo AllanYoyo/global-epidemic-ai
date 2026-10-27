@@ -2075,8 +2075,8 @@ class FetchGroupingTests(unittest.TestCase):
             return mock.Mock(returncode=returncode, stdout="\n%d" % code, stderr="")
 
         def resp_fail(returncode):
-            # 真实 curl 在连接/SSL 阶段死亡时 stdout 为空(-w 不会执行)
-            return mock.Mock(returncode=returncode, stdout="", stderr="curl: (60) SSL")
+            # 真实 curl 在连接/SSL 阶段死亡: rc!=0 但 -w 仍输出 000(stdout 非空)
+            return mock.Mock(returncode=returncode, stdout="\n000", stderr="curl: (60) SSL")
 
         calls = []
         with mock.patch.object(pc.subprocess, "run",

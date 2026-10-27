@@ -2733,6 +2733,29 @@ class NonPolicyScreenTests(unittest.TestCase):
             summary_cn="该批牛肉已通过检疫并装船发运，部长到场见证。"))
         self.assertTrue(reject)
 
+    def test_leader_attending_market_access_milestone_rejected(self):
+        # 2026-10-27 生产审计翻车案例: 标题里出现"准入"(名词)时, 只看全文会漏放 ——
+        # "标志对华牛肉**准入通道**正式启用" 被当成变更动作。标题优先规则专治这个。
+        reject, _ = self.ex.screen_non_policy(self._rec(
+            title_cn="巴西东北部牛肉首次输华启运：东北产区唯一获中国准入的SIF监管屠宰企业首发27吨冷冻牛肉",
+            summary_cn=("巴西农业和畜牧业部通报：农业部长于10月23日在伯南布哥州出席东北部首个输华"
+                        "冷冻牛肉集装箱启运仪式，该批27吨冷冻牛肉由Masterboi公司发出，运抵上海港，"
+                        "标志巴西对华牛肉市场准入通道实际启用。")))
+        self.assertTrue(reject)
+
+    def test_leader_witnessing_shipment_rejected(self):
+        reject, _ = self.ex.screen_non_policy(self._rec(
+            title_cn="巴西农业部长安德烈·德保拉见证首批东北部牛肉输华发运",
+            summary_cn="巴西农业部长安德烈·德保拉现场见证首批东北部牛肉输华发运，标志巴西牛肉对华市场准入通道实际启用。"))
+        self.assertTrue(reject)
+
+    def test_interception_enforcement_kept(self):
+        # 检疫执法处置(截获 + 熏蒸 + 退回/销毁)不是规则变化, 但对业务有价值 → 保留
+        reject, why = self.ex.screen_non_policy(self._rec(
+            title_cn="巴西在自意大利进口的900公斤板栗中截获检疫性有害生物Cydia splendana（栗小卷蛾）",
+            summary_cn="巴西农业和畜牧业部国际农业警戒局在圣保罗瓜鲁柳斯国际机场截获一批自意大利进口的900公斤板栗，经确认携带检疫性有害生物，紧急熏蒸后拟退回或销毁。"))
+        self.assertFalse(reject, why)
+
     def test_real_policy_kept(self):
         reject, why = self.ex.screen_non_policy(self._rec(
             title_cn="得克萨斯州修订新大陆螺旋蝇疫区范围",

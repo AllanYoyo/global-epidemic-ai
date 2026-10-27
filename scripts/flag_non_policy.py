@@ -33,13 +33,42 @@ def _mark_note(why):
     return "非政策内容(2026-10-27 批量标记): %s" % why
 
 
+def _unmark(event_id, db_path=None):
+    """撤回误报标记: 判定错了时用(恢复 unverified, 清掉误报备注)。"""
+    con = open_db(db_path)
+    if con is None:
+        print("[错误] 打开数据库失败: %s" % (db_path or "(默认路径)"))
+        return 2
+    try:
+        row = con.execute("SELECT payload FROM events WHERE event_id = ?",
+                           (event_id,)).fetchone()
+        if not row:
+            print("[错误] 找不到 event_id: %s" % event_id)
+            return 2
+        rec = json.loads(row[0])
+        rec["verification_status"] = "unverified"
+        rec.pop("verification_notes", None)
+        saved = upsert(con, rec, merge=False)
+        fs = str(saved.get("first_seen") or biz_today())[:10]
+        write_event_file(saved, os.path.join(DATA_DIR, "events", fs))
+    finally:
+        con.close()
+    print("[已撤回] %s 恢复 unverified | %s"
+          % (event_id, (saved.get("title_cn") or "")[:60]))
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description="把存量里的非政策内容标记为误报(false_positive)")
     ap.add_argument("--db-path", help="SQLite 路径覆盖")
     ap.add_argument("--date", help="只处理某个入库日(first_seen 的日期, YYYY-MM-DD)")
     ap.add_argument("--apply", action="store_true",
                     help="真正写入(默认只列候选, 便于人工过一眼)")
+    ap.add_argument("--unmark", metavar="EVENT_ID",
+                    help="撤回某个 event_id 的误报标记(恢复 unverified)—— 判定错了时用")
     args = ap.parse_args()
+    if args.unmark:
+        return _unmark(args.unmark, args.db_path)
     con = open_db(args.db_path)
     if con is None:
         print("[错误] 打开数据库失败: %s" % (args.db_path or "(默认路径)"))

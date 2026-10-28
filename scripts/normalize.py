@@ -605,6 +605,20 @@ def fill_defaults(e):
     else:
         precision = precision or "day"
     e["event_date"], e["date_precision"] = d, precision
+    # products / target_countries: 合同是**数组**; P4 键值路径给的是逗号分隔字符串。
+    # 字符串直接进 join/sorted 会逐字符拆(2026-10-28 实测: 日报商品列渲染成
+    # p、o、u、l、t、r、y…; event_id 的 subject 在无 policy_key 时也随字符序失稳),
+    # 入库端统一归一成数组, 各消费方(report/docx/webapp/risk)不再各自兜底。
+    for key in ("products", "target_countries"):
+        v = e.get(key)
+        if isinstance(v, str):
+            e[key] = [p.strip() for p in
+                      v.replace("，", ",").replace("；", ";").replace(";", ",").split(",")
+                      if p.strip()]
+        elif v is None or v == "":
+            e[key] = []
+        elif not isinstance(v, list):
+            e[key] = [str(v)]
     e.setdefault("policy_domain", "measures")
     e.setdefault("action_type", "调整")
     e.setdefault("policy_status", "已生效")

@@ -5,7 +5,7 @@
 为什么需要它: Agent 会话式抽取对"轮次上限/Token 耗尽/阶段超时"任何一种死法
 都是整轮全损(10-25 三连败实证)。本脚本把抽取切成**每份存档一次单轮调用**:
 
-  对每个已存档但未抽取的 meta.json → snip 摘录(≤4KB) + 字段模板拼 prompt
+  对每个已存档但未抽取的 meta.json → 剥 head 后取正文摘录(≤8KB) + 字段模板拼 prompt
   → 经 HERMES_RUN_CMD 模板发起 hermes -z(单轮, 无工具循环)
   → 模型输出 key=value 行 → 本地解析校验 → 追加 extracted-policy.jsonl
 
@@ -35,7 +35,8 @@ from normalize import biz_today, DATA_DIR
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CALL_TIMEOUT = 150          # 单次微调用上限(秒)
-SNIP_BYTES = 4096           # 每份文档进 prompt 的摘录上限
+SNIP_BYTES = 4096           # 每份文档进 prompt 的摘录上限(实际窗口 = SNIP_BYTES*2 字符)
+FILE_READ_BYTES = 1 << 20   # 单份存档最大读取字节(生产实测最大 ~340KB, 1MB 兜极端页)
 
 # 字段模板(与 Agent 版 prompt 同一套键, 空值模型会留空 → 存 null)
 FIELD_TEMPLATE = """record_type=policy
@@ -183,8 +184,44 @@ def _clean(s):
     return str(s or "").replace('"', "」").replace("`", "").replace("$", "")
 
 
+def _page_text(raw_bytes, is_html):
+    """存档字节 → 压缩空白后的可见文本(html 先剥 head/script/style/注释/标签)。"""
+    text = raw_bytes.decode("utf-8", errors="replace")
+    if is_html:
+        # 先剥整个 <head>(内联 CSS/JS/meta 常占前 8KB+, 10-28 事故根因),
+        # 再剥正文中散布的脚本/样式/注释, 最后去标签。
+        text = re.sub(r"<head\b.*?</head\s*>", " ", text, flags=re.S | re.I)
+        text = re.sub(r"<script.*?</script>|<style.*?</style>", " ", text,
+                      flags=re.S | re.I)
+        text = re.sub(r"<!--.*?-->", " ", text, flags=re.S)
+        text = re.sub(r"<[^>]+>", " ", text)
+    return re.sub(r"\s+", " ", text)
+
+
+def _body_window(text, title):
+    """从可见文本里取正文窗口(≤SNIP_BYTES*2 字符)。
+
+    短页全文进 prompt; 长页优先锚定标题(文章 H1 处下刀), 锚不中则跳过页首
+    导航区固定取窗。10-28 教训: 旧版只读文件头 8KB, 大 head 页面
+    (argentina.gob.ar/gov.kz/ippc.int 等)模型只看到标题+样式表残片,
+    12 条存档全被「无正文」拒收, 真政策(阿根廷新城疫分区化措施)被误杀。
+    """
+    if len(text) <= SNIP_BYTES * 2:
+        return text
+    anchor = re.sub(r"\s+", " ", str(title or "")).strip()[:40]
+    if anchor:
+        p = text.find(anchor)
+        if p >= 0:
+            return text[max(0, p - 100):max(0, p - 100) + SNIP_BYTES * 2]
+    return text[400:400 + SNIP_BYTES * 2]
+
+
 def load_archives(date_str):
-    """[(meta_path, meta_dict, 正文文本), ...] —— 正文只收 .txt/.html(可解码)。"""
+    """[(meta_path, meta_dict, 正文文本), ...] —— 正文只收 .txt/.html(可解码)。
+
+    读**整个文件**(上限 FILE_READ_BYTES)而不是文件头: 政府站 <head> 普遍
+    数 KB 起步, 只读头部会让模型看不到正文(2026-10-28 全拒事故根因)。
+    """
     raw_dir = os.path.join(DATA_DIR, "raw", date_str)
     out = []
     for mp in sorted(glob.glob(os.path.join(raw_dir, "*.meta.json"))):
@@ -201,14 +238,9 @@ def load_archives(date_str):
             if os.path.isfile(p):
                 try:
                     with open(p, "rb") as f:
-                        raw = f.read(SNIP_BYTES * 2)
-                    text = raw.decode("utf-8", errors="replace")
-                    # html: 去标签留正文, 压空白
-                    if ext == ".html":
-                        text = re.sub(r"<script.*?</script>|<style.*?</style>", " ",
-                                      text, flags=re.S | re.I)
-                        text = re.sub(r"<[^>]+>", " ", text)
-                    body = re.sub(r"\s+", " ", text)[:SNIP_BYTES * 2]
+                        raw = f.read(FILE_READ_BYTES)
+                    body = _body_window(_page_text(raw, ext == ".html"),
+                                        meta.get("title") or "")
                 except OSError:
                     pass
                 break
@@ -258,11 +290,12 @@ def _norm_flag(v):
 
 
 def screen_non_policy(rec):
-    """非政策内容筛查 —— 返回 (是否拒收, 原因)。三道闸门, 从严到宽。
+    """非政策内容筛查 —— 返回 (是否拒收, 原因)。四道闸门, 从严到宽。
 
     ① 模型自判 is_policy_change=no → 拒收(模型自己说这不是政策变化);
     ② 模型自述"整段没有措施/只有页面元数据" → 拒收(整体性否定最可信);
-    ③ 关键词兜底: 命中"非政策信号"且**全文没有**"规范动作" → 拒收。
+    ③ 标题优先: 标题含礼宾/活动信号且标题本身无规范动作 → 拒收;
+    ④ 关键词兜底: 命中"非政策信号"且**全文没有**"规范动作" → 拒收。
        规范动作 = 变更动词 + 政策对象 **同时**出现(或命中文号形态)。
     """
     flag = _norm_flag(rec.get("is_policy_change"))

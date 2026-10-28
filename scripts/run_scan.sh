@@ -297,7 +297,7 @@ case "$MODE" in
    **进度自检**: 扫到第 3 个通道时 data/raw/$SCAN_DATE/ 下必须已有存档文件 —— 没有就说明你在囤积候选, 立即停下先把已找到的存档入库再继续。本轮结束前清单里的候选若还没存档, 视为未完成。
    写完不回读、不打印验证 —— 记录对不对由加工段 normalize 校验兜底。
 6) 每条必须有 source.url 与 source.quote(≤120 字, 逐字摘自存档文件); source.publish_date 用页面自己的发布日期, 不得用抓取日; 原文没有的信息填 null, 严禁编造; 旧闻(超 7 天)与第三方站点不写入, 只在 search-log.md 记一行线索。
-7) 当日存档上限 12 个文件(约 6 条), 触顶即停, 剩余通道记进 search-log.md; 时间到立刻交卷。
+7) 单轮交付存档 ≤12 条(经 collect.py 落盘, 代码强制防穷举), 触顶或时间到立刻交卷, 剩余通道记进 search-log.md。
 【交付】data/raw/$SCAN_DATE/ 下: 存档(html+meta) / candidates.jsonl / extracted-policy.jsonl / search-log.md(逐通道一行状态)。哪怕 0 条也要创建两个空的 .jsonl 文件。
 【红线】严禁 --broadcast; 严禁穷举下载 PDF; 严禁第三方站点当 tier=1; 严禁运行 normalize/risk/report/push_report(抢跑会把 first_seen 记错日子)。"
     PROMPT_PROCESS="执行 $SCAN_DATE 政策变化**加工阶段**(东八区)。输入是本地文件, 不联网检索; 轻收尾, 正常几分钟。**严禁 read_file 或 cat 仓库规则文件**(SKILL.md/AGENTS.md/scripts), 用法都在本 prompt。
@@ -717,17 +717,16 @@ $HEALTH_BLOCK"
     review)    _fresh "$PENDING_FLAG" || MISSING="$MISSING 审阅待审标记(.review-pending)" ;;
     none)      : ;;   # 本轮不扩散, 只要求日报产物
   esac
-  # 存档量上限(2026-10-22): 正常一轮只存 2 个文件(10-21 实测); 存了 20+ 个说明
-  # Agent 在穷举下载(逐条下 WTO 通报 PDF 核发布日期)—— 10-22 就是这么跑的,
-  # 40 分钟没完。这道终检兜住"绕过 collect.py 直接往 raw 目录倾倒"的情况。
-  # 2026-10-24 修正: 原先「数所有非 meta 文件」把取数段强制创建的交付文件
-  # (candidates.json / extracted-policy.json / search-log.md, prompt 要求哪怕
-  # 0 条也要建空数组)与加工段产物(policy-findings.md)全数进去 —— 安静的一天
-  # RAW_N 也 ≥3, 「当日有存档却 0 入库」恒触发, 每天必红。改为只数
-  # *.meta.json(collect.py 每条存档恰写一个), 计数即真实存档条数, 交付文件天然排除。
+  # 存档量异常终检(2026-10-22 引入, 2026-10-28 改口径): 正常一轮由 fetch_pages
+  # 开车, 单源 ≤2 条、47 源理论天花板 ~94 条/日 —— 超过 200 只可能是**绕过
+  # fetch_pages/collect.py 直接往 raw 目录倾倒**或穷举下载(10-22 Agent 逐条下
+  # WTO 通报 PDF 就是这么跑的, 40 分钟没完)。日上限 12 已于 2026-10-28 放开
+  # (取数零 LLM 后不再是覆盖瓶颈), 这道终检只保留防穷举的宽松红线。
+  # 2026-10-24 修正: 只数 *.meta.json(collect.py 每条存档恰写一个), 计数即
+  # 真实存档条数, 交付文件天然排除。
   RAW_N="$(find "$DATA_DIR/raw/$SCAN_DATE" -maxdepth 1 -type f -name '*.meta.json' 2>/dev/null | wc -l | tr -d ' ')"
-  if [ "${RAW_N:-0}" -gt 12 ]; then
-    MISSING="$MISSING 存档量超限(当轮 ${RAW_N} 条存档 > 12, 疑似穷举下载)"
+  if [ "${RAW_N:-0}" -gt 200 ]; then
+    MISSING="$MISSING 存档量异常(当轮 ${RAW_N} 条存档 > 200, 疑似穷举下载或绕过取数器直写)"
   fi
   # ---- 当日入库条数终检(2026-10-22, 假成功的最后一道口子) ----
   # 实机复现: 阶段 2 加工超时被杀, 但 Agent 在被杀前一刻跑完了 report.py, 于是

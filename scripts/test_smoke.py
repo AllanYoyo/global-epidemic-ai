@@ -1755,12 +1755,12 @@ class ScanFailureGuardTests(unittest.TestCase):
         self.assertIn("下载 PDF ≤ 6", text)
 
     def test_collect_enforces_daily_archive_cap(self):
-        # 存档量上限必须是**代码强制**(不依赖 Agent 自律), 且在抓取之前就拒绝
+        # 存档量上限必须是**代码强制**(不依赖 Agent 自律), 且在抓取之前就拒绝。
         # 2026-10-27(A1): 上限口径 = **存档条数**(数 *.meta.json)。原实现数的是
         # 目录文件总数, 而每条存档产出两个文件(正文 + .meta.json), 再叠加取数段的
-        # 交付文件, 于是"上限 12"实际只存得下 6 条 —— 而全链路其余环节
-        # (fetch_pages 的 already / run_scan.sh 的 RAW_N 终检)都按条数计,
-        # 两套口径不一致, 每日覆盖被悄悄压掉一半。
+        # 交付文件, 于是"上限 12"实际只存得下 6 条。
+        # 2026-10-28: 默认上限放开为 0(不限, P4 取数零 LLM 后 12 条/日反成覆盖
+        # 瓶颈); 本测试改用显式 --max-archives-per-day 12 验证强制机制本身。
         import collect
         raw_dir = os.path.join(self.tmp, "raw", "2026-10-22")
         os.makedirs(raw_dir, exist_ok=True)
@@ -1770,7 +1770,8 @@ class ScanFailureGuardTests(unittest.TestCase):
         buf = io.StringIO()
         with mock.patch.object(collect, "DATA_DIR", self.tmp), \
              mock.patch("sys.argv", ["collect.py", "--url", "https://example.com/1",
-                                     "--title", "测试", "--date", "2026-10-22"]), \
+                                     "--title", "测试", "--date", "2026-10-22",
+                                     "--max-archives-per-day", "12"]), \
              redirect_stdout(buf):
             rc = collect.main()
         self.assertEqual(rc, 1)
@@ -1778,6 +1779,30 @@ class ScanFailureGuardTests(unittest.TestCase):
         self.assertIn("已有 12 条存档", buf.getvalue())
         # 触顶后不应新增文件
         self.assertEqual(len(os.listdir(raw_dir)), 12)
+
+    def test_collect_default_cap_is_unlimited(self):
+        # 2026-10-28: 默认上限 0 = 不限 —— Agent 时代 12 条/日防的是逐条下载
+        # 拖垮时长; P4 取数零 LLM 后抽取消耗只跟存档数走且单份极小, 12 条/日
+        # 反把覆盖压死(10-28 实测配额被栏目页耗尽)。防洪水位移到单源 ≤2。
+        import collect
+        self.assertEqual(collect.DEFAULT_MAX_ARCHIVES_PER_DAY, 0)
+        raw_dir = os.path.join(self.tmp, "raw", "2026-10-28")
+        os.makedirs(raw_dir, exist_ok=True)
+        for i in range(12):
+            with open(os.path.join(raw_dir, "%02d-x.meta.json" % i), "w", encoding="utf-8") as f:
+                f.write("{}")
+        body = os.path.join(self.tmp, "body-unlim.txt")
+        with open(body, "w", encoding="utf-8") as f:
+            f.write("正文")
+        buf = io.StringIO()
+        with mock.patch.object(collect, "DATA_DIR", self.tmp), \
+             mock.patch("sys.argv", ["collect.py", "--url", "https://example.com/1",
+                                     "--file", body, "--title", "第13条",
+                                     "--date", "2026-10-28"]), \
+             redirect_stdout(buf):
+            rc = collect.main()
+        self.assertEqual(rc, 0)
+        self.assertEqual(collect.count_archives(raw_dir), 13)
 
     def test_collect_delivery_files_do_not_consume_archive_quota(self):
         # A1 的另一半: 交付文件(candidates.jsonl / search-log.md /
@@ -1841,8 +1866,11 @@ class ScanFailureGuardTests(unittest.TestCase):
 
     def test_run_scan_checks_archive_volume(self):
         # 终检: 绕过 collect.py 直接往 raw 目录倾倒也要被识破
+        # 2026-10-28: 日上限 12 已放开(0=不限), 终检改为防穷举宽松红线(>200)
         text = self._run_scan_text()
-        self.assertIn("存档量超限", text)
+        self.assertIn("存档量异常", text)
+        self.assertNotIn("存档量超限", text)
+        self.assertIn("-gt 200", text)
 
     def test_run_scan_counts_meta_files_only(self):
         # 2026-10-24 体检 H2: 原先 RAW_N 数"所有非 meta 文件", 把取数段强制创建的
@@ -2434,6 +2462,61 @@ class PipelineP4Tests(unittest.TestCase):
             got = fetch_pages.verify_dates(to_verify, today)
         self.assertEqual([g[0] for g in got],
                          ["https://www.sag.gob.cl/noticias/sin-fecha-titulo-largo-del-articulo"])
+
+    def test_fetch_pages_max_total_zero_means_unlimited(self):
+        # 2026-10-28: 当日存档总上限默认 0 = 不限(防洪水位移到单源 ≤2)。
+        # 关键回归: 源循环里的触顶判断必须带 max_total 真值判断 —— 否则
+        # max_total=0 时 `already+n >= 0` 恒真, 所有源被当「已达上限」跳过,
+        # 覆盖面静默归零。
+        import fetch_pages
+        self.assertEqual(fetch_pages.MAX_TOTAL, 0)
+        with open(os.path.join(REPO, "scripts", "fetch_pages.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("if max_total and already + n_archived >= max_total:", src)
+        self.assertIn("(max_total and already + n_archived >= max_total)", src)
+        self.assertNotIn("if already + n_archived >= max_total:", src)
+
+    def test_extract_records_reads_body_beyond_head(self):
+        # 2026-10-28 全拒事故回归: 旧版只读存档文件头 8KB, 政府站 <head>(内联
+        # CSS/JS)普遍超过它 —— 模型只看到「标题+样式表残片」, 12 条存档全被
+        # 非政策闸门以「无措施正文」拒收, 真政策(阿根廷新城疫分区化措施)被误杀。
+        # 现在: 剥整个 <head> 后读**全文**取正文窗口, 8KB 之后的正文必须可见。
+        import extract_records as er
+        with tempfile.TemporaryDirectory() as tmp:
+            raw_dir = os.path.join(tmp, "raw", "2026-10-28")
+            os.makedirs(raw_dir)
+            with open(os.path.join(raw_dir, "01-x.meta.json"), "w", encoding="utf-8") as f:
+                json.dump({"url": "https://www.argentina.gob.ar/noticias/x",
+                           "title": "Medidas sanitarias por Newcastle"}, f, ensure_ascii=False)
+            head = "<html><head><style>body{color:#fff;" + "x" * 12000 + \
+                   "}</style><script>var a=1;</script></head>"
+            body_html = ("<body><nav>Inicio Buscar Menú Contacto</nav>"
+                         "<h1>Medidas sanitarias por Newcastle</h1>"
+                         "<p>SENASA aplicó herramienta de zonificación "
+                         "ZONEMARK-9B7X para garantizar la continuidad "
+                         "del comercio de mercancías aviares.</p></body></html>")
+            with open(os.path.join(raw_dir, "01-x.html"), "w", encoding="utf-8") as f:
+                f.write(head + body_html)
+            with mock.patch.object(er, "DATA_DIR", tmp):
+                archives = er.load_archives("2026-10-28")
+            self.assertEqual(len(archives), 1)
+            body = archives[0][3]
+            self.assertIn("ZONEMARK-9B7X", body)      # 8KB 之后的正文可见
+            self.assertIn("zonificación", body)
+            self.assertNotIn("body{color", body)      # head 里的 CSS 已剥除
+            self.assertNotIn("var a=1", body)         # head 里的脚本已剥除
+
+    def test_body_window_long_page_anchors_or_skips_chrome(self):
+        # 长页(可见文本 > 8KB)取窗: 锚得到标题 → 从文章处下刀; 锚不到 →
+        # 跳过页首导航区固定取窗。两种路径都必须返回 ≤8KB 窗口。
+        import extract_records as er
+        filler = "导航 导航 " * 3000                       # ~18K 字符页首
+        article = "ARTICLE-START 暂停两国禽肉进口直至审计完成"
+        got = er._body_window(filler + article + "尾部", "ARTICLE-START 暂停两国禽肉进口")
+        self.assertIn("ARTICLE-START", got)
+        self.assertLessEqual(len(got), er.SNIP_BYTES * 2)
+        got2 = er._body_window("x" * 20000, "")           # 锚不中 → 400 偏移兜底
+        self.assertEqual(len(got2), er.SNIP_BYTES * 2)
 
     def test_extract_records_parse_and_validate(self):
         # key=value 输出 → 嵌套 source.*; quote >120 截断; 缺标题拒收

@@ -43,7 +43,14 @@ BIZ_TZ_OFFSET_HOURS = 8
 # *.meta.json 计**存档条数**, 两套口径不一致 → 系统各处以为能存 12 条, 真实每日
 # 只有 6 条, 47 个源的每日覆盖被悄悄压掉一半。
 # 现在统一按存档条数计: 每条存档恰写一个 .meta.json, 数它即得条数; 交付文件不占配额。
-DEFAULT_MAX_ARCHIVES_PER_DAY = 12
+#
+# 2026-10-28 放开日上限(默认 0 = 不限): 上限诞生于 Agent 会话取数时代, 防的是
+# Agent 逐条下载把一轮拖到 40 分钟; P4 确定性管线后取数零 LLM(curl), 抽取成本
+# 只跟存档数走且单份极小(~2-4K token / ~20s), 12 条/日反而成了覆盖面瓶颈
+# (10-28 实测: 配额被栏目页/列表页耗尽, 12 条全拒、真政策一条没进库)。
+# 防洪水位改由**单源 ≤2 条**(fetch_pages.MAX_PER_SOURCE)承担: 47 源理论天花板
+# ~94 条/日, 极端日也远在日预算(400 万折合)与 run_scan 2400s 超时之内。
+DEFAULT_MAX_ARCHIVES_PER_DAY = 0
 
 
 def biz_now():
@@ -87,7 +94,8 @@ def main():
     ap.add_argument("--date", default=biz_now()[:10], help="归档日期目录, 默认今天(东八区)")
     ap.add_argument("--kind", choices=["html", "txt"], help="保存扩展名(默认: 有 --file 为 txt, 否则 html)")
     ap.add_argument("--max-archives-per-day", type=int, default=None,
-                    help="当日存档**条数**上限(触顶即拒绝新增), 默认 12; 0 = 不限。"
+                    help="当日存档**条数**上限(触顶即拒绝新增), 默认 0 = 不限"
+                         "(2026-10-28 起, P4 取数零 LLM 后日上限不再是覆盖瓶颈); "
                          "按 *.meta.json 计, 交付文件(candidates.jsonl/search-log.md 等)不占配额")
     ap.add_argument("--max-files-per-day", type=int, default=None,
                     help="[旧名, 已更名] 当日存档上限; 语义同 --max-archives-per-day"

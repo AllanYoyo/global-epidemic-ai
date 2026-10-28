@@ -7,7 +7,8 @@
 用户约束: 全链路 ≤10 分钟。本脚本把取数完全确定性化(零 LLM):
 
   当日源清单(scan_targets) → 探测复用(probe_channels, [dead] 跳过)
-  → curl 入口页 → 抽链接 + 日期窗口过滤(7 天) → collect.py 存档(≤12 **条**/日)
+  → curl 入口页 → 抽链接 + 日期窗口过滤(7 天) → collect.py 存档(单源 ≤2 条,
+  当日总条数默认不限 —— 2026-10-28 起, 取数零 LLM 后日上限不再是覆盖瓶颈)
   → candidates.jsonl 逐条追加 → search-log.md 逐源留痕
 
 取舍(诚实登记): 链接启发式的召回率低于 Agent 浏览 —— 无日期线索的链接只记
@@ -16,7 +17,7 @@ search-log 当线索不存档; 需要搜索才能发现的条目(输华议定书
 
 用法(由 run_scan.sh 调用):
   python3 scripts/fetch_pages.py --date 2026-10-25
-  python3 scripts/fetch_pages.py --date 2026-10-25 --max-per-source 2 --max-total 12
+  python3 scripts/fetch_pages.py --date 2026-10-25 --max-per-source 2 --max-total 0
 退出码: 0=跑完(哪怕 0 条, 安静日合法); 2=参数/环境错误。
 """
 
@@ -37,8 +38,8 @@ import collect as collect_mod   # 存档计数口径与 collect.py 同源(数 *.
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FETCH_TIMEOUT = 15          # 单页 curl 超时(秒)
-MAX_PER_SOURCE = 2          # 每源最多存档数
-MAX_TOTAL = 12              # 当日存档上限(与 collect.py 同口径, 不越过)
+MAX_PER_SOURCE = 2          # 每源最多存档数(真正的防洪水位: 47 源理论天花板 ~94 条/日)
+MAX_TOTAL = 0               # 当日存档总上限, 0 = 不限(2026-10-28 放开, 见 collect.py 同段注释)
 
 # 链接启发式: 明显非文章的路径段(导航/页脚/订阅类)
 SKIP_PATH = re.compile(
@@ -236,8 +237,8 @@ def fetch(date_str, max_per_source=MAX_PER_SOURCE, max_total=MAX_TOTAL,
           max_archives_per_day=0, log=print):
     """max_archives_per_day: 透传给 collect.py 的当日存档条数上限。
 
-    0 = 不限(测试放量用)。日常跑批不传 —— collect 默认 12 与 MAX_TOTAL=12
-    同口径双保险; 受控测试需要抬高时由调用方显式给值, 不改 collect 默认。
+    0 = 不限。collect 默认 0 与 MAX_TOTAL=0 同口径; 真正的防洪水位是
+    max_per_source(单源 ≤2)。受控测试需要收紧时由调用方显式给值。
     2026-10-27: 旧名 max_files_per_day 语义是"目录文件数", 与全链路的"存档条数"
     口径不一致(每条存档 = 正文 + .meta.json 两个文件), 实际只存得下 6 条 ——
     现在统一为**存档条数**。
@@ -283,7 +284,7 @@ def fetch(date_str, max_per_source=MAX_PER_SOURCE, max_total=MAX_TOTAL,
         if not alive.get(sid, False):
             log_lines.append("| %s | 不可用 | 预探 dead |" % sid)
             continue
-        if already + n_archived >= max_total:
+        if max_total and already + n_archived >= max_total:
             log_lines.append("| %s | 跳过 | 当日存档已达上限 %d |" % (sid, max_total))
             continue
         code, html = pages.get(sid, (0, ""))
@@ -297,7 +298,7 @@ def fetch(date_str, max_per_source=MAX_PER_SOURCE, max_total=MAX_TOTAL,
         cands.sort(key=lambda x: x[2] or today, reverse=True)
         took = 0
         for link, title, d in cands:
-            if took >= max_per_source or already + n_archived >= max_total:
+            if took >= max_per_source or (max_total and already + n_archived >= max_total):
                 break
             if link in done_urls:
                 continue
@@ -333,7 +334,8 @@ def main():
     ap.add_argument("--max-per-source", type=int, default=MAX_PER_SOURCE)
     ap.add_argument("--max-total", type=int, default=MAX_TOTAL)
     ap.add_argument("--max-archives-per-day", type=int, default=None,
-                    help="透传 collect.py 的当日存档条数上限(默认 12 与日常同口径; 0=不限, 测试放量用)")
+                    help="透传 collect.py 的当日存档条数上限(默认 0=不限, 与日常同口径; "
+                         "设正数可收紧, 测试/控量用)")
     ap.add_argument("--max-files-per-day", type=int, default=None,
                     help="[旧名, 已更名] 同 --max-archives-per-day")
     args = ap.parse_args()
@@ -346,7 +348,7 @@ def main():
             return 2
         cap = args.max_files_per_day
     if cap is None:
-        cap = 12
+        cap = collect_mod.DEFAULT_MAX_ARCHIVES_PER_DAY  # 与 collect.py 默认同源(0=不限)
     try:
         n, log_lines, capped = fetch(args.date, args.max_per_source, args.max_total, cap)
     except (OSError, ValueError) as exc:

@@ -58,7 +58,14 @@ def _val(s):
 
 
 def parse_sources(text):
-    """源表: id -> {name, url, tier, track}。只认两空格缩进的 '- id:' 块。"""
+    """源表: id -> {name, url, tier, track, attention_filter}。只认两空格缩进的 '- id:' 块。
+
+    attention_filter(可选, 2026-10-29 引入 urlwatch 内核): 该源的**关注面过滤链**,
+    形如 `attention_filter: [html2text, strip, sha1sum]`。缺省用全局默认链
+    (policy_fetch.DEFAULT_ATTENTION_FILTER)。存在的意义是让"某源页面噪声特别大"
+    时可以单独收紧关注面, 而不是全局改 —— 但**必须真的生效**: 解析器认这个键,
+    policy_fetch 会校验并使用它(未知过滤器名会告警并回退默认链, 不静默忽略)。
+    """
     sources = {}
     cur = None
     for line in text.splitlines():
@@ -69,12 +76,24 @@ def parse_sources(text):
             continue
         if cur is None:
             continue
-        m = re.match(r"^    (name|url|tier|track): (.*)$", line)
+        m = re.match(r"^    (name|url|tier|track|attention_filter): (.*)$", line)
         if m:
             sources[cur][m.group(1)] = _val(m.group(2))
         elif line.startswith(("  - ", "  #", "  \n")) or re.match(r"^\S", line):
             cur = None  # 块结束(下一个源/注释/顶层 key)
     return sources
+
+
+def parse_attention_filter(raw):
+    """把 `attention_filter: [a, b, c]` 的原文解析成列表; 不是列表/为空则返回 None。"""
+    if not raw:
+        return None
+    raw = raw.strip()
+    if raw.startswith("[") and raw.endswith("]"):
+        raw = raw[1:-1]
+    items = [x.strip().strip('"').strip("'") for x in raw.split(",")]
+    items = [x for x in items if x]
+    return items or None
 
 
 def parse_weekly_shards(text):

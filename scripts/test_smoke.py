@@ -1721,6 +1721,31 @@ class ScanFailureGuardTests(unittest.TestCase):
         self.assertIn("_fresh", text)
         self.assertIn("本轮扫描未完成", text)
 
+    def test_run_scan_gates_push_on_failed_fetch(self):
+        # P0(2026-10-29): 取数段崩了/非零退出时, 不得走空输入短接推送「今日无新增」。
+        # 闸门必须看**本轮取数的成败**, 不能只看 fetch-status.json 存不存在 ——
+        # 取数器崩在写状态文件之前时根本没有状态文件可读, 放行就等于把
+        # 「取数失败」当成「今日没有新政策」推出去(H20 的事故形态换个触发原因)。
+        text = self._run_scan_text()
+        self.assertIn("FETCH_FAILED", text)
+        self.assertIn('[ "$FRC" -ne 0 ]', text)
+        # 闸门必须排在「0 存档 → 确定性出报 + 按范围锁推送」之前, 否则推完才拦
+        self.assertLess(text.index("FETCH_ABORT"),
+                        text.index("当日 0 存档且无候选/抽取记录"))
+        # 中止时必须撤销全量声明, 不留残锁(否则当天任何时候 --broadcast 都被放行)
+        self.assertIn("push_scope.py", text)
+        self.assertIn("--clear", text)
+
+    def test_run_scan_clears_stale_fetch_status_before_fetch(self):
+        # P2(2026-10-29): 取数段开始前必须清掉上一轮遗留的 fetch-status.json ——
+        # 否则陈旧文件会被当成本轮状态: legacy 回退取基线时被上一轮的「全挂」
+        # 结论误伤中止, 本轮取数崩了也会沿用上一轮结论。
+        text = self._run_scan_text()
+        self.assertIn('rm -f "$FETCH_DIR/fetch-status.json"', text)
+        # 清理必须发生在调用取数器**之前**(第一个 policy_fetch.py 调用点)
+        self.assertLess(text.index('rm -f "$FETCH_DIR/fetch-status.json"'),
+                        text.index('"$REPO/scripts/policy_fetch.py"'))
+
     def test_run_scan_has_timeout_watchdog(self):
         # 10-22 白烧 44 分钟 → 跑批必须有硬上限
         text = self._run_scan_text()

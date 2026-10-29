@@ -26,10 +26,12 @@ execute_code, 逐轮全量重发上下文让单轮 cache 读高达 5M。探测�
 """
 
 import argparse
+import locale
 import os
 import re
 import subprocess
 import sys
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -54,6 +56,145 @@ def _clean(s):
     return str(s).replace('"', "」").replace("`", "").replace("$", "")
 
 
+def _default_encoding():
+    """与 subprocess 的 text=True 对齐的默认编码。
+
+    subprocess 文本模式用 TextIOWrapper 的默认编码(3.11+ 是 locale.getencoding(),
+    3.10 是 locale.getpreferredencoding(False)); 改成字节模式后要自己解码, 口径
+    必须一致, 否则 http_get 的返回值会与改造前不同。
+    """
+    try:
+        return locale.getencoding()
+    except AttributeError:
+        return locale.getpreferredencoding(False)
+
+
+def _parse_header_blocks(text):
+    """解析 curl -D 落盘的响应头。
+
+    -L 跟随重定向时会有多段响应头, 取最后一段(最终响应)。
+    """
+    headers = {}
+    if not text:
+        return headers
+    for block in re.split(r"\r?\n\r?\n", text):
+        cur = {}
+        for line in block.splitlines():
+            if not line or line.startswith("HTTP/"):
+                continue
+            if ":" not in line:
+                continue
+            name, _, value = line.partition(":")
+            cur[name.strip()] = value.strip()
+        if cur:
+            headers = cur
+    return headers
+
+
+def _read_header_file(path):
+    if not path:
+        return ""
+    try:
+        with open(path, "rb") as f:
+            return f.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
+
+
+def _run_bytes(url, extra_args, timeout_run, want_body, max_bytes, extra_headers,
+               header_file, use_ua=True):
+    """跑一次 curl, 返回 (code, body_bytes, why)。字节模式 —— 上层要做编码回退链。"""
+    cmd = ["curl", "-m", str(timeout_run), "-sS", "-L", "--http1.1"]
+    if use_ua:
+        cmd += ["-A", UA]
+    cmd += ["-w", "\n%{http_code}"]
+    for h in (extra_headers or []):
+        cmd += ["-H", h]
+    if header_file:
+        cmd += ["-D", header_file]
+    if not want_body:
+        cmd += ["-o", "/dev/null"]
+    elif max_bytes:
+        cmd += ["--max-filesize", str(max_bytes)]
+    cmd += list(extra_args)
+    cmd.append(url)
+    try:
+        p = subprocess.run(cmd, capture_output=True, timeout=timeout_run + 5)
+    except subprocess.TimeoutExpired:
+        return 0, b"", "timeout"
+    except OSError:
+        return 0, b"", "curl-missing"
+    # 退出码非零即连接层失败(TLS 握手/证书/超时) —— 注意 -w 仍会输出 000,
+    # stdout 非空不代表拿到响应(2026-10-25 实测: rc=60 stdout="\n000")
+    if p.returncode != 0:
+        return 0, b"", "curl-exit-%s" % p.returncode
+    stdout = p.stdout
+    if isinstance(stdout, str):
+        # 桩/旧调用点可能给回 str(测试里 mock 的就是 str) —— 统一成字节再切
+        stdout = stdout.encode(_default_encoding(), errors="replace")
+    body, _, tail = stdout.rpartition(b"\n")
+    try:
+        code = int(tail.strip().split()[0])
+    except (ValueError, IndexError):
+        return 0, body, ""
+    return code, body, ""
+
+
+def http_get_full(url, timeout, want_body=False, max_bytes=None, extra_headers=None):
+    """四层降级 GET 的**完整版** —— 返回 (code, body_bytes, note, headers)。
+
+    与 http_get 的差别(取数内核需要的):
+      · body 是**原始字节**: 上层要做编码回退链(utf-8 → latin1 → utf-8(ignore)
+        → ascii(ignore)), 文本模式拿到的字符串已经把字节信息丢了;
+      · extra_headers: 条件请求头(If-None-Match / If-Modified-Since) —— 条件
+        请求命中 304 时不必再下载正文, 这是「每天全量重下 47 个源」的老账;
+      · headers: 响应头(ETag / Last-Modified), 条件请求凭据靠它。
+
+    降级链与 http_get **完全一致**(不另起一套 —— 两套口径是本仓库反复出事的
+    病根: A1 存档配额口径、10-24 存数口径)。
+    """
+    header_file = None
+    if want_body:
+        fd, header_file = tempfile.mkstemp(prefix="radar-hdr-")
+        os.close(fd)
+
+    def _headers():
+        return _parse_header_blocks(_read_header_file(header_file))
+
+    try:
+        note = ""
+        code, body, why = _run_bytes(url, [], timeout, want_body, max_bytes,
+                                     extra_headers, header_file)
+        headers = _headers()
+        if code == 0 and (why.startswith("curl-exit-6") or why == "timeout"):
+            code, body, _ = _run_bytes(url, ["-k"], timeout * 3, want_body, max_bytes,
+                                       extra_headers, header_file)   # ② SSL 宽松 + 握手加长
+            headers = _headers()
+            if code:
+                note = (note + " ssl-retry").strip()
+        if code == 403:
+            # ③ 去掉自定义 UA 重试一次(条件头同时撤掉: 403 说明请求没被受理,
+            #    再带 If-None-Match 重试没有意义)
+            code2, body2, _why2 = _run_bytes(url, [], timeout, want_body, max_bytes,
+                                             None, header_file, use_ua=False)
+            if code2 and code2 != 403:
+                headers = _headers()
+                code, body, note = code2, body2, (note + " no-ua-retry").strip()
+        if code >= 500:
+            code2, body2, _ = _run_bytes(url, [], timeout * 3, want_body, max_bytes,
+                                         extra_headers, header_file)   # ④ 慢站加长重试
+            if classify(code2) == "ok":
+                headers = _headers()
+                code, body, note = code2, body2, (note + " slow-retry").strip()
+        return code, body, note, headers
+    finally:
+        if header_file:
+            try:
+                os.unlink(header_file)
+            except OSError:
+                pass
+
+
 def http_get(url, timeout, want_body=False, max_bytes=None):
     """三层降级 GET(2026-10-25 死源分诊驱动, 20 死源中 7 个可由此复活):
 
@@ -67,59 +208,13 @@ def http_get(url, timeout, want_body=False, max_bytes=None):
     ④ HTTP 5xx → 超时加长三倍重试一次 —— co-minagricultura 型慢站网关超时。
 
     返回 (code, body, note): note 记录触发过的降级(观测留痕, 可进 search-log)。
-    """
-    def _run(extra_args, timeout_run):
-        cmd = ["curl", "-m", str(timeout_run), "-sS", "-L", "--http1.1",
-               "-A", UA, "-w", "\n%{http_code}"] + extra_args
-        if not want_body:
-            cmd += ["-o", "/dev/null"]
-        elif max_bytes:
-            cmd += ["--max-filesize", str(max_bytes)]
-        cmd.append(url)
-        try:
-            p = subprocess.run(cmd, capture_output=True, text=True,
-                               errors="replace", timeout=timeout_run + 5)
-        except subprocess.TimeoutExpired:
-            return 0, "", "timeout"
-        except OSError:
-            return 0, "", "curl-missing"
-        # 退出码非零即连接层失败(TLS 握手/证书/超时) —— 注意 -w 仍会输出 000,
-        # stdout 非空不代表拿到响应(2026-10-25 实测: rc=60 stdout="\n000")
-        if p.returncode != 0:
-            return 0, "", "curl-exit-%s" % p.returncode
-        body, _, tail = p.stdout.rpartition("\n")
-        try:
-            code = int(tail.strip().split()[0])
-        except (ValueError, IndexError):
-            return 0, body, ""
-        return code, body, ""
 
-    note = ""
-    code, body, why = _run([], timeout)
-    if code == 0 and (why.startswith("curl-exit-6") or why == "timeout"):
-        code, body, _ = _run(["-k"], timeout * 3)       # ② SSL 宽松 + 握手加长
-        if code:
-            note = (note + " ssl-retry").strip()
-    if code == 403:
-        cmd0 = ["curl", "-m", str(timeout), "-sS", "-L", "--http1.1",
-                "-w", "\n%{http_code}"]
-        if not want_body:
-            cmd0 += ["-o", "/dev/null"]
-        cmd0.append(url)
-        try:
-            p = subprocess.run(cmd0, capture_output=True, text=True,
-                               errors="replace", timeout=timeout + 5)
-            c2 = int((p.stdout or "").strip().split("\n")[-1].strip() or 0)
-        except (OSError, ValueError, subprocess.TimeoutExpired):
-            c2 = 0
-        if c2 and c2 != 403:                            # ③ 无 UA 重试
-            body2, _, _t = (p.stdout or "").rpartition("\n")
-            code, body, note = c2, body2, (note + " no-ua-retry").strip()
-    if code >= 500:
-        code2, body2, _ = _run([], timeout * 3)         # ④ 慢站加长重试
-        if classify(code2) == "ok":
-            code, body, note = code2, body2, (note + " slow-retry").strip()
-    return code, body, note
+    降级链实现在 http_get_full 里, 这里只做一次字节→文本解码(口径与改造前的
+    subprocess(text=True, errors="replace") 一致)。
+    """
+    code, body, note, _headers = http_get_full(url, timeout, want_body=want_body,
+                                                max_bytes=max_bytes)
+    return code, body.decode(_default_encoding(), errors="replace"), note
 
 
 def probe_one(sid, url):

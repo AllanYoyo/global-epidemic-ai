@@ -8,6 +8,10 @@
 #   4) **推送范围要显式声明**(2026-10-20 起): 每行末尾的 --broadcast 表示
 #      "这是定时任务, 允许全量推送"。不写也能跑(cron 上下文会自动识别成定时任务),
 #      但显式声明不依赖上下文识别, 行为更可预期。诊断: python3 scripts/diagnose_push.py
+#   5) 取数内核(2026-10-29 起默认 urlwatch 移植版: 条件请求 + 关注面变更判定)。
+#      需要回退旧取数器取基线或排障时, 在命令前加环境变量:
+#        POLICY_FETCH_ENGINE=legacy /opt/global-epidemic-ai/repo/scripts/run_scan.sh policy --broadcast
+#      逐日对照候选集合与存档条数, 连续 3 日无差异后删旧分支。
 
 # 06:30 晨扫(全量) + 日报 + 推送; 周一自动附加周更源(EPPO/IPPC/沙漠蝗等)
 30 6 * * * /opt/global-epidemic-ai/repo/scripts/run_scan.sh am --broadcast >> /opt/global-epidemic-ai/logs/cron.log 2>&1

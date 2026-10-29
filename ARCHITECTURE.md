@@ -13,7 +13,7 @@ flowchart TD
     B -- "渠道会话<br/>--review-channel" --> S0
     S0 --> C{"幂等锁<br/>.fetch-done?"}
     C -- "已有" --> D
-    C -- "无 / --refetch" --> E["① scripts/fetch_pages.py<br/>(零 LLM 取数)<br/>probe_channels 预探 → curl 并行抓入口页<br/>→ 链接日期窗口过滤(7天) → collect.py 存档<br/>→ candidates.jsonl / search-log.md"]
+    C -- "无 / --refetch" --> E["① scripts/policy_fetch.py<br/>(零 LLM 取数 · urlwatch 内核)<br/>probe_channels 预探 → 条件请求(ETag/304)抓入口页<br/>→ 关注面指纹判定变更 → collect.py 存档<br/>→ candidates.jsonl / search-log.md / fetch-status.json"]
     E --> F["② scripts/extract_records.py<br/>(每份存档一次 hermes -z 单轮)<br/>输出 key=value → extracted-policy.jsonl"]
     F --> G["③ scripts/normalize.py<br/>校验 + event_id + 入库(events/ + SQLite)"]
     G --> H["④ scripts/extract_records.py --stage risk<br/>url→event_id 确定性写回四维/结论"]
@@ -46,9 +46,9 @@ flowchart TD
 
 | 项 | 内容 |
 |---|---|
-| 确定性取数 | `scripts/fetch_pages.py`：**零 LLM**。当日源清单由 `scripts/scan_targets.py` 渲染（`config/sources.yaml` 的 `policy_watch_countries` 六档，2026-10-25 起**每日全扫**，`shard`/`weekly_shards` 已废弃）→ `scripts/probe_channels.py` 预探（curl 8 并发，四层降级：`--http1.1` / SSL 宽松+超时×3 / 403 去 UA / 5xx 加长；`[dead]` 通道直接跳过）→ 并行抓入口页 → 抽链接 + 多语种日期窗口过滤（7 天）→ `scripts/collect.py` 存档 → `candidates.jsonl` 逐条追加 → `search-log.md` 逐源留痕 |
+| 确定性取数 | `scripts/policy_fetch.py`：**零 LLM**。内核是 urlwatch 2.29 引擎的移植版（`scripts/fetchlib/`：作业模型 / 过滤器链 / 缓存抽象 / 状态机 / 四态判定，零第三方依赖）。当日源清单由 `scripts/scan_targets.py` 渲染（`config/sources.yaml` 的 `policy_watch_countries` 六档，2026-10-25 起**每日全扫**，`shard`/`weekly_shards` 已废弃）→ `scripts/probe_channels.py` 预探（curl 8 并发，四层降级：`--http1.1` / SSL 宽松+超时×3 / 403 去 UA / 5xx 加长；`[dead]` 通道直接跳过）→ **条件请求**（ETag / If-Modified-Since / 304）抓入口页 → **关注面指纹**（`html2text → strip → sha1sum`）判定变更 → 抽链接 + 多语种日期窗口过滤（7 天）→ `scripts/collect.py` 存档 → `candidates.jsonl` 逐条追加 → `search-log.md` 逐源留痕 → `fetch-status.json` 状态汇总。旧取数器 `scripts/fetch_pages.py` 保留为 `POLICY_FETCH_ENGINE=legacy` 对照开关（逐日对照无差异后删） |
 | 交互式检索 | `skills/global-policy-search/SKILL.md`：会话内的检索入口（`web_search` + 官方域直击 + 中文聚合站/输华议定书通道）。**会话补数一律走 `run_scan.sh policy --stage fetch`**，不再自行拼 `hermes -z` 扫描 prompt |
-| 产出 | `data/raw/<日期>/`：每条存档 = 正文文件 + `.meta.json`（`collect.py` 成对落盘）；`candidates.jsonl`（候选清单）；`extracted-policy.jsonl`（抽取结果）；`search-log.md`（逐源留痕，含"预探 dead"/"无窗口内条目"等状态） |
+| 产出 | `data/raw/<日期>/`：每条存档 = 正文文件 + `.meta.json`（`collect.py` 成对落盘）；`candidates.jsonl`（候选清单）；`extracted-policy.jsonl`（抽取结果）；`search-log.md`（逐源留痕，含"预探 dead"/"无窗口内条目"等状态）；`fetch-status.json`（per-source 状态汇总：存活源数 / 变更数 / `infra_failure`，是 `run_scan.sh` 产物终检的输入之一——**存活源 0 = 基础设施故障，不是安静日**，此时中止本轮不推送「今日无新增」，见 known-issues H20） |
 | 硬上限 | 当日存档 **≤12 条**（`collect.count_archives()` 按 `*.meta.json` 计条数，交付文件不占配额）；每源 ≤2 条。触顶即拒绝并记 search-log |
 | 幂等 | `data/raw/<日期>/.fetch-done` 标记当日取数已交付；重复取数直接跳过，强制重取须显式 `--refetch` |
 | 预算 | `scripts/token_budget.py`（读 Hermes `state.db`，东八区当日折合 ≥400 万即跳过取数，降级为"只加工已有存档"） |
@@ -128,6 +128,27 @@ CREATE INDEX idx_events_type  ON events(record_type);        -- 面板/API 只�
 - **镜像 JSON**：`data/events/<日期>/*.json` 是入库镜像，便于 diff 与重建；库丢失可用 JSON 重放 `normalize.py` 重建。
 - **迁移方式**：`open_db()` 幂等建表 + 缺列 `ALTER TABLE`，无独立迁移脚本；新增冗余列时照此模式补。
 - **数据不入库（git）**：`data/raw|events|reports/`、`database/`、`logs/` 均 gitignore；生产用 `EPIDEMIC_DATA_DIR`/`EPIDEMIC_DB` 指到 repo 外（如 `/opt/global-epidemic-ai`）。
+
+### 3.1 抓取状态库（`database/fetch.db`，与业务库分离）
+
+取数内核的抓取状态与网页快照，**独立于 `epidemic.db`**（业务库 schema 已上线且带 3 个索引，抓取状态与政策台账职责不同）：
+
+```sql
+CREATE TABLE fetch_state (          -- URL 粒度: 条件请求凭据 + 关注面指纹
+    url             TEXT PRIMARY KEY,
+    source_id       TEXT, etag TEXT, last_modified TEXT,
+    content_sha1    TEXT,           -- 关注面指纹(过滤后), 与上轮相同即判未变
+    last_status     INTEGER, last_fetched REAL,
+    last_archived   INTEGER DEFAULT 0, tries INTEGER DEFAULT 0);
+
+CREATE TABLE page_snapshot (        -- 快照历史, 供 diff 与"回看上一版"
+    url TEXT, fetched_at REAL, content_sha1 TEXT, body TEXT,
+    PRIMARY KEY (url, fetched_at));
+```
+
+- 路径：生产用 `EPIDEMIC_FETCH_DB` 指到 repo 外；缺省 `database/fetch.db`（随 `database/` 一起 gitignore）
+- 粒度是 **URL** 而不是"源"——条件请求的前提是"同一 URL 上轮抓过"，源粒度记不住文章页的 ETag
+- 迁移方式同上：幂等建表 + 缺列 `ALTER TABLE`，无独立迁移脚本
 
 ## 4. 调度逻辑（P4 确定性管线）
 

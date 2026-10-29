@@ -110,6 +110,11 @@ policy_watch_countries:
 # ---- 情报源分级: 1 官方(可直接支撑 verified) / 2 专业(需交叉) / 3 媒体(仅线索) ----
 # schedule 档位: am_pm=晨扫+晚扫 / am=仅晨扫 / daily=每日政策档 / weekly=每周一晨扫附加 / passive=不主动扫
 # track 轨道: policy=政策动作源(policy 档主动扫) / outbreak=疫情事件源(不扫, 仅研判背景) / background=中国侧与名录(不扫, 仅背景)
+# attention_filter(可选, 2026-10-29 引入 urlwatch 取数内核): 该源的**关注面过滤链**,
+#   形如 `attention_filter: [html2text, strip, sha1sum]`。缺省用全局默认链。存在的意义是
+#   某个源页面噪声特别大时单独收紧关注面(只看正文、不看导航/日期戳), 而不是全局改。
+#   链条里每一步都是 fetchlib/filters.py 的过滤器名; 写错的名字会告警并回退默认链
+#   (不会静默忽略 —— 配置写了却不生效是本仓库反复吃过的亏)。
 sources:
   # ========== Tier 1: 官方权威 ==========
   - id: woah-wahis

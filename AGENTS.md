@@ -6,8 +6,10 @@
 
 ```
 run_scan.sh policy (定时入口, 默认确定性管线)
-  → scripts/fetch_pages.py        (零LLM取数: probe_channels 预探 + curl 并行抓入口页
-                                    + 链接日期窗口过滤 + collect.py 存档(单源 ≤2, 当日默认不限))
+  → scripts/policy_fetch.py       (零LLM取数 · urlwatch 内核: probe_channels 预探
+                                    + 条件请求(ETag/304) + 关注面指纹判定 + collect.py 存档
+                                    (单源 ≤2, 当日默认不限); 旧取数器 fetch_pages.py
+                                    保留为 POLICY_FETCH_ENGINE=legacy 对照开关)
   → scripts/extract_records.py    (每份存档一次 hermes -z 单轮微调用: 抽取+研判字段,
                                     key=value 输出, 429/坏输出只废单份)
   → scripts/normalize.py          (入库) → extract_records --stage risk (研判写回)
@@ -21,7 +23,37 @@ run_scan.sh policy (定时入口, 默认确定性管线)
 global-policy-search skill 仍为交互式检索入口（会话补数走 `run_scan.sh policy --stage fetch`）。
 
 - 检索词库/源清单/国家优先级全部在 `config/sources.yaml`。
-- 政策影响写回用 `scripts/risk.py`（支持 `--list-pending` 列出待研判记录）。
+- 政策影响写回用 `scripts/risk.py`(支持 `--list-pending` 列出待研判记录)。
+
+## 取数内核(2026-10-29 起: urlwatch 移植版)
+
+确定性取数段的内核已换成 urlwatch 2.29 引擎的移植版(`scripts/fetchlib/`), 领域层在
+`scripts/policy_fetch.py`。**下游一行未改** —— 落盘契约与配额口径不变。
+
+- **两层结构**: `scripts/fetchlib/` 是内核(插件元类 / 作业模型 / 过滤器链 / 缓存抽象 /
+  状态机 / 四态判定, 零第三方依赖); `scripts/policy_fetch.py` 是领域层(源清单渲染 /
+  链接启发式 / 配额 / 落盘 / 状态汇总)。
+- **条件请求**: ETag / If-Modified-Since / 304 —— 上一轮抓过且未改的 URL 不再下载正文。
+- **关注面判定**: 判定依据是 `html2text → strip → sha1sum` 的指纹, 不是整页文本 ——
+  政府站点的导航栏/日期戳/页脚每轮都在变, 整页比对会把 47 个源全判成 changed 涌进
+  LLM 抽取(2026-10-24 token 爆量事故的形态)。
+- **两级作业**: 外层一个作业 = 一个源(入口页); 内层按 URL 展开(条件请求的最小粒度)。
+  抓取状态以 **URL** 为主键存 `database/fetch.db`(`EPIDEMIC_FETCH_DB` 指路), 不碰
+  `epidemic.db`。
+- **新增交付物**: `data/raw/<日期>/fetch-status.json` —— per-source 状态汇总
+  (`sources_alive` / `infra_failure`), 是 `run_scan.sh` 产物终检的输入之一。
+  **存活源 0 = 基础设施故障, 不是安静日**, 此时中止本轮、不推送「今日无新增」(H20)。
+  **判定看的是「本轮取数段的成败」, 不是状态文件存不存在**(2026-10-29 审查 P0/P2 修):
+  取数器崩在写状态文件之前时没有文件可读, 闸门若只看文件存在就会放行 → 空输入短接把
+  「取数失败」当成「今日没有新政策」推出 0 条日报。故取数段非零退出 + 0 存档 = 取数失败,
+  一律中止不推送(取数失败但已存到东西的不在此列: 有存档就继续加工, 保留断点);
+  取数段开始前先清掉上一轮遗留的 `fetch-status.json`, 陈旧文件不参与判断。
+- **回退开关**: `POLICY_FETCH_ENGINE=legacy` 切回旧取数器(`fetch_pages.py`)取基线/排障;
+  逐日对照候选集合与存档条数, 连续 3 日无差异后删旧分支。
+- **逃生开关**: `policy_fetch.py --no-conditional` 忽略条件请求强制重取(防服务器错误 304 漏检)。
+- **不引入**: `ShellJob` / `shellpipe` / `diff_tool` 三处任意命令执行面**一律不移植**
+  (urlwatch 自带的 shell 作业依赖 POSIX 权限模型, 在本仓库不成立; 且 H6 正在治理注入面)。
+- 改内核前先读 `scripts/fetchlib/` 各模块头的来源标注(移植自 urlwatch 的哪一段)。
 
 ## 数据合同（改动需同步多处）
 
@@ -42,6 +74,11 @@ global-policy-search skill 仍为交互式检索入口（会话补数走 `run_sc
 ```bash
 pip install -r requirements.txt
 python scripts/collect.py --url <url> --title <标题>  # 原文存档到 data/raw/（可溯源链第一环）
+python scripts/policy_fetch.py --date YYYY-MM-DD          # urlwatch 内核取数(条件请求+关注面判定)
+python scripts/policy_fetch.py --selftest                 # 内核离线自检(不联网, 闭环跑通条件请求→四态)
+python scripts/policy_fetch.py --no-conditional --date X   # 忽略条件请求强制重取(防错误 304 漏检)
+python scripts/test_fetchlib.py                           # 内核离线测试(32 例, stdlib unittest)
+POLICY_FETCH_ENGINE=legacy scripts/run_scan.sh policy    # 临时回退旧取数器(取基线/排障)
 python scripts/normalize.py --input <json> --db     # 入库（支持 - 读 stdin）
 python scripts/risk.py --event-id <id> --dim trade=4 --dim biosecurity=3,...   # 影响写回
 python scripts/report.py --date YYYY-MM-DD                # Markdown 日报（跑批只产这个）

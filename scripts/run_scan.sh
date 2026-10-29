@@ -468,11 +468,50 @@ if [ -n "${HERMES_RUN_CMD:-}" ]; then
       if [ -n "$ONLY_GROUP" ]; then
         echo "[WARN] --only-group 仅 --agent 模式有意义(确定性取数无分块), 已忽略。"
       fi
-      echo "[$(date '+%F %T')] 阶段 1/2 确定性取数(fetch_pages, 零 LLM)"
+      # ---- 取数内核(2026-10-29 引入 urlwatch 内核) ----
+      # 新内核(policy_fetch.py): 条件请求(ETag/304) + 关注面指纹判定 —— 未变的
+      # 页面不再重复下载, 也不进 LLM 抽取(直击 10-24 token 爆量与 10-28 大 head
+      # 页面全军覆没两条老账)。产出与旧取数器同构: 落盘契约(*.meta.json 成对
+      # 落盘)与配额口径(collect.count_archives)完全一致, 下游一行不改。
+      # POLICY_FETCH_ENGINE=legacy 可一键回退旧取数器取基线/排障, 逐日对照无
+      # 差异后再删旧分支。
+      case "${POLICY_FETCH_ENGINE:-new}" in
+        legacy) FETCH_ENGINE=legacy ;;
+        *)      FETCH_ENGINE=new ;;
+      esac
+      echo "[$(date '+%F %T')] 阶段 1/2 确定性取数(内核=$FETCH_ENGINE, 零 LLM)"
       FETCH_RAN=1
-      "$PY" "$REPO/scripts/fetch_pages.py" --date "$SCAN_DATE"
+      # 清掉上一轮遗留的状态汇总: 本轮没跑出新的 fetch-status.json 时, 绝不能拿
+      # 陈旧文件判本轮成败(2026-10-29 修复 P2)。否则两种误判都会发生:
+      #   ① legacy 回退取基线时读到上一轮的「全挂」结论 → 本轮被误伤中止;
+      #   ② 本轮取数崩了(没写状态文件)时沿用上一轮结论 → 闸门放行。
+      rm -f "$FETCH_DIR/fetch-status.json" 2>/dev/null || true
+      if [ "$FETCH_ENGINE" = "legacy" ]; then
+        "$PY" "$REPO/scripts/fetch_pages.py" --date "$SCAN_DATE"
+      else
+        "$PY" "$REPO/scripts/policy_fetch.py" --date "$SCAN_DATE"
+      fi
       FRC=$?
       echo "[$(date '+%F %T')] 确定性取数结束 rc=$FRC"
+      # 取数状态终检输入: 区分「全挂」与「安静日」(known-issues H20)。
+      # 判定依据是**本轮**取数的成败, 不是状态文件存不存在(2026-10-29 修复 P0):
+      #   ① 取数段非零退出 → 取数失败(崩了/被 kill/参数错), 0 存档不是安静日;
+      #   ② 本轮跑完但存活源 0 → 基础设施故障。
+      # 原实现只认「fetch-status.json 存不存在」, 取数器崩在写状态文件之前时
+      # 闸门放行 → 空输入短接把「取数失败」当成「今日没有新政策」出了 0 条日报
+      # 还按范围锁推送出去 —— 正是 H20 要消灭的形态, 只是换了触发原因。
+      FETCH_INFRA=0
+      FETCH_FAILED=0
+      if [ "$FRC" -ne 0 ]; then
+        FETCH_FAILED=1
+        echo "[严重] 取数段失败(rc=$FRC) —— 不是安静日, 不得推送「今日无新增」"
+      fi
+      if [ "$FETCH_ENGINE" = "new" ] && [ -f "$FETCH_DIR/fetch-status.json" ]; then
+        if ! "$PY" "$REPO/scripts/policy_fetch.py" --status-only --date "$SCAN_DATE" >/dev/null 2>&1; then
+          FETCH_INFRA=1
+          echo "[严重] 取数全挂(存活源 0) —— 判基础设施故障(不是安静日), 不得推送「今日无新增」"
+        fi
+      fi
       else
       # ---- 死通道跳过名单(2026-10-23 引入, 确定性) ----
       # 10-22/10-23 实测: 约 20 个通道连续两日一字不差地不可用(403/连接失败/
@@ -632,6 +671,33 @@ $HEALTH_BLOCK"
     # 取数 —— 194 万折合、50 轮打满、入库/出报一步没跑到。0 存档且无候选/抽取
     # 记录时, 出报是纯确定性工作, 直接 report.py 完成, 不给 Agent 即兴舞台;
     # 推送同样按范围锁确定性执行(broadcast/review 才推, none 不推)。
+    # ---- 取数全挂/取数失败: 不是安静日, 不得出报/推送「今日无新增」(known-issues H20) ----
+    # 旧形态: 47 个源全部预探 dead 时 fetch_pages 的返回码**恰恰是 0**(逐源记
+    # search-log 后正常收尾), 于是"0 存档 → 空输入短接 → 出报 → 按范围锁推送
+    # → 产物校验全过 → exit 0", 推送出去的是"今日无新增 0 条", 而真实原因是
+    # 网络/网关/证书全线故障。新内核按 per-source 状态汇总, 存活源为 0 时
+    # 明确判基础设施故障并中止本轮。
+    #
+    # 2026-10-29 修复 P0: 再加一条「取数段非零退出且 0 存档」—— 取数器崩在写
+    # fetch-status.json 之前时没有状态文件可读, 闸门无据可判, 放行则空输入短接
+    # 会把「取数失败」当成「今日没有新政策」出了 0 条日报还推送出去(换个触发
+    # 原因的老毛病)。注意「取数失败但已经存到东西」不在此列: 有存档就继续加工
+    # (保留断点), 与上面写 .fetch-done 的既有语义一致。
+    FETCH_ABORT=0
+    if [ "${FETCH_INFRA:-0}" = "1" ]; then
+      FETCH_ABORT=1
+    fi
+    if [ "${FETCH_FAILED:-0}" = "1" ] && [ "${RAW_N_NOW:-0}" -eq 0 ]; then
+      FETCH_ABORT=1
+    fi
+    if [ "$FETCH_ABORT" = "1" ]; then
+      echo "[失败] 取数未正常完成(基础设施故障或取数段失败) —— 不是安静日, 本轮不推送「今日无新增」"
+      if [ "$SCOPE" = "broadcast" ]; then
+        "$PY" "$REPO/scripts/push_scope.py" --date "$SCAN_DATE" --clear >/dev/null 2>&1 \
+          && echo "[$(date '+%F %T')] run_scan: 本轮未推送, 已撤销全量声明(不留残锁)"
+      fi
+      exit 1
+    fi
     if [ "${RAW_N_NOW:-0}" -eq 0 ] && [ "${EXTRACT_N:-0}" -eq 0 ] && [ "${CAND_N:-0}" -eq 0 ]; then
       echo "[WARN] 当日 0 存档且无候选/抽取记录 —— 加工段不派 Agent, 直接确定性出报"
       mkdir -p "$FETCH_DIR" 2>/dev/null || true
@@ -727,6 +793,12 @@ $HEALTH_BLOCK"
   RAW_N="$(find "$DATA_DIR/raw/$SCAN_DATE" -maxdepth 1 -type f -name '*.meta.json' 2>/dev/null | wc -l | tr -d ' ')"
   if [ "${RAW_N:-0}" -gt 200 ]; then
     MISSING="$MISSING 存档量异常(当轮 ${RAW_N} 条存档 > 200, 疑似穷举下载或绕过取数器直写)"
+  fi
+  # ---- 取数全挂终检(2026-10-29, urlwatch 内核) ----
+  # 存活源 0 = 基础设施故障, 不是「今天确实没有新政策」。安静日(存活源 > 0 且
+  # 0 存档)仍走正常出报推送 —— 两者必须可区分(H20)。
+  if [ "${FETCH_INFRA:-0}" = "1" ]; then
+    MISSING="$MISSING 取数全挂(存活源 0, 基础设施故障而非安静日)"
   fi
   # ---- 当日入库条数终检(2026-10-22, 假成功的最后一道口子) ----
   # 实机复现: 阶段 2 加工超时被杀, 但 Agent 在被杀前一刻跑完了 report.py, 于是

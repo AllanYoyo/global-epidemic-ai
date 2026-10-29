@@ -284,6 +284,21 @@
 - 现象: 3.12 起 deprecation warning, 未来 hard error。
 - 建议处理: 改 `datetime.now(timezone.utc)`。
 
+#### M21 · 同一 URL 跨日重复存档 + 重复抽取（白烧一次 LLM 调用）
+- 位置: `scripts/policy_fetch.py`（归档）、`scripts/extract_records.py::done_urls`（跳过集合）。
+- 现象(2026-10-30 真跑实测)：`https://www.argentina.gob.ar/noticias/inundaciones-se-facilita-la-gestion-de-movimientos-para-evacuar-hacienda-por-el-fenomeno-el`
+  10-29 与 10-30 **各存了一份**。原因是源入口页是滚动新闻列表（关注面指纹天天变 → 判「变更」），
+  且 `done_urls(date_str)` 只查**当天** `data/raw/<日期>/` 的 `extracted-policy.jsonl` /
+  `rejected-policy.jsonl` —— 昨天抽过的 URL 今天不在跳过集合里，于是今天又抽一次。
+- 影响：**台账正确性不受影响**（入库端语义查重会把它合并回原记录，实测 10-30 日志
+  `[去重] 第1条 与已有 ff7f09857ac1 同一政策…`，台账只 283→284 而不是 285，且原记录的
+  `first_seen` 仍是 2026-10-29 没被刷成 10-30）；代价是**每次多烧一次 LLM 微调用**。
+  滚动列表源越多（阿/哈/英等），每天的无效调用越多。
+- 建议处理（择一）：①`done_urls` 扩展成跨日窗口（查最近 N 天的 `extracted-policy.jsonl` /
+  `rejected-policy.jsonl`）；②归档前用 `fetch_state.last_archived` 判「最近 K 天内已存过」
+  就跳过；③`policy_fetch` 对列表页只取「本轮新出现」的链接（用上轮快照的链接集合做差）。
+  三者都属取数层改动，按惯例需先请示再动。
+
 #### C3 · `upsert` 的 patch 过滤 `v not in (None, [], {})` 误把 `0`/`False` 当空值
 - 位置: `scripts/normalize.py:411-412`
 - 现象: 当前字段都是字符串, 影响小; 一旦新增数值/布尔字段就会丢。

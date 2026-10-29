@@ -14,14 +14,22 @@
   只用「url + 生效日」会并掉 7 条**真政策** —— 同一页面上同一天既有「收紧」也有
   「放松」(gov.uk 动植检页), 领域不同的通报(measures vs plant)也会被并掉。
   带齐四要素后: 可并 26 条, 丢真政策 0 条。
+  ⚠ 2026-10-29 深夜复核更正: 上面那句「丢真政策 0 条」是**错的** —— 当时只核了
+  「语义键集合守恒」, 没逐组人工判读。逐组读完 19 组发现 **3 组是误并**:
+  同一页面可以承载多条措施(ePing 一份通报含两条 / gov.uk 滚动页多条且同日同域
+  同动作), 语义键分不开。现加**主体冲突检测**(病害名不相交 → 不合并), 该规则
+  对这 19 组 19/19 全对(16 组真重复全判对, 3 组误并全抓到)。见
+  normalize.subject_conflict 与本文件的 split_conflicts()。
 
 保留哪一条(组内选主):
   ① 已核验(verified) 优先 —— 核验是人工投入的结论, 不能丢;
   ② 其次保留已研判(四维齐全 / 有 impact_level)的;
   ③ 再看正文质量(measure_cn / summary_cn 更长 = 信息更全);
   ④ 最后取 first_seen 最早的 —— 保留"首次发现"这个真实时间信号。
-  落选记录的**有效内容**(非空、非兜底默认值、且不含已核验/已研判冲突的字段)
-  会并入保留记录, 不丢信息。
+  落选记录的**有效内容**会并入保留记录, 不丢信息: 数组字段取并集, 标量字段取
+  信息量更大的一侧, 研判四维整块取用不混搭(见 normalize.merge_duplicate)。
+  ⚠ 旧实现是「落选记录直接覆盖保留记录的每个非空字段」—— 方向写反, 会把好
+  内容冲成差内容(生产实测 123 处被改差), 已修。
 
 用法:
   python scripts/merge_duplicates.py --db database/epidemic.db             # 预览(默认, 只报告不动库)
@@ -45,7 +53,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from normalize import (DEFAULT_SENTINELS, biz_now, dedup_key, merge_duplicate,  # noqa: E402
-                       open_db)
+                       open_db, subject_conflict)
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VERIFIED = "verified"
@@ -66,15 +74,43 @@ def load_records(con):
     return out
 
 
+def split_conflicts(group):
+    """把同键组按「主体是否冲突」拆成互不冲突的子组。
+
+    同一页面可以承载多条措施(ePing 一份通报两条 / gov.uk 滚动页多条),
+    语义键分不开它们 —— 2026-10-29 生产实测 19 个同键组里 3 组是误并。
+    病害名不相交的判为不同措施, 不该合并(见 normalize.subject_conflict)。
+    """
+    out = []
+    for rec in group:
+        placed = False
+        for sub in out:
+            if all(not subject_conflict(rec, r) for r in sub):
+                sub.append(rec)
+                placed = True
+                break
+        if not placed:
+            out.append([rec])
+    return out
+
+
 def group_by_key(records):
-    """按语义键分组: {key: [record, ...]}, 只保留组内 >1 的。"""
+    """按语义键分组, 再按主体冲突拆子组。返回 {key: [[record, ...], ...]}。
+
+    组内还会按主体冲突再拆一次 —— 冲突的记录分属不同措施, 不能并成一条。
+    """
     buckets = {}
     for e in records:
         key = dedup_key(e)
         if not key:
             continue
         buckets.setdefault(key, []).append(e)
-    return {k: v for k, v in buckets.items() if len(v) > 1}
+    out = {}
+    for key, group in buckets.items():
+        subs = [s for s in split_conflicts(group) if len(s) > 1]
+        if subs:
+            out[key] = subs
+    return out
 
 
 def pick_primary(group):
@@ -106,16 +142,17 @@ class _neg(object):
 def plan(records):
     """算出归并计划: [(key, keep_eid, drop_eids, merged_payload), ...]"""
     plans = []
-    for key, group in group_by_key(records).items():
-        primary = pick_primary(group)
-        merged = dict(primary)
-        for e in group:
-            if e["event_id"] == primary["event_id"]:
-                continue
-            merged = merge_duplicate(merged, e)
-        merged["event_id"] = primary["event_id"]
-        drops = [e["event_id"] for e in group if e["event_id"] != primary["event_id"]]
-        plans.append((key, primary["event_id"], drops, merged))
+    for key, subs in group_by_key(records).items():
+        for sub in subs:
+            primary = pick_primary(sub)
+            merged = dict(primary)
+            for e in sub:
+                if e["event_id"] == primary["event_id"]:
+                    continue
+                merged = merge_duplicate(merged, e)
+            merged["event_id"] = primary["event_id"]
+            drops = [e["event_id"] for e in sub if e["event_id"] != primary["event_id"]]
+            plans.append((key, primary["event_id"], drops, merged))
     return plans
 
 

@@ -21,6 +21,7 @@ import datetime
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import urllib.parse
 from datetime import date as _date
@@ -528,6 +529,7 @@ def find_duplicate(con, e):
         return None
     url = key[0]
     rows = con.execute(FIND_DUP_SQL, (url,)).fetchall()
+    cands = []
     for eid, payload in rows:
         if eid == e.get("event_id"):
             continue        # 同 id 走常规合并, 不算重复
@@ -536,28 +538,152 @@ def find_duplicate(con, e):
         except ValueError:
             continue
         if dedup_key(old) == key:
+            cands.append((eid, old))
+    if not cands:
+        return None
+    # 主体冲突闸门: 同一页面承载多条措施时(见 subject_conflict), 语义键相同
+    # 但病害不同 —— 那是两条不同政策, 不能并。多个候选时优先取不冲突的那个。
+    for eid, old in cands:
+        if not subject_conflict(old, e):
             return eid, old
+    return None
+
+
+# ---- 归并时的字段族与强弱序(2026-10-29 复核新增) ----
+# 研判四维及其派生结论 —— 必须**整块**取用, 不能逐字段混搭:
+# 四维齐全时 score/level/focus 由代码推导, 混搭两边会产出互相矛盾的结论。
+JUDGE_FIELDS = ("dimension_scores", "impact_score", "impact_level", "impact_type",
+                "impact_focus", "impact_rationale", "china_relevance",
+                "recommended_action")
+# 数组字段: 同一政策的两次抽取往往各写一半商品, 丢一边就是丢信息 → 取并集
+LIST_FIELDS = ("products", "target_countries")
+# 核验状态强弱序: 已核验 > 单源 > 误报标记 > 未核验
+VERIF_RANK = {"verified": 4, "single_source": 3, "false_positive": 2, "unverified": 1}
+# 上面几族由 merge_duplicate 专门处理, 不走"通用字段"那一轮
+MERGE_SPECIAL_FIELDS = (("event_id", "first_seen", "verification_status", "source")
+                        + JUDGE_FIELDS + LIST_FIELDS)
+
+
+def _richness(v):
+    """值的"信息量": 字符串看长度, 数组/字典看元素合计, 数字看数值本身。"""
+    if v is None:
+        return 0
+    if isinstance(v, bool):
+        return 1
+    if isinstance(v, str):
+        return len(v.strip())
+    if isinstance(v, (list, tuple, set)):
+        return sum(_richness(x) for x in v)
+    if isinstance(v, dict):
+        return sum(_richness(x) for x in v.values())
+    if isinstance(v, (int, float)):
+        return float(v)
+    return 1
+
+
+def _pick_richer(old_v, new_v):
+    """两个值里挑信息量更大的; 等量时保留 old(先到先得, 结果稳定可复现)。"""
+    return new_v if _richness(new_v) > _richness(old_v) else old_v
+
+
+# 病害名比较时剔除的泛词 —— 否则 "foot-and-mouth disease" 与 "lumpy skin disease"
+# 会因为都含 "disease" 而被判成同一病害, 误并掉两条不同政策。
+DISEASE_GENERIC = {"disease", "diseases", "virus", "syndrome", "infection",
+                    "illness", "outbreak"}
+
+
+def _disease_tokens(s):
+    raw = re.split(r"[^0-9a-z一-鿿]+", str(s or "").lower())
+    return set(t for t in raw if t and t not in DISEASE_GENERIC)
+
+
+def subject_conflict(a, b):
+    """两条记录是否明显是**两条不同的措施**。返回冲突说明或 None。
+
+    为什么需要: 同一页面可以承载多条措施 —— ePing 一份通报含两条措施
+    (G/SPS/N/URY/106-Add.2 同时写禽类与猪)、gov.uk "topical issues" 滚动页
+    列多条且多条同日期同领域同动作。语义键(url + 生效日 + 领域 + 动作)分不开
+    它们: 2026-10-29 生产实测 19 个同键组里有 **3 组**是这么误并的(乌拉圭
+    禁阿根廷禽类 vs 禁西班牙猪 / 英国禁纳米比亚鲜牛肉 vs 禁以色列牛胚胎 /
+    英国阿根廷禽类解限 vs 南非马匹)。
+
+    病害名不相交是可靠信号: 生产 19 组逐条人工判读, 该规则 19/19 全对
+    (16 组真重复全部判对, 3 组误并全部抓到)。只用病害名, 不用目标国 ——
+    目标国的中英写法不一致(蒙古/mongolia、巴西/brazil)会误伤真重复,
+    而且部分记录把"目的市场清单"填在目标国里, 语义本身就不稳。
+
+    只做否定: 不冲突**不等于**同一政策(那是语义键 + 同源 URL 保证的事),
+    但冲突就一定是不同措施。
+    """
+    da = _disease_tokens(a.get("disease_name_en"))
+    db = _disease_tokens(b.get("disease_name_en"))
+    if da and db and not (da & db):
+        return "病害名不相交(%s vs %s)" % ("/".join(sorted(da)), "/".join(sorted(db)))
     return None
 
 
 def merge_duplicate(old, new):
     """把重复抽取的 new 合并进 old(保留 old 的身份与已核验/已研判结论)。
 
-    合并语义与 upsert() 的常规合并一致: 空值与兜底默认值不覆盖已有结论;
-    已核验(verified)不被未核验覆盖; 已研判的四维结论不被空值覆盖。
+    合并语义(2026-10-29 复核后重写 —— 旧实现方向写反了):
+      · 身份: event_id / first_seen 取 old
+      · 核验状态: 取**更强**的一侧(已核验 > 单源 > 误报标记 > 未核验)
+      · 研判四维: **整块**取用, 不混搭(混搭会产出互相矛盾的 score/level/focus)
+      · products / target_countries: 取**并集**(丢一边就是丢信息)
+      · source: 按键合并, 冲突键取信息量更大的一侧
+      · 其余字段: 取信息量**更大**的一侧; 两边都空才留空
+    旧实现是"new 直接覆盖 old 的每个非空字段" —— 措辞更简、来源更弱的落选记录
+    会把主记录的有效内容冲掉(生产实测 123 处内容被改差: 一条已核验的 SENASA
+    公告被降级成 'Argentina.gob.ar' + products='bovino', 中影响 3.4 分掉到
+    低影响 1.95 分)。现在改成"更丰富者胜", 后到的抽取只能补强、不能削弱。
     """
     merged = dict(old)
+
+    # 核验状态: 取更强的一侧(已核验不被未核验覆盖)
+    ov, nv = old.get("verification_status"), new.get("verification_status")
+    if VERIF_RANK.get(nv, 0) > VERIF_RANK.get(ov, 0):
+        merged["verification_status"] = nv
+
+    # 研判四维: 整块取用, 不混搭
+    old_has = any(old.get(k) not in (None, [], {}) for k in JUDGE_FIELDS)
+    new_has = any(new.get(k) not in (None, [], {}) for k in JUDGE_FIELDS)
+    if new_has and (not old_has or
+                    (new.get("verification_status") == "verified"
+                     and old.get("verification_status") != "verified")):
+        for k in JUDGE_FIELDS:
+            if k in new:
+                merged[k] = new[k]
+
+    # 数组字段: 取并集
+    for k in LIST_FIELDS:
+        a, b = old.get(k), new.get(k)
+        if isinstance(a, list) and isinstance(b, list):
+            out = list(a)
+            for x in b:
+                if x not in out:
+                    out.append(x)
+            merged[k] = out
+        elif a in (None, [], {}) and b not in (None, [], {}):
+            merged[k] = b
+
+    # source: 按键合并, 冲突键取信息量更大的一侧
+    osrc = old.get("source") if isinstance(old.get("source"), dict) else {}
+    nsrc = new.get("source") if isinstance(new.get("source"), dict) else {}
+    if nsrc:
+        ms = dict(osrc)
+        for k, v in nsrc.items():
+            if k not in ms or ms[k] in (None, "", [], {}):
+                ms[k] = v
+            elif _richness(v) > _richness(ms[k]):
+                ms[k] = v
+        merged["source"] = ms
+
+    # 其余字段: 取信息量更大的一侧
     for k, v in new.items():
-        if v in (None, [], {}) or k in ("event_id", "first_seen"):
+        if k in MERGE_SPECIAL_FIELDS or v in (None, [], {}):
             continue
-        if k in DEFAULT_SENTINELS and v == DEFAULT_SENTINELS[k]:
-            if old.get(k) not in (None, "", DEFAULT_SENTINELS[k]):
-                continue
-        merged[k] = v
-    # 核验状态: 已核验不被未核验覆盖(方向性, 不是默认值覆盖)
-    if old.get("verification_status") == "verified" \
-            and new.get("verification_status") != "verified":
-        merged["verification_status"] = "verified"
+        merged[k] = _pick_richer(old.get(k), v)
+
     merged["event_id"] = old.get("event_id")
     merged["first_seen"] = old.get("first_seen") or new.get("first_seen")
     merged["updated_at"] = now()

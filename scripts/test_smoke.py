@@ -3304,6 +3304,113 @@ class NormalizeDedupeTests(unittest.TestCase):
             con.commit()
             con.close()
 
+    def test_conflicting_disease_is_not_duplicate(self):
+        """同 url/生效日/领域/动作但病害不同 → 是两条不同措施, 不能并。
+
+        同一页面可以承载多条措施(ePing 一份通报两条 / gov.uk 滚动页多条),
+        语义键分不开它们。2026-10-29 生产实测 19 个同键组里 3 组是这么误并的。
+        """
+        from normalize import open_db, upsert, fill_defaults, find_duplicate
+        a = fill_defaults(dict(_source_event(policy_key="禽类-HPAI",
+                                              disease_name_en="highly pathogenic avian influenza")))
+        b = fill_defaults(dict(_source_event(policy_key="生猪-ASF",
+                                              disease_name_en="African swine fever")))
+        con = open_db()
+        try:
+            upsert(con, a, merge=True)
+            self.assertIsNone(find_duplicate(con, b),
+                              "病害不相交 → 不同措施, 不能判为重复")
+        finally:
+            con.execute("DELETE FROM events WHERE event_id IN (?, ?)",
+                        (a["event_id"], b["event_id"]))
+            con.commit()
+            con.close()
+
+    def test_same_disease_still_dedupes(self):
+        """病害名相同(哪怕写法不同)→ 仍判重复, 冲突闸门不能误伤真重复。"""
+        from normalize import open_db, upsert, fill_defaults, find_duplicate
+        a = fill_defaults(dict(_source_event(policy_key="FMD-A",
+                                              disease_name_en="foot-and-mouth disease")))
+        b = fill_defaults(dict(_source_event(policy_key="FMD-B措辞不同",
+                                              disease_name_en="Foot-and-Mouth Disease")))
+        con = open_db()
+        try:
+            upsert(con, a, merge=True)
+            dup = find_duplicate(con, b)
+            self.assertIsNotNone(dup, "同一病害的两次抽取应判为重复")
+            self.assertEqual(dup[0], a["event_id"])
+        finally:
+            con.execute("DELETE FROM events WHERE event_id IN (?, ?)",
+                        (a["event_id"], b["event_id"]))
+            con.commit()
+            con.close()
+
+    def test_generic_disease_words_are_ignored(self):
+        """'foot-and-mouth disease' 与 'lumpy skin disease' 必须判为不同病害。
+
+        两者都含 'disease' —— 泛词不剔除的话会被误判成同一病害, 两条真政策
+        就会并掉(生产实测的误并组之一就是英国禁纳米比亚牛肉 vs 禁以色列牛胚胎)。
+        """
+        from normalize import subject_conflict
+        a = {"disease_name_en": "foot-and-mouth disease"}
+        b = {"disease_name_en": "lumpy skin disease"}
+        self.assertIsNotNone(subject_conflict(a, b),
+                             "泛词 'disease' 不能让两个不同病害看起来相同")
+        self.assertIsNone(subject_conflict(a, {"disease_name_en": "Foot-and-Mouth Disease"}))
+
+    def test_merge_duplicate_does_not_degrade_primary(self):
+        """落选记录不得把主记录的有效内容冲掉(旧实现方向写反)。"""
+        from normalize import merge_duplicate
+        old = {"event_id": "aaaaaaaaaaaa", "first_seen": "2026-10-20T10:00:00",
+               "verification_status": "verified", "impact_level": "中影响",
+               "dimension_scores": {"trade": 2.0, "biosecurity": 5.0,
+                                     "response": 4.0, "alignment": 2.0},
+               "impact_score": 3.4,
+               "products": ["cattle", "buffalo", "horse"],
+               "title_cn": "如何加强牛群管理以保护无蜱疫区",
+               "summary_cn": "SENASA依据655/2026号决议更新牛蜱综合防控与根除计划",
+               "source": {"name": "SENASA(阿根廷国家农业食品卫生与质量管理局)",
+                          "url": "https://www.argentina.gob.ar/x", "tier": 1,
+                          "quote": "决议原文摘录"}}
+        new = {"event_id": "bbbbbbbbbbbb", "first_seen": "2026-10-25T10:00:00",
+               "verification_status": "unverified", "impact_level": "低影响",
+               "dimension_scores": {"trade": 1.0, "biosecurity": 3.0,
+                                     "response": 2.0, "alignment": 2.0},
+               "impact_score": 1.95,
+               "products": ["bovino"],
+               "title_cn": "如何加强牛群管理以保护牛蜱净区",
+               "summary_cn": "阿根廷发布指南",
+               "source": {"name": "Argentina.gob.ar",
+                          "url": "https://www.argentina.gob.ar/x", "tier": 1,
+                          "quote": "短摘录"}}
+        merged = merge_duplicate(old, new)
+        self.assertEqual(merged["verification_status"], "verified", "已核验不被覆盖")
+        self.assertEqual(merged["impact_level"], "中影响", "已核验一侧的四维结论整块保留")
+        self.assertEqual(merged["dimension_scores"], old["dimension_scores"],
+                         "四维不混搭, 不能被另一侧的分数拼掉")
+        self.assertEqual(merged["products"], ["cattle", "buffalo", "horse", "bovino"],
+                         "商品取并集, 不丢任一边")
+        self.assertIn("SENASA", merged["source"]["name"],
+                      "来源名取信息量更大的一侧, 不被简写覆盖")
+        self.assertEqual(merged["summary_cn"], old["summary_cn"],
+                         "摘要取信息量更大的一侧")
+
+    def test_merge_duplicate_takes_verified_judgement_bundle(self):
+        """已核验一侧的四维结论整块覆盖未核验一侧的(不混搭)。"""
+        from normalize import merge_duplicate
+        old = {"event_id": "aaaaaaaaaaaa", "verification_status": "unverified",
+               "impact_level": "低影响", "impact_score": 1.95,
+               "dimension_scores": {"trade": 1.0, "biosecurity": 3.0,
+                                     "response": 2.0, "alignment": 2.0}}
+        new = {"event_id": "bbbbbbbbbbbb", "verification_status": "verified",
+               "impact_level": "中影响", "impact_score": 3.4,
+               "dimension_scores": {"trade": 2.0, "biosecurity": 5.0,
+                                     "response": 4.0, "alignment": 2.0}}
+        merged = merge_duplicate(old, new)
+        self.assertEqual(merged["impact_level"], "中影响")
+        self.assertEqual(merged["impact_score"], 3.4)
+        self.assertEqual(merged["dimension_scores"], new["dimension_scores"])
+
     def test_open_db_backfills_legacy_source_url(self):
         """加列之前入库的存量行, source_url 是 NULL —— open_db 必须回填。
 

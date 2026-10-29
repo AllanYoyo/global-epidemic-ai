@@ -3280,6 +3280,126 @@ class NormalizeDedupeTests(unittest.TestCase):
             con.commit()
             con.close()
 
+    def test_column_and_payload_stay_in_sync(self):
+        """冗余列必须与 payload 一致。
+
+        列是下游筛选依据(risk.py 用 `verification_status = 'verified'` 查列,
+        report/面板读 payload), 两边不一致就会出现「系统当已核验、报告写待核实」
+        的自相矛盾 —— 生产库 2026-10-15 就有 5 条这种历史遗留。
+        """
+        from normalize import open_db, upsert, fill_defaults
+        con = open_db()
+        e = fill_defaults(dict(_source_event(policy_key="列载荷同步")))
+        try:
+            upsert(con, e, merge=True)
+            row = con.execute(
+                "SELECT verification_status, impact_level, source_url, payload "
+                "FROM events WHERE event_id = ?", (e["event_id"],)).fetchone()
+            p = json.loads(row[3])
+            self.assertEqual(row[0], p.get("verification_status"), "核验状态列与载荷不一致")
+            self.assertEqual(row[1], p.get("impact_level"), "影响等级列与载荷不一致")
+            self.assertEqual(row[2], p.get("source", {}).get("url"), "来源 URL 列与载荷不一致")
+        finally:
+            con.execute("DELETE FROM events WHERE event_id = ?", (e["event_id"],))
+            con.commit()
+            con.close()
+
+    def test_open_db_backfills_legacy_source_url(self):
+        """加列之前入库的存量行, source_url 是 NULL —— open_db 必须回填。
+
+        不回填的话: 这些行永远查不到重, 跨轮次去重对存量记录完全失效
+        (生产实测: 加列后 257 条里只有 19 条有值, 238 条形同隐身)。
+        """
+        from normalize import open_db, fill_defaults
+        e = fill_defaults(dict(_source_event(policy_key="legacy-src-url")))
+        con = open_db()
+        con2 = None
+        try:
+            # 模拟存量行: payload 有 source.url, 但冗余列是 NULL
+            con.execute("DELETE FROM events WHERE event_id = ?", (e["event_id"],))
+            con.execute(
+                "INSERT INTO events (event_id,payload,record_type) VALUES (?,?,?)",
+                (e["event_id"], json.dumps(e, ensure_ascii=False), "policy"))
+            row = con.execute("SELECT source_url FROM events WHERE event_id = ?",
+                              (e["event_id"],)).fetchone()
+            self.assertIsNone(row[0], "前提: 模拟行的 source_url 应为 NULL")
+            con.commit()
+            con2 = open_db()          # 另开连接 → 触发 open_db 里的回填
+            row = con2.execute("SELECT source_url FROM events WHERE event_id = ?",
+                               (e["event_id"],)).fetchone()
+            self.assertEqual(row[0], e["source"]["url"], "open_db 应回填存量行的 source_url")
+        finally:
+            if con2 is not None:
+                con2.close()
+            con.execute("DELETE FROM events WHERE event_id = ?", (e["event_id"],))
+            con.commit()
+            con.close()
+
+    def test_find_duplicate_matches_legacy_row_after_backfill(self):
+        """存量行(加列前入库)也必须能被查重命中 —— 回填后的端到端效果。"""
+        from normalize import open_db, upsert, fill_defaults, find_duplicate
+        a = fill_defaults(dict(_source_event(policy_key="legacy-命中A")))
+        b = fill_defaults(dict(_source_event(policy_key="legacy-命中B措辞不同")))
+        con = open_db()
+        con2 = None
+        try:
+            upsert(con, a, merge=True)
+            # 把冗余列抹成 NULL, 模拟存量状态
+            con.execute("UPDATE events SET source_url = NULL WHERE event_id = ?",
+                        (a["event_id"],))
+            con.commit()
+            con2 = open_db()          # 触发回填
+            dup = find_duplicate(con2, b)
+            self.assertIsNotNone(dup, "存量行回填后必须被查重命中")
+            self.assertEqual(dup[0], a["event_id"])
+        finally:
+            if con2 is not None:
+                con2.close()
+            con.execute("DELETE FROM events WHERE event_id IN (?, ?)",
+                        (a["event_id"], b["event_id"]))
+            con.commit()
+            con.close()
+
+    def test_find_duplicate_query_uses_indexed_column(self):
+        """查重取候选必须走 source_url 索引, 不许退回 json_extract 全表扫。"""
+        import normalize
+        from normalize import open_db
+        self.assertNotIn("json_extract", normalize.FIND_DUP_SQL,
+                         "查重 SQL 不得解 payload JSON(全表扫)")
+        con = open_db()
+        try:
+            plan = con.execute("EXPLAIN QUERY PLAN " + normalize.FIND_DUP_SQL,
+                               ("https://x",)).fetchall()
+            detail = " ".join(str(r[-1]) for r in plan)
+            self.assertIn("idx_events_source_url", detail,
+                          "查重查询应命中 source_url 索引, 实际计划: %s" % detail)
+        finally:
+            con.close()
+
+    def test_iso_datetime_date_still_dedupes(self):
+        """生效日带 ISO 时间(2026-09-15T00:00:00)与纯日期(2026-09-15)是同一天。
+
+        旧实现拿 events.event_date 列比字符串, 这两种写法对不上 → 漏判重复。
+        """
+        from normalize import open_db, upsert, fill_defaults, find_duplicate
+        a = fill_defaults(dict(_source_event(policy_key="iso-A",
+                                              effective_date="2026-09-15T00:00:00",
+                                              event_date="2026-09-15T00:00:00")))
+        b = fill_defaults(dict(_source_event(policy_key="iso-B措辞不同",
+                                              effective_date="2026-09-15",
+                                              event_date="2026-09-15")))
+        con = open_db()
+        try:
+            upsert(con, a, merge=True)
+            dup = find_duplicate(con, b)
+            self.assertIsNotNone(dup, "同一自然日的两种日期写法应判为同一政策")
+            self.assertEqual(dup[0], a["event_id"])
+        finally:
+            con.execute("DELETE FROM events WHERE event_id IN (?, ?)",
+                        (a["event_id"], b["event_id"]))
+            con.commit()
+            con.close()
+
 
 class _FixedClock:
     """替 normalize.datetime: 固定 today/now, 让时间窗测试与真实时钟解耦。

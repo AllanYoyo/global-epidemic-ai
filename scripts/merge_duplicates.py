@@ -24,8 +24,8 @@
   会并入保留记录, 不丢信息。
 
 用法:
-  python scripts/merge_duplicates.py --db database/epidemic.db --dry-run   # 预览(默认)
-  python scripts/merge_duplicates.py --db database/epidemic.db --apply     # 执行
+  python scripts/merge_duplicates.py --db database/epidemic.db             # 预览(默认, 只报告不动库)
+  python scripts/merge_duplicates.py --db database/epidemic.db --apply     # 执行(自动先备份)
   python scripts/merge_duplicates.py --db database/epidemic.db --apply --backup /path/db.bak
 
 安全:
@@ -156,6 +156,8 @@ def main():
     ap.add_argument("--db", default=os.path.join(REPO, "database", "epidemic.db"),
                     help="SQLite 路径(默认 database/epidemic.db)")
     ap.add_argument("--apply", action="store_true", help="真正执行(默认只预览)")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="显式声明只预览(默认行为, 写这个只是让意图明确)")
     ap.add_argument("--backup", help="备份路径(不给则自动在库旁生成带时间戳的备份)")
     ap.add_argument("--events-dir", default=os.path.join(REPO, "data", "events"),
                     help="事件 JSON 快照目录(默认 data/events)")
@@ -164,6 +166,9 @@ def main():
 
     if not os.path.isfile(args.db):
         print("[错误] 找不到数据库: %s" % args.db)
+        return 2
+    if args.apply and args.dry_run:
+        print("[错误] --apply 与 --dry-run 互斥: 要么执行, 要么预览。")
         return 2
 
     con = open_db(args.db)
@@ -189,7 +194,6 @@ def main():
         if not args.apply:
             print("\n[预览] 未改动任何数据。加 --apply 执行(会自动先备份)。")
             return 0
-
         # 执行前强制备份 —— 归并会删记录, 没有回滚点不可接受
         backup = args.backup
         if not backup:

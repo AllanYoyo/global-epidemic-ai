@@ -485,6 +485,13 @@ def event_id_of(e):
 # 同一页面上同一天既有「收紧」也有「放松」(如 gov.uk 动植检页同日两条措施),
 # 领域不同(measures vs plant)的通报也会被并掉。带齐四要素后: 合并 26 条,
 # 丢真政策 0 条。生效日也不能省: 同一滚动页面上不同日期是不同措施。
+#
+# 查重取候选的 SQL —— 只走**索引列** source_url, 不解 payload JSON。
+# 单测会断言它不出现 json_extract 且查询计划命中 idx_events_source_url,
+# 防止有人改回全表扫(2026-10-29 加列就是为了这个)。
+FIND_DUP_SQL = "SELECT event_id, payload FROM events WHERE source_url = ?"
+
+
 def dedup_key(e):
     """语义去重键: (source_url, 生效日, policy_domain, action_type)。
 
@@ -510,22 +517,26 @@ def find_duplicate(con, e):
 
     查重只在**同一来源 URL** 上做 —— 这是安全边界: 语义键里没有主体(policy_key),
     主体由原文决定, 而原文由 URL 唯一确定。
+
+    取候选走**索引列** source_url(不是 json_extract(payload, ...)): 全表解 JSON
+    在台账上万条后不可接受。剩下三要素(生效日/领域/动作)在 Python 侧比对
+    dedup_key —— 而不是塞进 SQL —— 因为 payload 里的日期可能是 ISO 带时间
+    (2026-10-29T00:00:00), 与 events.event_date 列的写法对不上, 用列比会漏判。
     """
     key = dedup_key(e)
     if not key:
         return None
-    url, date, domain, action = key
-    rows = con.execute(
-        "SELECT event_id, payload FROM events "
-        " WHERE json_extract(payload, '$.source.url') = ? "
-        "   AND event_date = ? "
-        "   AND json_extract(payload, '$.policy_domain') = ? "
-        "   AND json_extract(payload, '$.action_type') = ?",
-        (url, date, domain, action)).fetchall()
+    url = key[0]
+    rows = con.execute(FIND_DUP_SQL, (url,)).fetchall()
     for eid, payload in rows:
         if eid == e.get("event_id"):
             continue        # 同 id 走常规合并, 不算重复
-        return eid, json.loads(payload)
+        try:
+            old = json.loads(payload)
+        except ValueError:
+            continue
+        if dedup_key(old) == key:
+            return eid, old
     return None
 
 
@@ -758,6 +769,24 @@ def open_db(path=None):
     # 解 JSON —— 台账上万条后不可接受。冗余一列出来只为可索引, 不改变 payload 合同。
     if "source_url" not in cols:
         con.execute("ALTER TABLE events ADD COLUMN source_url TEXT")
+    # 回填: 加列之前入库的存量记录这一列是 NULL, 不回填的话它们永远查不到重,
+    # 跨轮次去重形同虚设(实测生产库加列后 257 条里只有 19 条有值)。
+    # 幂等: 只补 NULL 行; 回填完成后 WHERE 命中 0 行, 之后每次 open 都是空转。
+    # 放在建索引之前 —— 一次建好, 免得回填完再重建一遍索引。
+    # 用 Python 而不是 json_extract(payload, ...) —— 后者依赖 SQLite 的 json1
+    # 扩展, 而 open_db() 是所有脚本(含只读的日报/面板)的必经之路, 不能让它
+    # 因为缺扩展而整体报错。
+    if con.execute("SELECT COUNT(*) FROM events WHERE source_url IS NULL").fetchone()[0]:
+        for eid, payload in con.execute(
+                "SELECT event_id, payload FROM events WHERE source_url IS NULL").fetchall():
+            try:
+                p = json.loads(payload)
+            except ValueError:
+                continue
+            src = p.get("source") if isinstance(p.get("source"), dict) else {}
+            url = str(src.get("url") or "").strip()
+            if url:
+                con.execute("UPDATE events SET source_url = ? WHERE event_id = ?", (url, eid))
     con.execute("CREATE INDEX IF NOT EXISTS idx_events_date ON events(event_date)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_events_status ON events(verification_status)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_events_type ON events(record_type)")

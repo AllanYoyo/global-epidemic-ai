@@ -126,9 +126,11 @@ CREATE INDEX idx_events_type  ON events(record_type);        -- 面板/API 只�
 策略要点：
 
 - **payload 是权威**：列只是查询用冗余投影；展示层从 payload JSON 读字段。改字段 = 改 payload 结构 + `docs/event-schema.md` + normalize/report 展示层，见 AGENTS.md 同步清单。
+- **冗余列必须与 payload 同源**：`upsert()` 用同一个 dict 写列与载荷, 二者不得分叉 —— 列是筛选依据(`risk.py` 查 `verification_status = 'verified'` 用列), 载荷是展示依据(`report.py`/面板读载荷), 一旦不一致就会出现「系统当已核验、报告写待核实」。绕过 `upsert()` 直改库时必须同时更新两处。
+- **`source_url` 冗余列要带回填**：加列 ≠ 生效 —— `open_db()` 里必须带**存量回填**(只补 NULL 行, 幂等, 纯 Python 不用 `json_extract` 以免依赖 SQLite json1 扩展), 否则加列之前入库的记录在语义查重时形同隐身(2026-10-29 生产实测: 加列后 257 条里只有 19 条有值, 其余 238 条永远查不到重)。语义查重取候选走 `source_url` 索引, 其余三要素(生效日/领域/动作)在 Python 侧比对 `dedup_key`。
 - **record_type=policy 过滤是硬要求**：webapp events API 必须显式 `record_type=policy` 才返回数据，防止旧疫情数据混入。
 - **镜像 JSON**：`data/events/<日期>/*.json` 是入库镜像，便于 diff 与重建；库丢失可用 JSON 重放 `normalize.py` 重建。
-- **迁移方式**：`open_db()` 幂等建表 + 缺列 `ALTER TABLE`，无独立迁移脚本；新增冗余列时照此模式补。
+- **迁移方式**：`open_db()` 幂等建表 + 缺列 `ALTER TABLE` + 存量回填，无独立迁移脚本；新增冗余列时照此模式补。
 - **数据不入库（git）**：`data/raw|events|reports/`、`database/`、`logs/` 均 gitignore；生产用 `EPIDEMIC_DATA_DIR`/`EPIDEMIC_DB` 指到 repo 外（如 `/opt/global-epidemic-ai`）。
 
 ### 3.1 抓取状态库（`database/fetch.db`，与业务库分离）

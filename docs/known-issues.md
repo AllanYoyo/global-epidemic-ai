@@ -324,6 +324,55 @@
 
 ## 已修复 (历史)
 
+### 2026-10-29 深夜 · M19 根治的三处补漏(source_url 索引 / 存量回填 / 列载荷一致)
+
+#### ① `source_url` 加了列却没回填 —— 238 条存量记录在查重时形同隐身
+- 位置: `scripts/normalize.py::open_db` / `::find_duplicate` / `FIND_DUP_SQL`。
+- 病根: M19 根治给 `events` 表加了 `source_url` 冗余列 + `idx_events_source_url` 索引,
+  但**加列 ≠ 生效**。①`open_db()` 没有回填 —— 加列之前入库的存量记录这一列仍是 NULL,
+  生产实测 257 条里只有 19 条有值(归并脚本写的), 其余 238 条永远查不到重, 跨轮次去重
+  对存量记录完全失效。②`find_duplicate()` 压根没用这个索引列, 还在
+  `json_extract(payload, '$.source.url')` 全表解 JSON —— 加列的目的整个落空。
+- 做法: ①`open_db()` 里加**幂等回填**(只补 NULL 行, 回填完成后每次 open 空转),
+  放在建索引之前(一次建好, 免得回填完再重建一遍索引); 回填用**纯 Python** 不用
+  `json_extract` —— `open_db()` 是所有脚本(含只读的日报/面板)的必经之路, 不能让它
+  因缺 SQLite json1 扩展而整体报错; ②`find_duplicate()` 改为只按 `source_url` 取候选
+  (命中索引), 剩下三要素(生效日/领域/动作)在 **Python 侧**比对 `dedup_key`。
+- 为什么三要素放 Python 侧而不是塞进 SQL: payload 里的日期可能是 ISO 带时间
+  (`2026-10-29T00:00:00`), 与 `events.event_date` 列的写法对不上, 用列比会漏判重复。
+  顺带修掉一个边角: 生效日带 ISO 时间(`2026-10-15T00:00:00`)与纯日期(`2026-10-15`)
+  本属同一天, 旧实现拿 `event_date` 列比字符串判不出重复。
+- 生产实测(2026-10-29 23:40): 回填后 `source_url` NULL 归零(238 → 0), 257 条记录的
+  语义键四要素**全部齐全**(可查重 257/257), 台账内同键重复 0 组; 端到端探针
+  (措辞改写 + 换 event_id)走真实 `normalize.py` 入库路径 → 命中 `[去重]`, 记录数
+  257 → 257, 探针 id 未单独成行。
+
+#### ② 5 条记录「列=verified / 载荷=unverified」—— 2026-10-15 临时脚本只改列没同步载荷
+- 位置: 生产库 `database/epidemic.db`(数据问题, 非代码问题)。
+- 现象: `verification_status` **列**说 `verified`、`payload` 说 `unverified`, 共 5 条。
+  列是下游筛选依据(`risk.py` 用 `verification_status = 'verified'` 查**列**),
+  载荷是展示依据(`report.py`/面板读**载荷**) → 同一批记录在系统里"当已核验"、
+  在日报里"写待核实", 自相矛盾。
+- 归因: 2026-10-15 07:44:35-48 生产机上跑过一次**临时脚本**(不在本仓库), 只更新了列,
+  没同步 payload; 载荷里的 `unverified` 是更早的残留(07:44:22 的研判写回快照里
+  也是 `unverified`), 后来被一次重抽取冲成了默认值。列上的 `verified` 是**更新的、
+  有意的**人工核验动作 —— 这 5 条来源全是官方域(`wto.org` / `agriculture.gov.au`,
+  tier=1), 符合 AGENTS.md「verified 只认官方域」的硬要求。
+- 处理: 方向取**载荷 ← 列**(把两边拉回一致, 不新增任何核验主张; 反向修会把已核验
+  结论抹掉, 那是不可逆的人工投入损失)。先备份 `epidemic.db.bak-consistency-20261029-224137`,
+  同步 5 条载荷 + 刷新对应 JSON 快照; 复核**剩余不一致 0 条**。
+- 遗留纪律: 今后任何绕过 `upsert()` 直接改库的脚本, 必须同时更新 payload 与列 ——
+  `upsert()` 用同一个 dict 写两处, 两处本该同源; 列与载荷分叉只可能来自仓库外的直写。
+
+#### ③ `merge_duplicates.py` 缺 `--dry-run` —— 文档写了参数、实现没有
+- 位置: `scripts/merge_duplicates.py::main`。
+- AGENTS.md「常用命令」里写着 `--dry-run`, 实现却没有, 照文档敲会报 unrecognized
+  arguments。补上(显式声明只预览)并与 `--apply` 互斥(两个都给则报错退出 2)。
+- 测试: `scripts/test_smoke.py` 275 例全绿(270 → 275, 新增 5 例: 存量行回填 /
+  存量行回填后能被查重命中 / 查重查询命中 `idx_events_source_url` / ISO 日期不再漏判 /
+  冗余列与载荷一致); `scripts/test_fetchlib.py` 32 例全绿。新用例做过**反向验证**:
+  回退 `normalize.py` 后 3 例变红(1 例因 `FIND_DUP_SQL` 缺失报错), 确认能抓住回归。
+
 ### 2026-10-29 · 取数内核换成 urlwatch 移植版: 条件请求 + 关注面变更判定
 
 #### P1 · 取数层换成 urlwatch 引擎内核, 旧取数器降为对照开关

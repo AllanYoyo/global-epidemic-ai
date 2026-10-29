@@ -114,10 +114,12 @@ CREATE TABLE events (
   impact_level        TEXT,
   impact_focus        TEXT,
   updated_at          TEXT,
-  record_type         TEXT                -- 后加列(ALTER TABLE), 数据合同过滤用
+  record_type         TEXT,               -- 后加列(ALTER TABLE), 数据合同过滤用
+  source_url          TEXT                -- 冗余列(2026-10-29, M19 根治): 语义查重键的一半, 供索引
 );
 CREATE INDEX idx_events_date  ON events(event_date);        -- 报告按日期聚合
 CREATE INDEX idx_events_status ON events(verification_status); -- 待核实/待研判筛选
+CREATE INDEX idx_events_source_url ON events(source_url);   -- 语义查重(同政策跨轮次去重)
 CREATE INDEX idx_events_type  ON events(record_type);        -- 面板/API 只取 policy
 ```
 

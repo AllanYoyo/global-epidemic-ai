@@ -467,6 +467,92 @@ def event_id_of(e):
     return hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
 
 
+# ---- M19 根治: 同一政策的跨轮次查重(2026-10-29 引入) ----
+#
+# 病根: event_id 的 subject 段来自 policy_key / disease_name_en / products /
+# target_countries / scope —— 这些都是**模型自由书写的文本**。同一份政策公告被
+# 抽两次, 措辞一变就换一个 event_id, 于是台账里出现多条同内容记录
+# (生产实测: 283 条里 26 条是同一条政策的重复抽取)。
+#
+# 为什么不改 event_id 公式: 改了等于**存量全部重算 id**, 283 条记录的对外引用
+# (报告、推送正文、台账)全部要跟着变, 牵动面过大且历史不可追溯。改为**保留
+# event_id 作为身份, 另建一个语义键做查重** —— 同一条政策先查到已有记录, 就
+# 复用那个 event_id 合并更新, 而不是新开一条。
+#
+# 键的构成(2026-10-29 生产实测校验, 283 条):
+#   source.url + 生效日 + policy_domain + action_type
+# 为什么必须带 domain 与 action: 只用「url + 生效日」会**并掉 7 条真政策** ——
+# 同一页面上同一天既有「收紧」也有「放松」(如 gov.uk 动植检页同日两条措施),
+# 领域不同(measures vs plant)的通报也会被并掉。带齐四要素后: 合并 26 条,
+# 丢真政策 0 条。生效日也不能省: 同一滚动页面上不同日期是不同措施。
+def dedup_key(e):
+    """语义去重键: (source_url, 生效日, policy_domain, action_type)。
+
+    任一要素缺失 → 返回 None(不查重)。宁可漏合也不错合: 错合会丢真政策,
+    漏合只是留一条重复记录, 还能靠归并脚本清理。
+    """
+    src = e.get("source") if isinstance(e.get("source"), dict) else {}
+    url = str(src.get("url") or "").strip()
+    if not url:
+        return None
+    date = _norm_date(e.get("effective_date")) or _norm_date(e.get("event_date"))
+    if not date:
+        return None
+    domain = str(e.get("policy_domain") or "").strip()
+    action = str(e.get("action_type") or "").strip()
+    if not domain or not action:
+        return None
+    return (url, date, domain, action)
+
+
+def find_duplicate(con, e):
+    """按语义键查已有记录, 返回 (event_id, payload) 或 None。
+
+    查重只在**同一来源 URL** 上做 —— 这是安全边界: 语义键里没有主体(policy_key),
+    主体由原文决定, 而原文由 URL 唯一确定。
+    """
+    key = dedup_key(e)
+    if not key:
+        return None
+    url, date, domain, action = key
+    rows = con.execute(
+        "SELECT event_id, payload FROM events "
+        " WHERE json_extract(payload, '$.source.url') = ? "
+        "   AND event_date = ? "
+        "   AND json_extract(payload, '$.policy_domain') = ? "
+        "   AND json_extract(payload, '$.action_type') = ?",
+        (url, date, domain, action)).fetchall()
+    for eid, payload in rows:
+        if eid == e.get("event_id"):
+            continue        # 同 id 走常规合并, 不算重复
+        return eid, json.loads(payload)
+    return None
+
+
+def merge_duplicate(old, new):
+    """把重复抽取的 new 合并进 old(保留 old 的身份与已核验/已研判结论)。
+
+    合并语义与 upsert() 的常规合并一致: 空值与兜底默认值不覆盖已有结论;
+    已核验(verified)不被未核验覆盖; 已研判的四维结论不被空值覆盖。
+    """
+    merged = dict(old)
+    for k, v in new.items():
+        if v in (None, [], {}) or k in ("event_id", "first_seen"):
+            continue
+        if k in DEFAULT_SENTINELS and v == DEFAULT_SENTINELS[k]:
+            if old.get(k) not in (None, "", DEFAULT_SENTINELS[k]):
+                continue
+        merged[k] = v
+    # 核验状态: 已核验不被未核验覆盖(方向性, 不是默认值覆盖)
+    if old.get("verification_status") == "verified" \
+            and new.get("verification_status") != "verified":
+        merged["verification_status"] = "verified"
+    merged["event_id"] = old.get("event_id")
+    merged["first_seen"] = old.get("first_seen") or new.get("first_seen")
+    merged["updated_at"] = now()
+    return merged
+
+
 def _parse_date(value):
     """把日期串解析为真实的日历日期; 不是合法日期返回 None(不猜)。
 
@@ -667,9 +753,16 @@ def open_db(path=None):
         con.execute("ALTER TABLE events ADD COLUMN impact_level TEXT")
     if "impact_focus" not in cols:
         con.execute("ALTER TABLE events ADD COLUMN impact_focus TEXT")
+    # source_url: 去重键的一半(2026-10-29 M19 根治引入)。
+    # 之前 source.url 只存在于 payload JSON 里, 无法建索引, 跨轮次查重只能全表扫 +
+    # 解 JSON —— 台账上万条后不可接受。冗余一列出来只为可索引, 不改变 payload 合同。
+    if "source_url" not in cols:
+        con.execute("ALTER TABLE events ADD COLUMN source_url TEXT")
     con.execute("CREATE INDEX IF NOT EXISTS idx_events_date ON events(event_date)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_events_status ON events(verification_status)")
     con.execute("CREATE INDEX IF NOT EXISTS idx_events_type ON events(record_type)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_events_source_url ON events(source_url)")
+    con.commit()
     return con
 
 
@@ -686,13 +779,15 @@ def upsert(con, e, merge=True):
         e["event_id"] = old.get("event_id") or e.get("event_id")
         e["first_seen"] = old.get("first_seen") or e.get("first_seen")
         e["updated_at"] = now()
+    src = e.get("source") if isinstance(e.get("source"), dict) else {}
     con.execute(
         "INSERT OR REPLACE INTO events "
-        "(event_id,payload,disease_en,country_en,category,event_date,verification_status,impact_level,impact_focus,updated_at,record_type) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        "(event_id,payload,disease_en,country_en,category,event_date,verification_status,impact_level,impact_focus,updated_at,record_type,source_url) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
         (e["event_id"], json.dumps(e, ensure_ascii=False), None,
          e.get("country_en"), "policy", e.get("event_date"),
-         e.get("verification_status"), e.get("impact_level"), e.get("impact_focus"), e.get("updated_at"), "policy"),
+         e.get("verification_status"), e.get("impact_level"), e.get("impact_focus"),
+         e.get("updated_at"), "policy", src.get("url")),
     )
     con.commit()
     return e
@@ -824,7 +919,7 @@ def main():
     out_dir = args.out or os.path.join(DATA_DIR, "events", biz_today())
     con = open_db(args.db_path) if (args.db or args.db_path) else None
     # 旧闻拦截只针对新增 event_id: 已入库记录的核验/研判回写走合并更新, 不受窗口限制
-    stale, written = [], 0
+    stale, written, deduped = [], 0, 0
     for i, e in events:
         reason = stale_reason(e, cutoff)
         if reason and not (con and _event_exists(con, e["event_id"])):
@@ -834,6 +929,22 @@ def main():
                 e.get("country_en")))
             continue
         if con:
+            # ---- M19 根治: 语义查重(入库前) ----
+            # 同一政策被抽两次(措辞漂移导致 event_id 不同)时, 不新开一条, 而是
+            # 复用已有记录的 event_id 合并更新 —— 台账里保持"一条政策一条记录"。
+            # 查重键 = source.url + 生效日 + policy_domain + action_type(见 dedup_key)。
+            if not args.replace:
+                dup = find_duplicate(con, e)
+                if dup:
+                    dup_id, dup_payload = dup
+                    merged = merge_duplicate(dup_payload, e)
+                    e = upsert(con, merged, merge=True)
+                    deduped += 1
+                    print("[去重] 第%d条 与已有 %s 同一政策(同 url/生效日/领域/动作), 合并更新不新开记录"
+                          % (i, dup_id))
+                    write_event_file(e, out_dir)
+                    written += 1
+                    continue
             e = upsert(con, e, merge=not args.replace)
         write_event_file(e, out_dir)
         written += 1
@@ -841,8 +952,8 @@ def main():
             e["event_id"], e.get("title_cn") or e.get("title_en") or e.get("summary_cn") or "（无标题）",
             e.get("country_en"), e.get("event_date"), e.get("verification_status"),
             e.get("impact_level") or "未研判"))
-    print("\n入库 %d 条(校验失败 %d 条, 旧闻拒收 %d 条) -> %s%s" % (
-        written, len(failed), len(stale), out_dir,
+    print("\n入库 %d 条(校验失败 %d 条, 旧闻拒收 %d 条, 去重合并 %d 条) -> %s%s" % (
+        written, len(failed), len(stale), deduped, out_dir,
         (" + SQLite: %s" % (args.db_path or DB_PATH)) if con else ""))
     if stale:
         print("提示: 确属新线索或历史回补/库重建时, 用 --max-age-days <N> 放宽窗口, 0 为关闭校验")

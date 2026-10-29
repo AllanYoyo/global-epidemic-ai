@@ -66,6 +66,7 @@ global-policy-search skill 仍为交互式检索入口（会话补数走 `run_sc
   `impact_score = trade*0.35 + biosecurity*0.30 + response*0.25 + alignment*0.10`；≥3.5 高影响 / ≥2.0 中影响 / 其余低影响；高→立即关注、中→持续观察、低→常规记录。四维齐全时 score/level/focus 由代码推导，不得手写冲突值。
 - **枚举值是中文**：action_type 收紧|放松|调整|恢复；policy_domain animal|plant|both|trade|measures；impact_type 约束|机会|中性；impact_level 高影响|中影响|低影响；china_relevance 直接涉及中国|间接影响|暂无明显关联；verification_status verified|single_source|unverified|false_positive|merged。
 - **可溯源硬要求**：`source.url` 与 `source.quote`（≤120 字）必填；原文没有的信息填 null，严禁编造。**`source.tier=1` 只能由 `normalize.py` 的 `OFFICIAL_DOMAIN_SUFFIXES`（官方域）支撑**——第三方站点（行业媒体、他国贸易门户转述、商业检疫数据库）强制降 tier 3、**且整条拒收不入库**（只可写进 `search-log.md` 当线索），不得判 verified；该国官方域确未收录时在 `source` 里显式加 `official: 1`，此时入库端会自动写 `source.official_note` 留痕待人工复核。新增官方域时同步补进该列表。
+- **同一政策跨轮次去重(2026-10-29, M19 根治)**：`event_id` 的 subject 段来自 `policy_key`/`disease_name_en`/`products`/`target_countries`/`scope`——全是**模型自由书写的文本**，同一份公告抽两次、措辞一变就换一个 id，台账里于是出现多条同内容记录（生产实测 283 条里 26 条同政策重复）。现改为：**入库前按语义键查重**，命中就复用已有 `event_id` 合并更新，不新开记录。语义键 = `source.url` + 生效日 + `policy_domain` + `action_type`（见 `normalize.dedup_key`）。**键里必须带领域与动作**：只用「url + 生效日」会并掉 7 条**真政策**（同一页同日既有收紧也有放松，如 gov.uk 动植检页；领域不同的通报也会被并）——2026-10-29 生产实测：带齐四要素可并 26 条、丢真政策 0 条。缺 url 或缺日期则不查重（宁可漏合不错合）。存量重复用 `scripts/merge_duplicates.py` 归并（默认 `--dry-run`，`--apply` 前自动备份），选主规则：已核验 > 已研判 > 正文更全 > `first_seen` 最早。**`event_id` 公式本身不改**（改了要重算全部存量 id，牵动历史引用不可追溯）。
 
 ## 常用命令
 
@@ -80,6 +81,8 @@ python scripts/policy_fetch.py --no-conditional --date X   # 忽略条件请求�
 python scripts/test_fetchlib.py                           # 内核离线测试(32 例, stdlib unittest)
 POLICY_FETCH_ENGINE=legacy scripts/run_scan.sh policy    # 临时回退旧取数器(取基线/排障)
 python scripts/normalize.py --input <json> --db     # 入库（支持 - 读 stdin）
+python scripts/merge_duplicates.py --db <库路径> --dry-run   # 存量同政策重复预览(默认不写库)
+python scripts/merge_duplicates.py --db <库路径> --apply     # 执行归并(--apply 前自动备份)
 python scripts/risk.py --event-id <id> --dim trade=4 --dim biosecurity=3,...   # 影响写回
 python scripts/report.py --date YYYY-MM-DD                # Markdown 日报（跑批只产这个）
 python scripts/report.py --date YYYY-MM-DD --excel --docx   # 按需生成 Excel/Word（--policy 已废弃为 no-op）

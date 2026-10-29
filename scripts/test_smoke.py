@@ -3150,6 +3150,137 @@ class NormalizeMergeTests(unittest.TestCase):
             con.close()
 
 
+class NormalizeDedupeTests(unittest.TestCase):
+    """语义查重(M19 根治, 2026-10-29 引入)。
+
+    病根: event_id 的 subject 段来自 policy_key / disease / products / targets /
+    scope —— 全是模型自由书写的文本。同一份政策公告抽两次, 措辞一变就换 id,
+    台账里出现多条同内容记录(生产实测 283 条里 26 条同政策重复)。
+
+    根治: 入库前按 (source.url + 生效日 + policy_domain + action_type) 查重,
+    命中就复用已有 event_id 合并更新, 不新开记录。
+    键里必须带 domain 与 action —— 只用「url + 生效日」会并掉 7 条真政策
+    (同一页同日既有收紧也有放松), 这是 2026-10-29 生产实测校验过的。
+    """
+
+    def test_same_policy_different_wording_merges_not_duplicates(self):
+        from normalize import open_db, upsert, fill_defaults, find_duplicate
+        con = open_db()
+        try:
+            # 同一 URL 同一措施, 但 policy_key 措辞不同 → event_id 必然不同
+            a = fill_defaults(dict(_source_event(policy_key="措施A措辞")))
+            b = fill_defaults(dict(_source_event(policy_key="措施B措辞")))
+            self.assertNotEqual(a["event_id"], b["event_id"],
+                                 "前提: 措辞不同 → event_id 不同(否则测不到查重)")
+            upsert(con, a, merge=True)
+            dup = find_duplicate(con, b)
+            self.assertIsNotNone(dup, "同 URL/生效日/领域/动作必须被查重命中")
+            self.assertEqual(dup[0], a["event_id"], "应指向已入库那条")
+        finally:
+            con.execute("DELETE FROM events WHERE event_id IN (?, ?)",
+                        (a["event_id"], b["event_id"]))
+            con.commit()
+            con.close()
+
+    def test_different_action_type_is_not_duplicate(self):
+        """同 URL 同日但动作不同(收紧 vs 放松)→ 是两条真政策, 绝不能并。"""
+        from normalize import open_db, upsert, fill_defaults, find_duplicate
+        con = open_db()
+        a = fill_defaults(dict(_source_event(policy_key="x", action_type="收紧")))
+        b = fill_defaults(dict(_source_event(policy_key="y", action_type="放松")))
+        try:
+            upsert(con, a, merge=True)
+            self.assertIsNone(find_duplicate(con, b),
+                              "收紧与放松是不同措施, 不能判为重复")
+        finally:
+            con.execute("DELETE FROM events WHERE event_id IN (?, ?)",
+                        (a["event_id"], b["event_id"]))
+            con.commit()
+            con.close()
+
+    def test_different_domain_is_not_duplicate(self):
+        """同 URL 同日同动作但领域不同(measures vs plant)→ 也是两条真政策。"""
+        from normalize import open_db, upsert, fill_defaults, find_duplicate
+        con = open_db()
+        a = fill_defaults(dict(_source_event(policy_key="x", policy_domain="measures")))
+        b = fill_defaults(dict(_source_event(policy_key="y", policy_domain="plant")))
+        try:
+            upsert(con, a, merge=True)
+            self.assertIsNone(find_duplicate(con, b), "不同领域不能判为重复")
+        finally:
+            con.execute("DELETE FROM events WHERE event_id IN (?, ?)",
+                        (a["event_id"], b["event_id"]))
+            con.commit()
+            con.close()
+
+    def test_different_effective_date_is_not_duplicate(self):
+        """同一滚动页面不同日期是不同措施。"""
+        from normalize import open_db, upsert, fill_defaults, find_duplicate
+        con = open_db()
+        a = fill_defaults(dict(_source_event(policy_key="x", effective_date="2026-09-15",
+                                              event_date="2026-09-15")))
+        b = fill_defaults(dict(_source_event(policy_key="y", effective_date="2026-09-20",
+                                              event_date="2026-09-20")))
+        try:
+            upsert(con, a, merge=True)
+            self.assertIsNone(find_duplicate(con, b), "不同生效日不能判为重复")
+        finally:
+            con.execute("DELETE FROM events WHERE event_id IN (?, ?)",
+                        (a["event_id"], b["event_id"]))
+            con.commit()
+            con.close()
+
+    def test_merge_duplicate_keeps_verified_and_judged_conclusions(self):
+        """归并时: 已核验不被未核验覆盖, 已研判四维不被空值覆盖。"""
+        from normalize import merge_duplicate
+        old = {"event_id": "aaaaaaaaaaaa", "first_seen": "2026-09-15T10:00:00",
+               "verification_status": "verified", "impact_level": "高影响",
+               "dimension_scores": {"trade": 4, "biosecurity": 3},
+               "measure_cn": "原措施", "source": {"url": "https://x.gov/a"}}
+        new = {"event_id": "bbbbbbbbbbbb", "first_seen": "2026-09-20T10:00:00",
+               "verification_status": "unverified", "impact_level": None,
+               "dimension_scores": {}, "policy_key": "新措辞",
+               "source": {"url": "https://x.gov/a"}}
+        merged = merge_duplicate(old, new)
+        self.assertEqual(merged["event_id"], "aaaaaaaaaaaa", "保留原有身份")
+        self.assertEqual(merged["first_seen"], "2026-09-15T10:00:00", "保留首次发现时间")
+        self.assertEqual(merged["verification_status"], "verified", "已核验不被覆盖")
+        self.assertEqual(merged["impact_level"], "高影响", "已研判等级不被空值覆盖")
+        self.assertEqual(merged["dimension_scores"], {"trade": 4, "biosecurity": 3},
+                         "四维结论不被空 dict 覆盖")
+        self.assertEqual(merged["policy_key"], "新措辞", "新抽取的有效内容应并入")
+
+    def test_dedup_key_requires_url_and_date(self):
+        """缺 url 或缺日期 → 不查重(宁可漏合不错合)。"""
+        from normalize import dedup_key
+        e = _source_event()
+        self.assertIsNotNone(dedup_key(e))
+        e2 = _source_event()
+        e2["source"] = dict(e2["source"])
+        e2["source"]["url"] = ""
+        self.assertIsNone(dedup_key(e2))
+        e3 = _source_event()
+        e3["effective_date"] = ""
+        e3["event_date"] = ""
+        self.assertIsNone(dedup_key(e3))
+
+    def test_source_url_column_is_written(self):
+        """source_url 冗余列必须落库(查重要靠它索引)。"""
+        from normalize import open_db, upsert, fill_defaults
+        con = open_db()
+        e = fill_defaults(dict(_source_event(policy_key="src-url-col")))
+        try:
+            upsert(con, e, merge=True)
+            row = con.execute("SELECT source_url FROM events WHERE event_id = ?",
+                              (e["event_id"],)).fetchone()
+            self.assertIsNotNone(row, "source_url 列应存在并有值")
+            self.assertEqual(row[0], e["source"]["url"])
+        finally:
+            con.execute("DELETE FROM events WHERE event_id = ?", (e["event_id"],))
+            con.commit()
+            con.close()
+
+
 class _FixedClock:
     """替 normalize.datetime: 固定 today/now, 让时间窗测试与真实时钟解耦。
 

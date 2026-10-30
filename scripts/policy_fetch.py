@@ -183,16 +183,38 @@ def archive_body(ctx, url, title, body):
 
 
 def process_source(ctx, tier, cn, en, sid, entry_url, today, fetch_fn, transport):
-    """处理一个源: 抓入口页 → 抽候选 → 逐个判定 → 落盘。"""
+    """处理一个源: 抓入口页 → 抽候选 → 逐个判定 → 落盘。
+
+    **快照事务**(2026-10-30, 修「瞬时失败 → 候选永久丢」): 本源所有 URL(入口页 +
+    候选文章页)的判定快照都延迟提交 —— 候选处理全程跑完才逐个落库; 半途异常
+    (存档超时 / collect 崩溃 / 进程被杀)则一个都不提交。这样下一轮入口页按旧凭据
+    发条件请求会拿回 200 全文、重新判「已变更」, 本源候选自动重驱; 已存档的候选
+    由 collect 按日去重, 不会重复落盘。若在判定后立即落库(旧行为), 半途失败后
+    下一轮入口页 304/未变 → 整源被跳过, 这批候选直到列表页再变都不会被补抓。
+    """
     res = SourceResult(sid, en)
     cache = ctx['cache']
     # 该源自己的关注面链(可按源收紧); 没配就用全局默认链
     attention = (ctx['source_options'].get(sid, {}).get('attention_filter')
                   or ctx['attention_filter'])
 
+    pendings = []
+
+    def _keep(judged):
+        # 本源事务: 所有 new/changed 判定的快照都攒着, 最后统一提交
+        if judged.pending_save is not None:
+            pendings.append(judged)
+        return judged
+
     # ---- 入口页: 条件请求 + 关注面指纹 ----
-    entry = runner.judge_url(cache, entry_url, fetch_fn, attention_filter=attention,
-                             job=make_job(transport, entry_url), source_id=sid)
+    entry = _keep(runner.judge_url(cache, entry_url, fetch_fn, attention_filter=attention,
+                                   job=make_job(transport, entry_url), source_id=sid,
+                                   defer_save=True))
+
+    def _commit_snapshots():
+        for judged in pendings:
+            judged.commit_pending()
+
     res.http = entry.http_status or (200 if entry.status in ('new', 'changed') else 0)
 
     if entry.status in (runner.STATUS_ERROR, runner.STATUS_RETRY):
@@ -216,8 +238,9 @@ def process_source(ctx, tier, cn, en, sid, entry_url, today, fetch_fn, transport
     # ---- 无日期线索的文章型链接: 抓文章页验日期(与旧取数器同口径, 至多验 2 个) ----
     fetched = {}
     for href, anchor in to_verify[:ctx['max_per_source']]:
-        art = runner.judge_url(cache, href, fetch_fn, attention_filter=attention,
-                               job=make_job(transport, href), source_id=sid)
+        art = _keep(runner.judge_url(cache, href, fetch_fn, attention_filter=attention,
+                                     job=make_job(transport, href), source_id=sid,
+                                     defer_save=True))
         if art.status not in (runner.STATUS_NEW, runner.STATUS_CHANGED):
             continue
         d = fetch_pages.page_publish_date(art.body or '')
@@ -243,8 +266,9 @@ def process_source(ctx, tier, cn, en, sid, entry_url, today, fetch_fn, transport
         if href in fetched:
             art, anchor, d = fetched[href]
         else:
-            art = runner.judge_url(cache, href, fetch_fn, attention_filter=attention,
-                                   job=make_job(transport, href), source_id=sid)
+            art = _keep(runner.judge_url(cache, href, fetch_fn, attention_filter=attention,
+                                         job=make_job(transport, href), source_id=sid,
+                                         defer_save=True))
         if art.status not in (runner.STATUS_NEW, runner.STATUS_CHANGED):
             # 没变 → 不重复存档(这正是条件请求与指纹判定的收益)
             continue
@@ -256,6 +280,8 @@ def process_source(ctx, tier, cn, en, sid, entry_url, today, fetch_fn, transport
             if "[拒绝]" in out:
                 res.log.append("| (全局) | 停止 | 当日存档触顶(collect 拒收) |")
                 ctx['capped'] = True
+                # 触顶是全局预算条件, 不是本源失败 → 照常提交, 下轮不必重驱本源
+                _commit_snapshots()
                 return res
             continue
 
@@ -278,6 +304,7 @@ def process_source(ctx, tier, cn, en, sid, entry_url, today, fetch_fn, transport
         res.log.append("| %s | 无窗口内条目 | 链接 %d, 列表页带窗内日期 %d, 文章页验证通过 %d |"
                        % (sid, len(links), len(confirmed), len(fetched)))
     res.status = 'changed' if took else 'unchanged'
+    _commit_snapshots()
     return res
 
 

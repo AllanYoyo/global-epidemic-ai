@@ -158,14 +158,20 @@ class _TextExtractor(HTMLParser):
       · 容器优先: 命中 container 标签则只取容器内的文本;
       · 噪声剔除: nav/header/footer/aside/script/style 一律不进正文;
       · 块级断行: 块级标签边界断行, 便于后续按行比对。
+
+    noise_stack 记录**仍未闭合**的噪声标签。stdlib html.parser 不做隐式闭标签,
+    <form>/<svg> 这类标签页面里没写闭合(政府站并不罕见)时计数器永不清零, 其后
+    所有正文都会被当噪声吞掉 —— 指纹坍缩成前缀, 后续变更静默漏检。html_to_text
+    靠它发现这种情况并降级重抽; ignore_noise 是降级重抽时不再当噪声的标签集。
     """
 
-    def __init__(self, containers=()):
+    def __init__(self, containers=(), ignore_noise=()):
         super().__init__(convert_charrefs=True)
         self.containers = tuple(containers or ())
+        self.ignore_noise = frozenset(ignore_noise or ())
         self.parts = []
         self.depth = 0
-        self.noise_depth = 0
+        self.noise_stack = []          # 未闭合的噪声标签(按标签名开-闭配对弹出)
         self.container_depth = 0
         self.container_hit = False
 
@@ -174,14 +180,18 @@ class _TextExtractor(HTMLParser):
         if self.container_depth == 0 and tag in self.containers:
             self.container_depth = self.depth
             self.container_hit = True
-        if tag in NOISE_TAGS:
-            self.noise_depth += 1
+        if tag in NOISE_TAGS and tag not in self.ignore_noise:
+            self.noise_stack.append(tag)
         if tag in BLOCK_TAGS:
             self.parts.append('\n')
 
     def handle_endtag(self, tag):
-        if tag in NOISE_TAGS and self.noise_depth:
-            self.noise_depth -= 1
+        if tag in NOISE_TAGS and tag not in self.ignore_noise:
+            if tag in self.noise_stack:
+                # 按标签名配对弹出(容忍 <nav><form></form></nav> 这类交错嵌套);
+                # 栈里没有对应开标签的多余闭合(如 <form></form></form>)直接忽略
+                i = len(self.noise_stack) - 1 - self.noise_stack[::-1].index(tag)
+                del self.noise_stack[i]
         if tag in BLOCK_TAGS:
             self.parts.append('\n')
         if self.container_depth == self.depth and tag in self.containers:
@@ -194,7 +204,7 @@ class _TextExtractor(HTMLParser):
             self.parts.append('\n')
 
     def handle_data(self, data):
-        if self.noise_depth:
+        if self.noise_stack:
             return
         if self.container_depth and self.depth < self.container_depth:
             # 容器之外的内容不要
@@ -212,13 +222,36 @@ class _TextExtractor(HTMLParser):
 
 
 def html_to_text(html, containers=()):
-    """HTML → 纯文本行。容器命中则只取容器内文本, 否则取去噪后的全页正文。"""
+    """HTML → 纯文本行。容器命中则只取容器内文本, 否则取去噪后的全页正文。
+
+    **未闭合噪声标签的兜底**(2026-10-30): stdlib html.parser 不做隐式闭标签,
+    <form>/<svg> 这类标签页面里没写闭合时, 其后全部正文会被当噪声吞掉 —— 指纹
+    坍缩成前缀, 之后的变更静默漏检(误报只是多跑一轮抽取, 漏检是直接丢政策)。
+    所以解析完若仍有未闭合的噪声标签, 就把这几类标签**降级成普通标签**重抽一遍:
+    它们的内容进正文, 其余噪声(nav/script/…)照旧剔除 —— 宁可指纹里多收一点
+    正文, 也不许吞掉正文。代价是受影响页面的指纹每轮多含一段正文, 变得更敏感
+    而非更迟钝; 且同一页面降级结果确定, 指纹仍稳定可比。
+    未终结的 <script>/<style> 是例外: html.parser 对未终结 CDATA 会把其后内容
+    整个静默缓冲、永不交付, 降级也救不回来 —— 检测 rawdata 残留, 直接正则兜底。
+    """
     if not html:
         return ''
     try:
         parser = _TextExtractor(containers)
         parser.feed(html)
         parser.close()
+        if parser.noise_stack:
+            parser = _TextExtractor(containers, ignore_noise=parser.noise_stack)
+            parser.feed(html)
+            parser.close()
+        if parser.noise_stack or parser.rawdata.strip():
+            # 两条兜底触发线:
+            # · noise_stack 仍有值 —— 降级重抽后仍未闭合(理论不可达, 防回归);
+            # · rawdata 有残留 —— html.parser 对**未终结的 CDATA**(<script>/<style>
+            #   没写闭合)会把其后内容整个静默缓冲、永不交付(goahead 在 cdata 模式下
+            #   找不到闭合就 break), 降级重抽也救不回来, 只能走正则兜底。
+            raise ValueError('噪声标签未闭合(script/style=%s, 残留 %d 字符)'
+                             % (sorted(parser.noise_stack), len(parser.rawdata.strip())))
         text = parser.text()
     except Exception:  # 畸形 HTML 不该让整轮取数炸掉
         logger.debug('HTML 解析失败, 退化为正则去标签', exc_info=True)

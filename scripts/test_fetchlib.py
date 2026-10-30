@@ -14,6 +14,8 @@
   A9  落盘格式 → *.meta.json 字段集与 collect.py 契约一致, 下游可直接消费
   A10 条件请求逃生开关 → --no-conditional 时忽略 304 强制重取
   10.3 对照验收 → 同一批 fixture, 新内核候选 URL 集合 == 旧 fetch_pages.py
+  R1  快照延迟提交 → 候选处理失败后下一轮重判 changed, 候选不永久丢(2026-10-30)
+  R2  未闭合噪声标签 → 降级重抽, 其后正文进指纹, 变更不静默漏检(2026-10-30)
 
 用法:
   python scripts/test_fetchlib.py          # 全部通过 -> 0
@@ -129,6 +131,44 @@ class FetchLibKernelTests(unittest.TestCase):
         self.assertIn("Nueva medida sanitaria", text)
         self.assertNotIn("Pie de pagina", text)
         self.assertNotIn("Todos los derechos", text)
+
+    def test_unclosed_form_keeps_body_text(self):
+        """未闭合的噪声标签不得吞掉其后正文(否则指纹截断 → 变更静默漏检)。"""
+        html = ('<html><body><nav>导航条 2026-10-30</nav>'
+                '<p>政策正文甲: 暂停进口</p>'
+                '<form><input name="q">'          # 这个 form 没写 </form>
+                '<p>政策正文乙: 恢复进口</p>'
+                '<footer>页脚时间戳</footer></body></html>')
+        text = filters.html_to_text(html)
+        self.assertIn('政策正文甲', text)
+        self.assertIn('政策正文乙', text, "未闭合 <form> 之后的正文被吞掉了")
+        # 降级只针对未闭合的标签本身, 其余噪声照旧剔除
+        self.assertNotIn('导航条', text)
+        self.assertNotIn('页脚时间戳', text)
+
+    def test_unclosed_svg_fingerprint_sensitive_to_later_changes(self):
+        """未闭合 <svg> 之后的正文变化必须能改变关注面指纹。"""
+        chain = policy_fetch.DEFAULT_ATTENTION_FILTER
+        base = ('<html><body><main><p>公告一</p>'
+                '<svg><circle r="3"/>'
+                '<p>公告二</p></main></body></html>')     # 第二个 svg 未闭合
+        changed = base.replace('公告二', '公告二(更新)')
+        self.assertNotEqual(runner.fingerprint(base, chain),
+                            runner.fingerprint(changed, chain),
+                            "svg 之后的正文变化没有进指纹(被吞了)")
+
+    def test_unclosed_script_keeps_later_content(self):
+        """未闭合 <script>: 降级后其后的内容进正文(漏检比指纹脏一点更严重)。"""
+        html = ('<html><body><script>var a = 1;'
+                '<p>公告正文</p></body></html>')
+        self.assertIn('公告正文', filters.html_to_text(html))
+
+    def test_stray_noise_endtag_is_harmless(self):
+        """多余的噪声闭合标签(无对应开标签)不得把已闭合的容器重新打开。"""
+        html = ('<html><body><form><input name="q"></form></form>'
+                '<p>政策正文</p></body></html>')
+        text = filters.html_to_text(html)
+        self.assertIn('政策正文', text)
 
     def test_conditional_headers_sent_and_cleared_on_retry(self):
         """条件请求头: 有 etag 时发 If-None-Match; 重试(tries>0)时撤销。"""
@@ -251,6 +291,106 @@ class JudgeTests(unittest.TestCase):
         self.assertEqual(len(out), 3)
         self.assertIn(1, out)
         self.assertIn(3, out)
+
+
+class DeferSaveTests(unittest.TestCase):
+    """快照延迟提交(2026-10-30): 候选处理失败不得把已判定页面钉成「未变」。
+
+    判定为 new/changed 就立即落库的话, 候选处理半途失败(存档超时/collect 崩溃)
+    后, 下一轮入口页 304/未变 → 整源跳过, 这批候选直到列表页再变都不会被补抓。
+    """
+
+    def setUp(self):
+        self.cache = SQLiteCacheStorage(os.path.join(TMP, "defer-%s.db" % id(self)))
+
+    def tearDown(self):
+        self.cache.close()
+
+    def _judge(self, pages, **kw):
+        # etag=None → 假传输每轮都回 200, 判定退化为纯指纹比对(不受 304 干扰)
+        transport = make_transport(pages, etag=None)
+        job = UrlJob(url=LIST_URL, transport=transport)
+        return runner.judge_url(self.cache, LIST_URL, policy_fetch.make_fetch_fn(),
+                                attention_filter=policy_fetch.DEFAULT_ATTENTION_FILTER,
+                                job=job, **kw)
+
+    def test_defer_holds_state_until_commit(self):
+        r1 = self._judge({LIST_URL: fixture("entry_list.html")}, defer_save=True)
+        self.assertEqual(r1.status, runner.STATUS_NEW)
+        self.assertIsNotNone(r1.pending_save, "new 判定必须挂延迟句柄")
+        self.assertIsNone(self.cache.load_state(LIST_URL), "延迟期间状态不得落库")
+        self.assertEqual(self.cache.load_body(LIST_URL), (None, None, None))
+        r1.commit_pending()
+        r1.commit_pending()          # 幂等: 重复提交不报错、不重复写
+        st = self.cache.load_state(LIST_URL)
+        self.assertEqual(st['content_sha1'], r1.fingerprint, "提交后指纹落库")
+        body, sha1, _ts = self.cache.load_body(LIST_URL)
+        self.assertEqual(sha1, r1.fingerprint)
+        self.assertEqual(body, fixture("entry_list.html").decode('utf-8'))
+
+    def test_failed_round_rejudges_changed_next_round(self):
+        """失败轮不提交 → 下一轮仍判 changed(候选重驱), 提交后才判 unchanged。"""
+        v1 = fixture("entry_list.html")               # 假传输只吃 bytes(与真实传输一致)
+        v2 = fixture("entry_list_new_article.html")
+        r1 = self._judge({LIST_URL: v1}, defer_save=True)
+        r1.commit_pending()                                   # 第一轮正常完成
+        r2 = self._judge({LIST_URL: v2}, defer_save=True)     # 第二轮内容变了, 但候选处理失败
+        self.assertEqual(r2.status, runner.STATUS_CHANGED)
+        r3 = self._judge({LIST_URL: v2}, defer_save=True)     # 第三轮: 快照没提交, 必须重判
+        self.assertEqual(r3.status, runner.STATUS_CHANGED,
+                         "失败轮的快照若被提交, 本轮会被钉成 unchanged → 候选永久丢")
+        r3.commit_pending()                                   # 重驱成功
+        r4 = self._judge({LIST_URL: v2}, defer_save=True)
+        self.assertEqual(r4.status, runner.STATUS_UNCHANGED)
+
+    def test_uncommitted_etag_not_persisted(self):
+        """未提交时新 etag 不得落库 —— 下轮用旧凭据, 服务器才可能回 200 全文重判。"""
+        versions = {'"e1"': fixture("entry_list.html"),
+                    '"e2"': fixture("entry_list_new_article.html")}
+        current = {'body': versions['"e1"']}
+
+        def transport(url, headers=None, timeout=None):
+            body = current['body']
+            inm = (headers or {}).get('If-None-Match')
+            # 只有凭据与当前内容**匹配**才回 304(真服务器的行为)
+            if inm and inm == '"e1"' and body is versions['"e1"']:
+                return 304, b'', {'ETag': '"e1"'}
+            if inm and inm == '"e2"' and body is versions['"e2"']:
+                return 304, b'', {'ETag': '"e2"'}
+            etag = '"e2"' if body is versions['"e2"'] else '"e1"'
+            return 200, body, {'ETag': etag}
+
+        def judge():
+            job = UrlJob(url=LIST_URL, transport=transport)
+            return runner.judge_url(self.cache, LIST_URL, policy_fetch.make_fetch_fn(),
+                                    attention_filter=policy_fetch.DEFAULT_ATTENTION_FILTER,
+                                    job=job, defer_save=True)
+
+        r1 = judge()              # 200 e1 → new
+        r1.commit_pending()
+        current['body'] = versions['"e2"']                    # 页面更新
+        r2 = judge()              # If-None-Match e1 对不上 → 200 e2 → changed(延迟)
+        self.assertEqual(r2.status, runner.STATUS_CHANGED)
+        self.assertEqual(self.cache.load_state(LIST_URL)['etag'], '"e1"',
+                         "未提交时新 etag 不得落库, 否则下轮 304 漏检")
+        r3 = judge()              # 旧凭据 e1 仍对不上 → 200 → 再次 changed(重驱)
+        self.assertEqual(r3.status, runner.STATUS_CHANGED)
+        r3.commit_pending()
+        r4 = judge()              # e2 对上了 → 304 → unchanged
+        self.assertEqual(r4.status, runner.STATUS_UNCHANGED)
+        self.assertEqual(r4.http_status, 304)
+
+    def test_unchanged_path_not_deferred(self):
+        """unchanged/304 路径不受延迟开关影响, 照旧立即落库。"""
+        transport = make_transport({LIST_URL: fixture("entry_list.html")})
+        job = UrlJob(url=LIST_URL, transport=transport)
+        fetch_fn = policy_fetch.make_fetch_fn()
+        chain = policy_fetch.DEFAULT_ATTENTION_FILTER
+        runner.judge_url(self.cache, LIST_URL, fetch_fn, attention_filter=chain, job=job)
+        r2 = runner.judge_url(self.cache, LIST_URL, fetch_fn, attention_filter=chain, job=job)
+        self.assertEqual(r2.status, runner.STATUS_UNCHANGED)
+        self.assertIsNone(r2.pending_save)
+        self.assertIsNotNone(self.cache.load_state(LIST_URL)['last_fetched'])
 
 
 class PolicyFetchTests(unittest.TestCase):
@@ -383,6 +523,24 @@ class PolicyFetchTests(unittest.TestCase):
         self.assertEqual(len(self._archives()), first)
         article_hits = [u for u in transport2.state['seen'] if u == ARTICLE_URL]
         self.assertEqual(article_hits, [], "入口页未变时不应再取文章页")
+
+    def test_archive_crash_does_not_lose_candidates_next_round(self):
+        """快照事务: 存档环节崩掉 → 下轮入口页仍判「已变更」, 候选自动重驱补上。
+
+        旧行为(判定即落库)下, 失败轮把入口页新快照写进 fetch.db, 下一轮 304/未变
+        → 整源跳过, 这批候选直到列表页再变都不会被补抓 —— 瞬时失败放大成永久丢。
+        """
+        transport = make_transport(self.pages)
+        with mock.patch.object(policy_fetch, "archive_body",
+                               side_effect=RuntimeError("collect.py 超时")):
+            summary, _logs = self._run(transport)
+        self.assertEqual(summary['archives'], 0)
+        self.assertEqual(summary['sources_dead'], 1, "存档崩溃的源必须计入失败(不得伪装安静日)")
+
+        # 第二轮(不加 mock): 入口页快照没被失败轮提交 → 仍判「已变更」→ 候选补齐
+        transport2 = make_transport(self.pages)
+        summary2, _logs = self._run(transport2)
+        self.assertGreater(summary2['archives'], 0, "失败轮的候选必须在下一轮被重驱补上")
 
     def test_parity_with_legacy_candidate_set(self):
         """10.3: 同一批 fixture, 新内核候选 URL 集合 == 旧 fetch_pages.py。"""

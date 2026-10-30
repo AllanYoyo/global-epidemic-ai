@@ -41,11 +41,48 @@ DEFAULT_ATTENTION_FILTER = ['html2text', 'strip', 'sha1sum']
 DEFAULT_RETAIN_LIMIT = 3
 
 
+class _PendingSave(object):
+    """new/changed 判定的**延迟落库**句柄(judge_url defer_save=True 时挂到结果上)。
+
+    为什么存在: 入口页快照若在候选处理之前落库, 候选处理半途失败(存档超时 /
+    collect 崩溃 / 进程被杀)后, 下一轮入口页 304/未变 → 整源被跳过, 这批候选
+    直到列表页再变才会被补抓 —— 瞬时失败被放大成永久丢候选。延迟提交后, 失败
+    即不提交, 下一轮按**旧**凭据(etag/指纹)发条件请求会拿回 200 全文, 本源重新
+    判定, 候选自动重驱(已存档的候选由 collect 按日去重, 不会重复落盘)。
+    """
+
+    __slots__ = ('_state', '_cache', '_url', '_sha1', '_body', '_retain_limit', '_done')
+
+    def __init__(self, state, cache, url, sha1, body, retain_limit):
+        self._state = state
+        self._cache = cache
+        self._url = url
+        self._sha1 = sha1
+        self._body = body
+        self._retain_limit = retain_limit
+        self._done = False
+
+    def commit(self):
+        if self._done:
+            return
+        # etag / last_modified 在 fetch 时已写进 state(内存), 这里随状态一并落库;
+        # 不提交时它们也不落库 —— 下一轮才会用旧凭据重新取全文。
+        self._state.save(content_sha1=self._sha1, status=200)
+        self._cache.save_body(self._url, self._sha1, self._body,
+                              self._state.current_timestamp)
+        try:
+            self._cache.clean(self._url, self._retain_limit)
+        except Exception:
+            logger.debug('快照裁剪失败(不影响判定): %s', self._url, exc_info=True)
+        self._done = True
+
+
 class JudgeResult(object):
     """单个 URL 的判定结果。"""
 
     __slots__ = ('url', 'source_id', 'status', 'body', 'fingerprint', 'diff',
-                 'exception', 'traceback', 'http_status', 'title', 'publish_date')
+                 'exception', 'traceback', 'http_status', 'title', 'publish_date',
+                 'pending_save')
 
     def __init__(self, url, source_id=None):
         self.url = url
@@ -59,10 +96,16 @@ class JudgeResult(object):
         self.http_status = None
         self.title = None
         self.publish_date = None
+        self.pending_save = None
 
     @property
     def changed(self):
         return self.status in (STATUS_NEW, STATUS_CHANGED)
+
+    def commit_pending(self):
+        """提交延迟落库(未延迟或已提交时空操作)。见 judge_url 的 defer_save。"""
+        if self.pending_save is not None:
+            self.pending_save.commit()
 
     def __repr__(self):
         return '<JudgeResult %s %s>' % (self.status, self.url)
@@ -102,11 +145,16 @@ def fingerprint(data, attention_filter=None, job=None):
 
 
 def judge_url(cache, url, fetch_fn, attention_filter=None, job=None, source_id=None,
-              max_tries=0, retain_limit=DEFAULT_RETAIN_LIMIT):
+              max_tries=0, retain_limit=DEFAULT_RETAIN_LIMIT, defer_save=False):
     """判定单个 URL 的状态。
 
     fetch_fn(url, state) -> 正文文本; 命中条件请求时抛 NotModifiedError。
     返回 JudgeResult(状态/正文/指纹/diff)。
+
+    defer_save=True 时, new/changed 的快照**不立即落库**, 而是挂一个待提交句柄
+    (result.pending_save), 由调用方在后续处理成功后调 result.commit_pending();
+    调用方失败(异常/不提交)则本轮快照整体作废, 下一轮重新判定 —— 见 _PendingSave。
+    unchanged / 304 / error 路径不受影响, 照旧立即落库。
     """
     state = JobState(cache, url, job=job, source_id=source_id)
     state.load()
@@ -158,12 +206,15 @@ def judge_url(cache, url, fetch_fn, attention_filter=None, job=None, source_id=N
 
     state.tries = 0
     if status in (STATUS_NEW, STATUS_CHANGED):
-        state.save(content_sha1=fp, status=200)
-        cache.save_body(url, fp, body, state.current_timestamp)
-        try:
-            cache.clean(url, retain_limit)
-        except Exception:
-            logger.debug('快照裁剪失败(不影响判定): %s', url, exc_info=True)
+        if defer_save:
+            result.pending_save = _PendingSave(state, cache, url, fp, body, retain_limit)
+        else:
+            state.save(content_sha1=fp, status=200)
+            cache.save_body(url, fp, body, state.current_timestamp)
+            try:
+                cache.clean(url, retain_limit)
+            except Exception:
+                logger.debug('快照裁剪失败(不影响判定): %s', url, exc_info=True)
         result.diff = state.get_diff()
     else:
         state.save(content_sha1=fp, status=200)

@@ -234,16 +234,33 @@ def _clean(s):
     return re.sub(r"\s+", " ", (s or "").replace('"', "」").replace("`", "").replace("$", "")).strip()
 
 
-def _is_tbt(rec):
-    """TBT 通报判定(动植物检疫红线, 2026-10-31 用户拍板剔除)。
+# TBT 面的检疫关键词白名单: TBT 通报默认剔除(动植物检疫红线), 但农药/残留/
+# 兽医/检疫主题的 TBT 通报是真检疫政策 —— 2026-10-31 实测: 欧盟苯嘧啶(农药
+# 不续批)走的就是 TBT 面, 一刀切会误杀。匹配 title + kw + productsFreeText
+# (词根式, _fold 去音标后 in 匹配)。
+QUARANTINE_TBT_HINTS = (
+    "pesticid", "residue", "maximum residue", "mrl", "veterinar", "phytosanitar",
+    "zoosanit", "quarantine", "animal health", "plant health", "plant variet",
+    "seed", "fertiliz", "fertilis", "feed additive", "biosecurity",
+)
 
-    ePing 按 watch 成员拉的是 SPS+TBT 两种通报, TBT(技术性贸易壁垒)面是
+
+def _is_tbt(rec):
+    """TBT 通报判定(默认剔除; 命中检疫词表则放行)。
+
+    ePing 按 watch 成员拉的是 SPS+TBT 两种通报, TBT(技术性贸易壁垒)面多数是
     汽车/药品/能源/频谱/消费品标签 —— 与动植物检疫无关(2026-10-31 生产实测:
-    越南药品法/汽车组装进口、美国原油天然气/频谱扩容混进日报)。只认字段
-    明示 TBT 才剔除: 字段缺失时放行(fail-open, 防形状漂移静默清空整个
-    ePing 面), 剔除计数打印留痕。
+    越南药品法/汽车组装进口、美国原油天然气/频谱扩容混进日报)。例外: 标题/
+    关键词/产品字段命中 QUARANTINE_TBT_HINTS 的 TBT 通报保留(农药不续批、
+    兽药残留类)。area 字段缺失时不是 TBT(fail-open, 防形状漂移静默清空
+    整个 ePing 面), 剔除计数打印留痕。
     """
-    return str(rec.get("area") or "").strip().upper() == "TBT"
+    if str(rec.get("area") or "").strip().upper() != "TBT":
+        return False
+    raw = rec.get("raw") or {}
+    hay = parse_eping._fold("%s %s %s" % (rec.get("title") or "", rec.get("kw") or "",
+                                          raw.get("productsFreeText") or ""))
+    return not any(h in hay for h in QUARANTINE_TBT_HINTS)
 
 
 def archive_items(items, date_str, raw_dir, max_archives_per_day, archive_lock):
@@ -401,16 +418,25 @@ def _selftest():
         sample_tbt = dict(sample, area="TBT", id="19878",
                           documentSymbol="G/TBT/N/USA/5678",
                           title="Draft decree on motor vehicle assembly imports")
+        sample_tbt_pest = dict(sample, area="TBT", id="19879",
+                               documentSymbol="G/TBT/N/EEC/5679",
+                               title="Draft Commission Implementing Regulation concerning "
+                                     "the non-renewal of the approval of phenmedipham",
+                               notifiedDocumentLink="https://members.wto.org/crnattachments/2016/TBT/EEC/16_4901_00_e.pdf",
+                               productsFreeText="Phenmedipham (pesticide active substance)")
         with open(path, "w", encoding="utf-8") as f:
-            json.dump({"items": [sample, sample_tbt]}, f)
+            json.dump({"items": [sample, sample_tbt, sample_tbt_pest]}, f)
         recs = parse_eping._from_json(path)
         r = recs[0]
+        check(len(recs) == 3, "样本三条都解析")
+        check(_is_tbt(recs[1]) and not _is_tbt(recs[2]),
+              "TBT 默认剔除, 农药类 TBT 白名单放行(苯嘧啶不误杀)")
         check(r["url"].startswith("https://members.wto.org/crnattachments"),
               "_pdf 认 API 的 notifiedDocumentLink")
         check(r["dist"] == "2016-11-29", "_dist 归一 API 的 distributionDate")
         check(r["kw"] == "Food safety", "_kw 对象数组取 name")
         check(parse_eping._is_action(r), "Import ban 标题命中动作词")
-        check(len(recs) == 2 and recs[1]["area"] == "TBT" and _is_tbt(recs[1]),
+        check(recs[1]["area"] == "TBT" and _is_tbt(recs[1]),
               "area 字段随 API 落到记录, TBT 可判")
         check(not _is_tbt(r), "area 缺失时放行(fail-open, 防形状漂移清空 ePing 面)")
         page = synth_html(sample)

@@ -512,6 +512,15 @@ if [ -n "${HERMES_RUN_CMD:-}" ]; then
           echo "[严重] 取数全挂(存活源 0) —— 判基础设施故障(不是安静日), 不得推送「今日无新增」"
         fi
       fi
+      # ---- ePing 通报骨干(2026-10-31 挂接, 确定性零 LLM, fail-open) ----
+      # WTO 官方 API 按 watch 成员拉 SPS/TBT 通报 —— 政策法规变化的官方载体,
+      # 与国别源主取数互补(国别站点是主干, ePing 是骨干增强)。未配
+      # EPING_API_KEY(~/.hermes/.env)或拉取失败都不阻塞主取数, 只留痕下轮重试。
+      if [ -n "${EPING_API_KEY:-}" ]; then
+        echo "[$(date '+%F %T')] ePing 通报拉取(WTO API)..."
+        "$PY" "$REPO/scripts/fetch_eping.py" --date "$SCAN_DATE" --archive \
+          || echo "[WARN] ePing 拉取失败(不阻塞主取数, 下轮重试)"
+      fi
       else
       # ---- 死通道跳过名单(2026-10-23 引入, 确定性) ----
       # 10-22/10-23 实测: 约 20 个通道连续两日一字不差地不可用(403/连接失败/

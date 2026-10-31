@@ -134,8 +134,12 @@ def _pdf(rec):
     原实现用一条正则把 'getattachment' 和 '.pdf' 混在一起, 且非贪婪匹配,
     实际先命中的是成员国的附件下载页(如 ica.gov.co/getattachment/...aspx),
     而 skill 明确要求走 members.wto.org/crnattachments 的存档 PDF。
+    2026-10-31 补: ePing 官方 API(api.wto.org/eping)的字段名是
+    notifiedDocumentLink(通报 PDF 直链, 可能逗号连着多个)与 dolLink(DOS 路径),
+    一并纳入扫描。
     """
-    raw = _first(rec, "crn", "documents", "attachments", "link", "url") or ""
+    raw = _first(rec, "crn", "notifiedDocumentLink", "dolLink",
+                 "documents", "attachments", "link", "url") or ""
     if isinstance(raw, (list, tuple)):
         raw = " ".join(str(x) for x in raw)
     raw = str(raw)
@@ -155,9 +159,17 @@ def _pdf(rec):
 
 
 def _kw(rec):
-    v = _first(rec, "kw", "keywords", "subjects", "tags", "categories")
+    v = _first(rec, "kw", "keywords", "spsKeywords", "subjects", "tags", "categories")
     if isinstance(v, (list, tuple)):
-        return " / ".join(str(x) for x in v)
+        # 2026-10-31 补: ePing 官方 API 的 keywords/spsKeywords 是对象数组
+        # [{id, name}], 取 name 拼接(旧实现 str(list) 会把整个 dict 拼进去)
+        parts = []
+        for x in v:
+            if isinstance(x, dict):
+                parts.append(str(x.get("name") or x.get("code") or ""))
+            else:
+                parts.append(str(x))
+        return " / ".join(p for p in parts if p)
     return str(v or "")
 
 

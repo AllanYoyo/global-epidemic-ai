@@ -4234,6 +4234,38 @@ class FetchPagesDateContextTests(unittest.TestCase):
         self.assertNotIn("nav2", by["https://example.org/nav"], "不得跨条目吞文本")
 
 
+class FetchEpingTests(unittest.TestCase):
+    """ePing 通报骨干(scripts/fetch_eping.py, 2026-10-31 挂接)。
+
+    WTO 官方 API(api.wto.org/eping)按 watch 成员拉 SPS/TBT 通报 —— 政策法规
+    变化的官方载体, 替代「各国首页捞新闻」的骨干上游。这里钉死离线合同:
+    成员别名匹配(含中国红线排除/非成员跳过)、API 形状解析(notifiedDocumentLink
+    直链/distributionDate 归一/keywords 对象数组)、动作预筛、综合档案。
+    """
+
+    def test_selftest_contract(self):
+        import fetch_eping
+        self.assertEqual(fetch_eping._selftest(), 0,
+                         "fetch_eping --selftest 必须全绿(成员匹配/API 解析/档案合成)")
+
+    def test_requires_key(self):
+        # 无 key 时必须明确报错退出 2(fail-visible), 不得静默空跑
+        import fetch_eping
+        old = sys.argv
+        saved = os.environ.pop("EPING_API_KEY", None)
+        sys.argv = ["fetch_eping.py", "--date", "2026-10-31"]
+        buf = io.StringIO()
+        try:
+            with redirect_stdout(buf):
+                rc = fetch_eping.main()
+        finally:
+            sys.argv = old
+            if saved is not None:
+                os.environ["EPING_API_KEY"] = saved
+        self.assertEqual(rc, 2)
+        self.assertIn("EPING_API_KEY", buf.getvalue())
+
+
 class DeadSourcesTests(unittest.TestCase):
     """死源分诊表(scripts/dead_sources.py, 2026-10-30 引入)。
 

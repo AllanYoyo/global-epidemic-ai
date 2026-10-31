@@ -416,7 +416,11 @@
     日期在锚文本**前方**布局或卡片式前端, 逐站定捕获策略或改 RSS;
   - X 级 3 站(tr-tarimorman/uk-defra/za-dalrrd): 列表页路径需重查(gov.uk /news 竟 404, 结构变过);
   - JS 壳 4 站(kr-mafra/mx-senasica/nz-beehive/th-dld): 找 RSS 作入口;
-  - **ePing API 挂接**(用户注册 key 中): 48 国 SPS/TBT 通报确定性取数, 替代「各国首页捞新闻」;
+  - **ePing API 挂接已落地**(2026-10-31 当日完成): `scripts/fetch_eping.py`
+    (WTO 官方 API api.wto.org/eping, 拉取+成员别名匹配+动作预筛+collect 存档,
+    `--selftest` 11 项离线自检)+ run_scan.sh fail-open 挂接 + parse_eping 认
+    API 字段(notifiedDocumentLink/spsKeywords)。**等 EPING_API_KEY 配进
+    ~/.hermes/.env 后生效**(用户注册中); 中国成员码按红线刻意排除;
   - **终检时序缺陷**: 「存档>0 但 0 入库」的失败判定发生在推送之后(2026-10-31 实测: 钉钉先收到
     「新增 0 条」才判失败撤锁)——应前移到推送前, 并区分「拒收=安静日照推」与「抽取故障=中止不推」。
 

@@ -70,6 +70,14 @@ global-policy-search skill 仍为交互式检索入口（会话补数走 `run_sc
     `entry_url`, 并单列 `sources_dead_detail`(含 `cause` A/B/C/D 分类); search-log
     的死源行带上码与 note。分诊脚本 `scripts/dead_sources.py`(逐源 × 逐日表)。
   - 生产实测: **存活 30 → 38 / 47**, 死源 17 → 9, 探活耗时 48.8s。
+- **ePing 通报骨干(2026-10-31)**: measures 面的**骨干上游** —— WTO 官方 API
+  (`api.wto.org/eping`, 规格 eping.yaml)按 watch 成员拉 SPS/TBT 通报, 通报本身
+  就是政策法规变化的官方载体, 替代「各国首页捞新闻」。`scripts/fetch_eping.py`
+  拉取→落 `data/raw/<日期>/eping.json`(parse_eping 直接可消费)→ 同款动作预筛
+  → 综合通报元数据档案经 collect.py 落盘(溯源链不变, wto.org 在官方域白名单)
+  → candidates.jsonl。**EPING_API_KEY 配在 ~/.hermes/.env**(永不入库); run_scan.sh
+  fail-open 挂接, 未配 key 或拉取失败都不阻塞国别源主取数。红线: 中国成员码
+  刻意排除(中国自身措施不入台账); 非成员(塞尔维亚/阿塞拜疆/朝鲜)自动跳过。
 - **新增交付物**: `data/raw/<日期>/fetch-status.json` —— per-source 状态汇总
   (`sources_alive` / `infra_failure`), 是 `run_scan.sh` 产物终检的输入之一。
   **存活源 0 = 基础设施故障, 不是安静日**, 此时中止本轮、不推送「今日无新增」(H20)。
@@ -112,6 +120,7 @@ python scripts/collect.py --url <url> --title <标题>  # 原文存档到 data/r
 python scripts/policy_fetch.py --date YYYY-MM-DD          # urlwatch 内核取数(条件请求+关注面判定)
 python scripts/dead_sources.py --days 10                 # 死源分诊表(逐源 × 逐日: 死因/连续死天数/假活)
 python scripts/entry_audit.py --current                  # 源入口验收闸门(判级 A/B/C/X; 改 sources.yaml 的 url/alt_urls 前必跑, 只有 A 级准入)
+python scripts/fetch_eping.py --date YYYY-MM-DD --archive  # ePing 通报骨干(WTO 官方 API, EPING_API_KEY 必配于 ~/.hermes/.env; --selftest 离线自检)
 python scripts/policy_fetch.py --selftest                 # 内核离线自检(不联网, 闭环跑通条件请求→四态)
 python scripts/policy_fetch.py --no-conditional --date X   # 忽略条件请求强制重取(防错误 304 漏检)
 python scripts/test_fetchlib.py                           # 内核离线测试(42 例, stdlib unittest)

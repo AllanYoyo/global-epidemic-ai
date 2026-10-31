@@ -12,6 +12,7 @@ personal/
 
 # 运行时产物(不入库)
 data/geocache.json        # 地理编码缓存, 每次面板访问都在变
+data/eping-members.json   # ePing 成员码表缓存(TTL 7 天)
 scripts/_audit*.py        # 临时排查脚本
 
 # Python

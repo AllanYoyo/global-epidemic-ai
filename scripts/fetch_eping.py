@@ -158,7 +158,7 @@ def match_members(labels, members):
         rx = re.compile(pat)
         hit = None
         for m in members:
-            name = str(m.get("name") or m.get("description") or m.get("member") or "")
+            name = str(m.get("text") or m.get("name") or m.get("description") or m.get("member") or "")
             if rx.search(parse_eping._fold(name)):
                 hit = str(m.get("value") or m.get("id") or m.get("code") or "")
                 break
@@ -314,13 +314,14 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 def _selftest():
     """离线自检: 成员别名匹配 / API 形状解析 / 直链提取 / 综合档案, 不联网。"""
+    # 形状对齐 API 实测(2026-10-31 真跑): 成员表只有 value/text 两个字段
     members = [
-        {"value": "C840", "name": "United States of America"},
-        {"value": "C704", "name": "Viet Nam"},
-        {"value": "C032", "name": "Argentina"},
-        {"value": "C410", "name": "Republic of Korea"},
-        {"value": "C764", "name": "Switzerland"},
-        {"value": "EU28", "name": "European Union"},
+        {"value": "C840", "text": "United States of America"},
+        {"value": "C704", "text": "Viet Nam"},
+        {"value": "C032", "text": "Argentina"},
+        {"value": "C410", "text": "Republic of Korea"},
+        {"value": "C764", "text": "Switzerland"},
+        {"value": "U918", "text": "European Union"},
     ]
     labels = ["Vietnam", "United States", "South Korea", "European Commission SANTE",
               "China WTO/TBT-SPS notification portals", "Serbia", "WTO ePing"]
@@ -333,7 +334,7 @@ def _selftest():
     check(matched.get("Vietnam") == "C704", "Vietnam → Viet Nam(C704)")
     check(matched.get("United States") == "C840", "United States → C840")
     check(matched.get("South Korea") == "C410", "South Korea → Republic of Korea")
-    check(matched.get("European Commission SANTE") == "EU28", "欧盟标签 → European Union")
+    check(matched.get("European Commission SANTE") == "U918", "欧盟标签 → European Union(U918)")
     check("China WTO/TBT-SPS notification portals" in unmatched
           and "Serbia" in unmatched and "WTO ePing" in unmatched,
           "中国(红线)/非成员/聚合标签 正确跳过并留痕")

@@ -15,6 +15,7 @@
   A10 条件请求逃生开关 → --no-conditional 时忽略 304 强制重取
   10.3 对照验收 → 同一批 fixture, 新内核候选 URL 集合 == 旧 fetch_pages.py
   R1  快照延迟提交 → 候选处理失败后下一轮重判 changed, 候选不永久丢(2026-10-30)
+      · 含两种失败形态: archive_body 抛异常 / collect 子进程 rc≠0(崩溃)
   R2  未闭合噪声标签 → 降级重抽, 其后正文进指纹, 变更不静默漏检(2026-10-30)
 
 用法:
@@ -25,6 +26,7 @@ import io
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -421,7 +423,8 @@ class PolicyFetchTests(unittest.TestCase):
 
     def _run(self, transport, sources=None, **kwargs):
         sources = sources if sources is not None else FAKE_SOURCES
-        probe = [(s[3], 200, "ok", "") for s in sources]
+        # probe 返回 (sid, code, state, note, ok_url) —— 末位是探活活着的入口
+        probe = [(s[3], 200, "ok", "", s[4]) for s in sources]
         with mock.patch.object(policy_fetch.scan_targets, "_pick", return_value=sources), \
              mock.patch.object(policy_fetch.probe_channels, "probe", return_value=probe):
             return policy_fetch.run(self.date, transport=transport, **kwargs)
@@ -541,6 +544,40 @@ class PolicyFetchTests(unittest.TestCase):
         transport2 = make_transport(self.pages)
         summary2, _logs = self._run(transport2)
         self.assertGreater(summary2['archives'], 0, "失败轮的候选必须在下一轮被重驱补上")
+
+    def test_collect_nonzero_exit_does_not_lose_candidates_next_round(self):
+        """collect 子进程 **rc≠0**(collect.py 自己崩了)→ 本源事务作废 → 候选不丢。
+
+        这是上面那个用例的**姊妹分支**: 异常路径(archive_body 抛)由异常外抛自然
+        作废事务, 但 rc≠0 路径旧实现是 `continue` —— 失败被吞掉、源处理「正常
+        完成」→ 入口页新快照照样提交 → 下一轮 304/未变 → 整源跳过 → 这条候选
+        直到列表页再变都不会被补抓(瞬时失败被放大成永久丢候选)。
+
+        collect.py 的带内非零退出只有当日触顶(输出含 "[拒绝]", 走全局预算分支),
+        其余 rc≠0 都是未捕获异常(崩溃) —— 属瞬时失败, 必须能重试。
+        """
+        crash = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="",
+            stderr='Traceback (most recent call last):\n'
+                   '  File "collect.py", line 155, in main\n'
+                   'OSError: [Errno 28] No space left on device\n')
+        transport = make_transport(self.pages)
+        with mock.patch.object(policy_fetch, "archive_body", return_value=crash):
+            summary, _logs = self._run(transport)
+        self.assertEqual(summary['archives'], 0, "collect 崩溃时不该产出存档")
+        self.assertEqual(summary['sources_dead'], 1,
+                         "rc≠0 的源必须计入失败(不得伪装成 unchanged/安静日)")
+        self.assertEqual(summary['sources_unchanged'], 0)
+
+        # 第二轮 collect 恢复正常: 入口页快照没提交 → 仍判「已变更」→ 候选补齐
+        transport2 = make_transport(self.pages)
+        summary2, _logs2 = self._run(transport2)
+        self.assertGreater(summary2['archives'], 0,
+                           "rc≠0 的候选必须在下一轮被重驱补上(不得永久丢)")
+        self.assertEqual(summary2['sources_dead'], 0)
+        # 补上的是同一批候选 URL(不是别的条目)
+        seen = [u for u in transport2.state['seen'] if u.startswith("https://example.org/")]
+        self.assertIn(ARTICLE_URL, seen, "失败轮的文章页必须在下一轮被重新取回")
 
     def test_parity_with_legacy_candidate_set(self):
         """10.3: 同一批 fixture, 新内核候选 URL 集合 == 旧 fetch_pages.py。"""

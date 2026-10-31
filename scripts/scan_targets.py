@@ -76,12 +76,35 @@ def parse_sources(text):
             continue
         if cur is None:
             continue
-        m = re.match(r"^    (name|url|tier|track|attention_filter): (.*)$", line)
+        m = re.match(r"^    (name|url|tier|track|attention_filter|alt_urls): (.*)$", line)
         if m:
             sources[cur][m.group(1)] = _val(m.group(2))
         elif line.startswith(("  - ", "  #", "  \n")) or re.match(r"^\S", line):
             cur = None  # 块结束(下一个源/注释/顶层 key)
     return sources
+
+
+def parse_alt_urls(raw):
+    """alt_urls → 入口候选列表(探活时任一入口活即算该源活)。
+
+    写法规格: `alt_urls: [https://a/, https://b/]` 或逗号分隔。2026-10-30 起:
+    17 个死源里 4 个是「主入口死了但另一个入口活着」(co-minagricultura 主入口
+    404 而站点根 200 / rs-minpolj http 入口 302 到 https 而 https 侧 TLS 坏),
+    没有候选入口就永远救不回来。
+    """
+    if not raw:
+        return []
+    raw = raw.strip()
+    if raw.startswith("[") and raw.endswith("]"):
+        raw = raw[1:-1]
+    items = [x.strip().strip('"').strip("'") for x in raw.split(",")]
+    return [x for x in items if x.startswith(("http://", "https://"))]
+
+
+def load_sources():
+    """读 sources.yaml 的源表(探活取 alt_urls 用)。"""
+    with open(SOURCES_PATH, encoding="utf-8") as f:
+        return parse_sources(f.read())
 
 
 def parse_attention_filter(raw):

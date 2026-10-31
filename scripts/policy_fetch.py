@@ -186,11 +186,21 @@ def process_source(ctx, tier, cn, en, sid, entry_url, today, fetch_fn, transport
     """处理一个源: 抓入口页 → 抽候选 → 逐个判定 → 落盘。
 
     **快照事务**(2026-10-30, 修「瞬时失败 → 候选永久丢」): 本源所有 URL(入口页 +
-    候选文章页)的判定快照都延迟提交 —— 候选处理全程跑完才逐个落库; 半途异常
-    (存档超时 / collect 崩溃 / 进程被杀)则一个都不提交。这样下一轮入口页按旧凭据
-    发条件请求会拿回 200 全文、重新判「已变更」, 本源候选自动重驱; 已存档的候选
-    由 collect 按日去重, 不会重复落盘。若在判定后立即落库(旧行为), 半途失败后
-    下一轮入口页 304/未变 → 整源被跳过, 这批候选直到列表页再变都不会被补抓。
+    候选文章页)的判定快照都延迟提交 —— 候选处理全程跑完才逐个落库; 半途失败则
+    **一个都不提交**。这样下一轮入口页按旧凭据发条件请求会拿回 200 全文、重新判
+    「已变更」, 本源候选自动重驱。若在判定后立即落库(旧行为), 半途失败后下一轮
+    入口页 304/未变 → 整源被跳过, 这批候选直到列表页再变都不会被补抓。
+
+    「半途失败」含**两种 collect 失败形态**(2026-10-30 补): ①`archive_body` 抛
+    异常(60s 超时)→ 异常外抛, 事务自然作废; ②collect 子进程 **rc≠0**(collect.py
+    自身崩了, 退出码 1)→ 旧实现把它当成「这条没存成」continue 掉, 源处理照常
+    「正常完成」→ 入口页新快照照样提交 → 下一轮 304/未变 → 整源跳过 → **候选永久
+    丢**(与事务要修的病根同一个)。现在 rc≠0 且非触顶 → 事务作废 + 本源记失败
+    (进 fetch-status 的 sources_dead), 下一轮整源重驱把候选补上。
+
+    注意: 事务作废后, 下一轮重驱时**本轮已存成的候选会被再存一份**(collect.py
+    不按 URL 去重, 只按当日条数配额; 重复存档多占配额, 但抽取段按 URL 去重
+    (extract_records.done_urls), 不会重复烧 LLM 调用)。
     """
     res = SourceResult(sid, en)
     cache = ctx['cache']
@@ -256,6 +266,7 @@ def process_source(ctx, tier, cn, en, sid, entry_url, today, fetch_fn, transport
     pool.sort(key=lambda x: x[2] or today, reverse=True)
 
     took = 0
+    archive_failed = False
     for href, anchor, d in pool:
         if took >= ctx['max_per_source']:
             break
@@ -276,14 +287,27 @@ def process_source(ctx, tier, cn, en, sid, entry_url, today, fetch_fn, transport
         p = archive_body(ctx, href, anchor, art.body or '')
         out = (p.stdout or "") + (p.stderr or "")
         if p.returncode != 0:
-            res.log.append("| %s | 拒收 | %s |" % (sid, _clean(out)[:60]))
             if "[拒绝]" in out:
+                res.log.append("| %s | 拒收 | %s |" % (sid, _clean(out)[:60]))
                 res.log.append("| (全局) | 停止 | 当日存档触顶(collect 拒收) |")
                 ctx['capped'] = True
                 # 触顶是全局预算条件, 不是本源失败 → 照常提交, 下轮不必重驱本源
                 _commit_snapshots()
                 return res
-            continue
+            # 非触顶的 rc≠0 = collect.py **自己崩了**(未捕获异常 → 退出码 1;
+            # collect.py 的带内非零退出只有触顶与参数冲突, 后者本调用方不会触发)。
+            # 这是**瞬时**失败(磁盘满/权限/被杀), 不是「这条没存成」—— 若照常把
+            # 本源快照提交掉, 下一轮入口页 304/未变 → 整源跳过 → 这条候选直到列表
+            # 页再变都不会被补抓(瞬时失败被放大成永久丢候选, 与快照事务要修的
+            # 是同一个病根)。故本源事务作废: **一个快照都不提交**, 本源记失败
+            # (进 fetch-status 的 sources_dead, 不再伪装成「未变」), 下一轮入口页
+            # 按旧凭据拿回 200 全文重新驱动本源, 候选自动重驱补上。
+            # 本源其余候选不再继续处理: 事务已作废, 继续存只是白费(下一轮整源
+            # 重驱时它们会重驱), 且 collect 崩了多半是系统性的(磁盘满/权限)。
+            res.log.append("| %s | 存档失败 | %s |" % (sid, _clean(out)[:60]))
+            res.log.append("| %s | 事务作废 | 快照未提交, 本源记失败, 下轮重驱 |" % sid)
+            archive_failed = True
+            break
 
         with ctx['archive_lock']:
             ctx['archived'] += 1
@@ -300,6 +324,11 @@ def process_source(ctx, tier, cn, en, sid, entry_url, today, fetch_fn, transport
             'topics': [],
         })
 
+    if archive_failed:
+        # 存档失败 → 本源事务作废: 不提交任何快照(入口页也不提交) → 下一轮整源
+        # 重驱, 失败的那条候选自动补上。源记失败, 不许伪装成「未变」。
+        res.status = 'error'
+        return res
     if took == 0:
         res.log.append("| %s | 无窗口内条目 | 链接 %d, 列表页带窗内日期 %d, 文章页验证通过 %d |"
                        % (sid, len(links), len(confirmed), len(fetched)))
@@ -364,9 +393,15 @@ def run(date_str, max_per_source=DEFAULT_MAX_PER_SOURCE, max_total=DEFAULT_MAX_T
     source_options = load_source_options()
 
     # 通道预探: [dead] 直接跳过(与旧取数器同口径, 四层降级在 probe_channels 里)
+    # **死因必须留下来**(2026-10-30): 以前只留 (state=='ok') 这个布尔, HTTP 码与
+    # 降级 note 当场丢掉 → search-log 只写「预探 dead」, 事后完全无从分诊(这次
+    # 17 个死源的死因码, 是人工在 VPS 上重跑 curl 才捞回来的)。现在把 (code,
+    # note) 一并落进 fetch-status.json 与 search-log, 死源分诊才能日常化。
     alive = {}
-    for sid, code, state, _note in probe_channels.probe(date_str):
+    probe_detail = {}
+    for sid, code, state, note, ok_url in probe_channels.probe(date_str):
         alive[sid] = (state == "ok")
+        probe_detail[sid] = {'code': code, 'note': note or '', 'entry_url': ok_url}
 
     transport = transport or make_transport()
     fetch_fn = make_fetch_fn(conditional=conditional)
@@ -398,8 +433,11 @@ def run(date_str, max_per_source=DEFAULT_MAX_PER_SOURCE, max_total=DEFAULT_MAX_T
             tier, cn, en, sid, url = item
             if not alive.get(sid, False):
                 return None
+            # **取数必须用探活活着的那个入口**(多入口机制): 探活用 alt_urls 里
+            # 的 B 判活, 取数却还抓主入口 A → 等于没救。
+            entry = probe_detail.get(sid, {}).get('entry_url') or url
             try:
-                return process_source(ctx, tier, cn, en, sid, url, today, fetch_fn, transport)
+                return process_source(ctx, tier, cn, en, sid, entry, today, fetch_fn, transport)
             except Exception as exc:                    # 单源失败不中断整轮
                 res = SourceResult(sid, en)
                 res.status = 'error'
@@ -414,9 +452,12 @@ def run(date_str, max_per_source=DEFAULT_MAX_PER_SOURCE, max_total=DEFAULT_MAX_T
 
         for _tier, _cn, _en, sid, _url in picked:
             if not alive.get(sid, False):
-                log_lines.append("| %s | 不可用 | 预探 dead |" % sid)
+                det = probe_detail.get(sid) or {}
+                code, note = det.get('code'), det.get('note') or ""
+                log_lines.append("| %s | 不可用 | 预探 dead(%s%s) |" % (
+                    sid, code or "连接失败", (" %s" % note) if note else ""))
 
-        summary = _write_status(ctx, date_str, picked, alive, results)
+        summary = _write_status(ctx, date_str, picked, alive, results, probe_detail)
     finally:
         cache.close()
         shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -424,13 +465,17 @@ def run(date_str, max_per_source=DEFAULT_MAX_PER_SOURCE, max_total=DEFAULT_MAX_T
     return summary, log_lines
 
 
-def _write_status(ctx, date_str, picked, alive, results):
+def _write_status(ctx, date_str, picked, alive, results, probe_detail=None):
     """写 fetch-status.json —— 供 run_scan.sh 产物终检消费(补 known-issues H20)。
 
     口径:
       sources_alive = 总数 - 失败数(预探 dead + 抓取 error 都算失败)
       infra_failure = 存活源为 0 —— 这是「全挂」; 「安静日」是存活源 > 0 但 0 存档。
       两者必须可区分, 否则全挂会伪装成「今日无新增」照常推送(H20)。
+
+    **死因留痕**(2026-10-30): per_source 带上探活码/降级 note, 并单列
+    sources_dead_detail(探活即死的源: 码 + note + 死因分类)。此前死因当场丢弃,
+    死源分诊只能靠人工重跑 —— 「17 个死源」就是查不出原因才拖到今天。
     """
     total = len(picked)
     probe_dead = sum(1 for _t, _c, _e, sid, _u in picked if not alive.get(sid, False))
@@ -439,6 +484,30 @@ def _write_status(ctx, date_str, picked, alive, results):
     alive_n = total - dead_n
     changed = sum(1 for r in results if r.status == 'changed')
     unchanged = sum(1 for r in results if r.status == 'unchanged')
+    probe_detail = probe_detail or {}
+
+    per_source = []
+    for r in sorted(results, key=lambda x: x.source_id):
+        d = r.as_dict()
+        det = probe_detail.get(r.source_id) or {}
+        d['probe_code'] = det.get('code')
+        d['probe_note'] = det.get('note') or ''
+        d['entry_url'] = det.get('entry_url')
+        per_source.append(d)
+
+    dead_detail = []
+    for _t, _c, _e, sid, _u in picked:
+        if alive.get(sid, False):
+            continue
+        det = probe_detail.get(sid) or {}
+        code, note = det.get('code'), det.get('note') or ''
+        dead_detail.append({
+            'source_id': sid,
+            'probe_code': code,
+            'probe_note': note,
+            'cause': probe_channels.classify_dead_cause(code, note),
+        })
+
     summary = {
         'date': date_str,
         'sources_total': total,
@@ -449,7 +518,9 @@ def _write_status(ctx, date_str, picked, alive, results):
         'archives': ctx['archived'],
         # 全挂(存活源 0)与「安静日」(存活源 > 0 但 0 存档)必须可区分 —— H20
         'infra_failure': alive_n == 0,
-        'per_source': [r.as_dict() for r in sorted(results, key=lambda x: x.source_id)],
+        'per_source': per_source,
+        # 探活即死的源: 码 + note + 死因分类(分诊入口)
+        'sources_dead_detail': sorted(dead_detail, key=lambda x: x['source_id']),
     }
     path = os.path.join(ctx['raw_dir'], "fetch-status.json")
     with open(path, "w", encoding="utf-8") as f:

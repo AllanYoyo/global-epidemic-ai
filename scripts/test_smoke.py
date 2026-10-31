@@ -4193,5 +4193,104 @@ class ParseEpingTests(unittest.TestCase):
         self.assertIn("没有解析出条目", out)
 
 
+class FetchPagesDateContextTests(unittest.TestCase):
+    """fetch_pages 行内日期上下文 + 和历/佛历解析(2026-10-31, 假活治理第一杠杆)。
+
+    假活根因之一: 政府新闻列表的日期不在 <a> 锚文本里(jp-maff 的
+    `标题</a>（令和8年10月30日）`、gov.br 的同级 <span>30/10/2026</span>),
+    parse_date 又不认识和历/佛历 → 几百条文章链接 0 条进窗。修法:
+    extract_links 零宽捕获行内上下文(不吞下一条 <a>, 不跨条目归日期) +
+    parse_date 补和历(令和/平成/昭和)与泰国佛历(BE-543)。
+    """
+
+    def test_parse_date_eras_and_calendars(self):
+        import fetch_pages as fp
+        d = datetime.date
+        self.assertEqual(fp.parse_date("令和8年10月30日"), d(2026, 10, 30))
+        self.assertEqual(fp.parse_date("令和元年5月1日"), d(2019, 5, 1))
+        self.assertEqual(fp.parse_date("平成31年4月30日"), d(2019, 4, 30))
+        self.assertEqual(fp.parse_date("昭和50年3月15日"), d(1975, 3, 15))
+        self.assertEqual(fp.parse_date("30/10/2569"), d(2026, 10, 30))   # 泰国佛历
+        self.assertEqual(fp.parse_date("30.10.2026"), d(2026, 10, 30))   # 欧陆点分
+        self.assertEqual(fp.parse_date("2026-10-30"), d(2026, 10, 30))   # ISO 不受影响
+        self.assertIsNone(fp.parse_date("没有日期的文本"))
+
+    def test_extract_links_captures_inline_date_context(self):
+        import fetch_pages as fp
+        html = ('<ul>'
+                '<li><a href="/j/press/r7/1030.html">标题甲</a>（令和8年10月30日）</li>'
+                '<li><a href="/noticias/x1234567890123">titulo</a>'
+                ' <span class="data">30/10/2026</span></li>'
+                '<li><a href="/nav">nav1</a></li>'
+                '<li><a href="/nav2">nav2</a></li>'
+                '</ul>')
+        links = fp.extract_links(html, "https://example.org/")
+        self.assertEqual(len(links), 4, "密集列表不得丢链接(前瞻捕获零宽)")
+        by = dict(links)
+        self.assertIn("令和8年10月30日",
+                      by["https://example.org/j/press/r7/1030.html"])
+        self.assertIn("30/10/2026",
+                      by["https://example.org/noticias/x1234567890123"])
+        self.assertNotIn("nav2", by["https://example.org/nav"], "不得跨条目吞文本")
+
+
+class DeadSourcesTests(unittest.TestCase):
+    """死源分诊表(scripts/dead_sources.py, 2026-10-30 引入)。
+
+    2026-10-30 审查发现 P1: report() 把 int 参数 days 直接覆盖成
+    _days_with_status() 的返回 list, 空数据提示行的 `%d` 格式化 list 直接
+    TypeError 裸崩(退出码 1 + traceback) —— 而这恰是新部署/取数段从未跑过时
+    的第一路径, 修复后必须钉死「空数据 = 友好提示 + 退出码 0」。
+    """
+
+    def _report(self, raw_dir, days=7, focus_day=None):
+        import dead_sources
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc = dead_sources.report(raw_dir, days, focus_day)
+        return rc, out.getvalue()
+
+    def test_empty_data_dir_prints_hint_and_returns_0(self):
+        # 修复前: 这条路径 `%d` % list → TypeError 裸崩, 退出码 1
+        raw_dir = os.path.join(tempfile.mkdtemp(prefix="radar-ds-empty-"), "raw")
+        os.makedirs(raw_dir)
+        rc, out = self._report(raw_dir)
+        self.assertEqual(rc, 0)
+        self.assertIn("没有 fetch-status.json", out)
+        self.assertIn("近 7 天", out)
+
+    def test_report_renders_sections_from_status_file(self):
+        # 正常路径: 逐日覆盖 / 逐源死因(含建议) / 假活 三段都要出; days 保持 int 语义
+        root = tempfile.mkdtemp(prefix="radar-ds-data-")
+        day_dir = os.path.join(root, "raw", "2026-10-30")
+        os.makedirs(day_dir)
+        with open(os.path.join(day_dir, "fetch-status.json"), "w", encoding="utf-8") as f:
+            json.dump({
+                "date": "2026-10-30", "sources_total": 3, "sources_alive": 1,
+                "sources_dead": 2, "sources_changed": 0, "sources_unchanged": 1,
+                "archives": 0, "infra_failure": False,
+                "per_source": [
+                    {"source_id": "b-src", "status": "unchanged", "archives": 0},
+                ],
+                "sources_dead_detail": [
+                    {"source_id": "d-src", "probe_code": 403,
+                     "probe_note": "no-ua-retry 403-blocked", "cause": "C-反爬封锁"},
+                    {"source_id": "e-src", "probe_code": 0,
+                     "probe_note": "curl-exit-6", "cause": "D-源已失效"},
+                ],
+            }, f, ensure_ascii=False)
+        rc, out = self._report(os.path.join(root, "raw"))
+        self.assertEqual(rc, 0)
+        self.assertIn("一、逐日覆盖", out)
+        self.assertIn("二、逐源死因", out)
+        self.assertIn("C-反爬封锁", out)
+        self.assertIn("curl 无解: 走替代上游", out)      # ADVICE 跟着死因分类出
+        self.assertIn("三、假活", out)
+        # --date 明细段(第四段)也能出
+        rc2, out2 = self._report(os.path.join(root, "raw"), focus_day="2026-10-30")
+        self.assertEqual(rc2, 0)
+        self.assertIn("四、2026-10-30 明细", out2)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

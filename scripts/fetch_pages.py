@@ -54,6 +54,8 @@ ARTICLE_PATH = re.compile(
 SLUG_LIKE = re.compile(r"/[a-z0-9][a-z0-9\-_]{12,}$", re.I)
 # 日期形态: 2026-10-20 / 20/10/2026 / 20.10.2026 / 2026年10月20日 / Oct 20, 2026
 #           / 24 de octubre de 2026(西) / 24 de outubro de 2026(葡)
+#           / 令和8年10月30日(和历, 2026-10-31 补: jp-maff 列表页实测)
+#           / 30/10/2569(泰国佛历 BE, 公元 = BE - 543)
 DATE_PATTERNS = [
     re.compile(r"(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})"),
     re.compile(r"(\d{1,2})[-/.](\d{1,2})[-/.](20\d{2})"),
@@ -64,6 +66,8 @@ DATE_PATTERNS = [
                r"septiembre|setiembre|octubre|noviembre|diciembre)\s+de\s+(20\d{2})", re.I),
     re.compile(r"\d{1,2}\s+de\s+(janeiro|fevereiro|mar[cç]o|abril|maio|junho|julho|"
                r"agosto|setembro|outubro|novembro|dezembro)\s+de\s+(20\d{2})", re.I),
+    re.compile(r"(令和|平成|昭和)(元|\d{1,2})年(\d{1,2})月(\d{1,2})日"),
+    re.compile(r"(\d{1,2})[-/.](\d{1,2})[-/.](2[4-9]\d{2})"),
 ]
 MONTHS_EN = {m: i + 1 for i, m in enumerate(
     ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"])}
@@ -105,11 +109,21 @@ def parse_date(text):
                 if not mo:
                     return None
                 d, y = int(m.group(0).split()[0]), int(g[1])
-            else:
+            elif i == 5:
                 mo = MONTHS_PT.get(g[0].lower())
                 if not mo:
                     return None
                 d, y = int(m.group(0).split()[0]), int(g[1])
+            elif i == 6:
+                # 和历 → 公元: 昭和=1925+N / 平成=1988+N / 令和=2018+N(元年=1)
+                era_y = {"昭和": 1925, "平成": 1988, "令和": 2018}.get(g[0])
+                if not era_y:
+                    return None
+                y = era_y + (1 if g[1] == "元" else int(g[1]))
+                mo, d = int(g[2]), int(g[3])
+            else:
+                # 泰国佛历(BE) day-first: 2400-2999 → 公元 = BE - 543
+                d, mo, y = int(g[0]), int(g[1]), int(g[2]) - 543
             return datetime.date(y, mo, d)
         except (ValueError, IndexError):
             continue
@@ -130,12 +144,26 @@ def curl(url, timeout=FETCH_TIMEOUT, max_bytes=400000):
 
 def extract_links(html, base_url):
     """抽 (href, 锚文本), 相对链接用 urljoin 解析成绝对(多数 CMS 新闻列表是相对路径,
-    10-25 实测不解析相对链接会丢掉几乎全部新闻入口)。"""
+    10-25 实测不解析相对链接会丢掉几乎全部新闻入口)。
+
+    **行内日期上下文(2026-10-31)**: 多数政府新闻列表的日期不在 <a> 锚文本里,
+    而在同一行的紧随文本里 —— 两种形态: 纯文本 `标题</a>（令和8年10月30日）`
+    (jp-maff 实测) 与同级标签 `标题</a> <span>30/10/2026</span>`(gov.br 型)。
+    这里把 </a> 后 90 字符(含标签, 剥标签取纯文本)拼进锚文本, 截断上限放宽到
+    160 保证日期段不被切掉, pick_candidates 的 parse_date 才看得见。
+    刻意只取**后方**上下文: 前方上下文会吞到上一条的日期, 造成错行归日。
+    上下文用**前瞻捕获**(?=)零宽取用 —— 不消费字符, 否则密集列表里会吞掉
+    紧邻的下一条 <a>, 丢大部分链接; 并在 <a</li></tr> 边界处截断, 不跨条目
+    归日期(2026-10-31 自查修正)。
+    代价: 存档标题会带日期尾巴(纯展示字段, 溯源链读的是原文, 不受影响)。"""
     from urllib.parse import urljoin
     links = []
-    for m in re.finditer(r"<a\b[^>]*href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>",
+    for m in re.finditer(r"<a\b[^>]*href=[\"']([^\"']+)[\"'][^>]*>"
+                         r"(.*?)</a>(?=((?:(?!<a\b|</li>|</tr>).){0,120}))",
                          html, re.I | re.S):
-        href, anchor = m.group(1).strip(), re.sub(r"<[^>]+>", " ", m.group(2))
+        href = m.group(1).strip()
+        tail = re.sub(r"<[^>]+>", " ", m.group(3) or "").strip()
+        anchor = re.sub(r"<[^>]+>", " ", m.group(2))
         if href.startswith(("mailto:", "javascript:", "tel:", "#")):
             continue
         href = urljoin(base_url, href)
@@ -143,7 +171,9 @@ def extract_links(html, base_url):
             href = "https:" + href
         if not href.startswith(("http://", "https://")):
             continue
-        links.append((href, _clean(anchor)[:120]))
+        if tail:
+            anchor = (anchor + " " + tail).strip()
+        links.append((href, _clean(anchor)[:160]))
     return links
 
 
@@ -253,11 +283,16 @@ def fetch(date_str, max_per_source=MAX_PER_SOURCE, max_total=MAX_TOTAL,
 
     # 探测复用: [dead] 跳过(零工具调用, 与 Agent 版同口径); note 是降级重试留痕
     alive = {}
-    for sid, code, state, _note in probe_channels.probe(date_str):
+    entry_url = {}
+    for sid, code, state, _note, ok_url in probe_channels.probe(date_str):
         alive[sid] = state == "ok"
+        if ok_url:
+            entry_url[sid] = ok_url
 
     # 入口页**并行**抓取(21 源串行最坏 5 分钟会挤爆 10 分钟预算)
-    todo = [(sid, url) for _t, _cn, en, sid, url in picked if alive.get(sid, False)]
+    # 取数用探活活着的那个入口(多入口机制), 与 policy_fetch 同口径
+    todo = [(sid, entry_url.get(sid) or url)
+            for _t, _cn, en, sid, url in picked if alive.get(sid, False)]
     with ThreadPoolExecutor(max_workers=8) as ex:
         pages = dict(zip([t[0] for t in todo],
                          ex.map(lambda t: curl(t[1]), todo)))

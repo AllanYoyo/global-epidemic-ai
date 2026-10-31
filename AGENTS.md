@@ -43,13 +43,33 @@ global-policy-search skill 仍为交互式检索入口（会话补数走 `run_sc
   会把其后内容整个静默缓冲不交付, 降级救不回来, 检测 rawdata 残留直接正则兜底。
   方向是「宁可指纹多收正文, 不许吞正文」—— 降级只让指纹更敏感, 不会漏检。
 - **快照事务(2026-10-30)**: 一个源的所有判定快照(入口页+候选文章页)**延迟提交** ——
-  候选处理全程跑完才落库; 半途异常(存档超时/collect 崩溃)则一个都不提交, 下一轮入口页
-  按旧凭据拿回 200 全文重新判「已变更」, 本源候选自动重驱(已存档的由 collect 按日去重)。
+  候选处理全程跑完才落库; 半途失败则一个都不提交, 下一轮入口页按旧凭据拿回 200 全文
+  重新判「已变更」, 本源候选自动重驱。**两种 collect 失败形态都算「半途失败」**:
+  ①`archive_body` 抛异常(60s 超时)→ 异常外抛, 事务自然作废; ②collect 子进程
+  **rc≠0**(collect.py 自己崩了, 退出码 1)→ **事务作废 + 本源记失败**(进
+  `fetch-status.json` 的 `sources_dead`, 不许伪装成 unchanged/安静日); 输出含
+  `[拒绝]` 的当日触顶是全局预算条件、不是本源失败, 照常提交。
   若判定即落库(旧行为), 瞬时失败后下一轮 304/未变 → 整源被跳过, 候选直到列表页再变都
-  不会被补抓 —— 瞬时失败被放大成永久丢候选。
+  不会被补抓 —— 瞬时失败被放大成永久丢候选。代价: 事务作废后下一轮重驱时, 本轮已存成
+  的候选会再存一份(collect 不按 URL 去重, 只占当日配额; 抽取段按 URL 去重, 不重复烧
+  LLM 调用)。
 - **两级作业**: 外层一个作业 = 一个源(入口页); 内层按 URL 展开(条件请求的最小粒度)。
   抓取状态以 **URL** 为主键存 `database/fetch.db`(`EPIDEMIC_FETCH_DB` 指路), 不碰
   `epidemic.db`。
+- **死源治理(2026-10-30)**: 47 源里 17 个探活即死, 且**死因当场被丢弃**(只留
+  `(state=='ok')` 布尔, HTTP 码与降级 note 全丢)→ 事后完全无从分诊。三件事同时修:
+  - **降级链补强**(`probe_channels.http_get_full`): 触发条件从字符串前缀
+    `'curl-exit-6'` 改为按 **curl 退出码分类**(`RC_RETRYABLE`/`RC_HARD_DEAD`),
+    补 `-4`(治 IPv6 半死: 收到响应头但传输卡死)与浏览器 UA 层; 死时把最后
+    退出码写进 note —— 死因分诊就靠它。
+  - **多入口**(`config/sources.yaml` 的 `alt_urls`): 探活逐个试, 任一入口活即算
+    活, 并把**活的那个入口**带回给取数段(取数必须用同一个入口, 否则等于没救)。
+    实测救回: co-minagricultura(主入口404/站点根200)、rs-minpolj(http→https)、
+    az-afsa、de-fli、in-dahd、cn-sps-aggregator(省级 TBT 站)、ru-rshn-khv。
+  - **死因留痕**: `fetch-status.json` 的 per_source 增 `probe_code`/`probe_note`/
+    `entry_url`, 并单列 `sources_dead_detail`(含 `cause` A/B/C/D 分类); search-log
+    的死源行带上码与 note。分诊脚本 `scripts/dead_sources.py`(逐源 × 逐日表)。
+  - 生产实测: **存活 30 → 38 / 47**, 死源 17 → 9, 探活耗时 48.8s。
 - **新增交付物**: `data/raw/<日期>/fetch-status.json` —— per-source 状态汇总
   (`sources_alive` / `infra_failure`), 是 `run_scan.sh` 产物终检的输入之一。
   **存活源 0 = 基础设施故障, 不是安静日**, 此时中止本轮、不推送「今日无新增」(H20)。
@@ -90,9 +110,11 @@ global-policy-search skill 仍为交互式检索入口（会话补数走 `run_sc
 pip install -r requirements.txt
 python scripts/collect.py --url <url> --title <标题>  # 原文存档到 data/raw/（可溯源链第一环）
 python scripts/policy_fetch.py --date YYYY-MM-DD          # urlwatch 内核取数(条件请求+关注面判定)
+python scripts/dead_sources.py --days 10                 # 死源分诊表(逐源 × 逐日: 死因/连续死天数/假活)
+python scripts/entry_audit.py --current                  # 源入口验收闸门(判级 A/B/C/X; 改 sources.yaml 的 url/alt_urls 前必跑, 只有 A 级准入)
 python scripts/policy_fetch.py --selftest                 # 内核离线自检(不联网, 闭环跑通条件请求→四态)
 python scripts/policy_fetch.py --no-conditional --date X   # 忽略条件请求强制重取(防错误 304 漏检)
-python scripts/test_fetchlib.py                           # 内核离线测试(32 例, stdlib unittest)
+python scripts/test_fetchlib.py                           # 内核离线测试(42 例, stdlib unittest)
 POLICY_FETCH_ENGINE=legacy scripts/run_scan.sh policy    # 临时回退旧取数器(取基线/排障)
 python scripts/normalize.py --input <json> --db     # 入库（支持 - 读 stdin）
 python scripts/merge_duplicates.py --db <库路径> --dry-run   # 存量同政策重复预览(默认不写库)

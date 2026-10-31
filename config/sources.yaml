@@ -303,6 +303,9 @@ sources:
   - id: cn-sps-aggregator
     name: 中文 SPS/TBT 通报平台(海关总署标法中心/商务部/省级 TBT 咨询中心)
     url: https://www.gdtbt.org.cn/sps.aspx
+    # 多入口(2026-10-30): 主入口对直连 403(省级平台首页常对直连返回 403),
+    # 但同体系的省级 TBT 咨询中心站可通 —— 探活时逐个试, 任一活即算活。
+    alt_urls: [https://www.hntbt.org.cn/, https://www.chinawto.mofcom.gov.cn/]
     coverage: [measures]
     tier: 1
     schedule: daily
@@ -364,6 +367,7 @@ sources:
   - id: ru-rshn-khv
     name: 俄罗斯远东兽医监督局(哈巴罗夫斯克/犹太州/马加丹)
     url: https://rshn-khv-eao.ru/
+    alt_urls: [http://rshn-khv-eao.ru/]
     coverage: [animal]
     tier: 1
     schedule: am
@@ -406,6 +410,7 @@ sources:
   - id: de-fli
     name: 德国弗里德里希洛弗勒研究所(FLI TSIS 动物疾病信息系统)
     url: https://www.tsis.fli.de/Reports/Info.aspx
+    alt_urls: [https://www.fli.de/]
     coverage: [animal]
     tier: 1
     schedule: am
@@ -425,7 +430,8 @@ sources:
     notes: 波兰是欧洲ASF主力疫区; Excel该行缺URL, 此处按机构域名补全(首次运行时人工点验)
   - id: uk-daera
     name: 英国北爱尔兰农业环境与农村事务部(DAERA)
-    url: https://www.daera-ni.gov.uk/
+    # 入口换列表页(2026-10-31 假活治理, entry_audit A 级): 首页 0 候选, /news 验出窗内日期
+    url: https://www.daera-ni.gov.uk/news
     coverage: [animal]
     tier: 1
     schedule: am
@@ -456,6 +462,7 @@ sources:
   - id: rs-minpolj
     name: 塞尔维亚农业与环境保护部(含兽医局)
     url: http://www.minpolj.gov.rs/
+    alt_urls: [https://www.minpolj.gov.rs/]
     coverage: [animal]
     tier: 1
     schedule: weekly
@@ -524,7 +531,8 @@ sources:
   # ---- 南美与中东(对华出口大户, 2026-10 补) ----
   - id: uy-mgap
     name: 乌拉圭牧农渔业部(含畜牧服务总局 DGSG)
-    url: https://www.mgap.gub.uy/
+    # 入口换列表页(2026-10-31 假活治理, entry_audit A 级): 首页 0 候选
+    url: https://www.gub.uy/ministerio-ganaderia-agricultura-pesca/comunicacion/noticias
     coverage: [measures, animal]
     tier: 1
     schedule: weekly
@@ -574,6 +582,7 @@ sources:
   - id: az-afsa
     name: 阿塞拜疆食品安全局(AFSA)
     url: http://afsa.gov.az/
+    alt_urls: [https://afsa.gov.az/]
     coverage: [animal]
     tier: 1
     schedule: weekly
@@ -625,7 +634,8 @@ sources:
   # ---- 亚太(邻国与主要贸易伙伴) ----
   - id: jp-maff
     name: 日本农林水产省
-    url: https://www.maff.go.jp/
+    # 入口换新闻稿列表页(2026-10-31 假活治理, entry_audit A 级): 和历解析修复后验出窗内日期
+    url: https://www.maff.go.jp/j/press/index.html
     coverage: [animal, plant]
     tier: 1
     schedule: am
@@ -666,6 +676,7 @@ sources:
   - id: au-agriculture
     name: 澳大利亚农林渔业部
     url: https://www.agriculture.gov.au/
+    alt_urls: [https://agriculture.gov.au/]
     coverage: [animal, plant]
     tier: 1
     schedule: am
@@ -698,6 +709,7 @@ sources:
   - id: co-minagricultura
     name: 哥伦比亚农业部
     url: https://www.minagricultura.gov.co/paginas/default.aspx
+    alt_urls: [https://www.minagricultura.gov.co/]
     coverage: [animal]
     tier: 1
     schedule: weekly
@@ -790,6 +802,7 @@ sources:
   - id: in-dahd
     name: 印度畜牧与乳业部(DAHD)
     url: https://dahd.nic.in/
+    alt_urls: [https://dahd.gov.in/]
     coverage: [measures, animal]
     tier: 1
     schedule: am
@@ -859,7 +872,8 @@ sources:
     notes: 动物/植物产品和区域化措施
   - id: cl-sag
     name: 智利农牧局(SAG)
-    url: https://www.sag.gob.cl/
+    # 入口换新闻列表页(2026-10-31 假活治理, entry_audit A 级): 首页 0 候选
+    url: https://www.sag.gob.cl/noticias
     coverage: [measures, animal, plant]
     tier: 1
     schedule: am

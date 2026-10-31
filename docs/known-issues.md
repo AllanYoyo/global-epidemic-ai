@@ -339,6 +339,87 @@
 
 ## 已修复 (历史)
 
+### 2026-10-30 傍晚 · 17/47 死源: 死因留痕 + 降级链补强 + 多入口(存活 30 → 38)
+
+#### H21 · 「17 个死源」查不出原因 —— 死因当场被丢弃, 降级链漏形态, 且没有第二个入口
+- 位置: `scripts/probe_channels.py`(降级链 / 探活)、`scripts/policy_fetch.py`(预探与状态汇总)、
+  `scripts/scan_targets.py`(源表解析)、`config/sources.yaml`(alt_urls)、新增 `scripts/dead_sources.py`
+- 现象(生产实测, 非推演): 2026-10-30 当日 47 源里 **17 个探活即死**, 存活 30;
+  日志只留一行「预探 dead」, **HTTP 码与降级 note 当场被丢掉**
+  (`alive[sid] = (state == "ok")`), 事后完全无从分诊 —— 「17 个死源」拖了一天
+  才靠人工在 VPS 上重跑 curl 才捞出死因。
+- 逐源死因(VPS 实测, 17 个):
+  - **A 参数可救 4**: ca-cfia/th-doa/za-dalrrd/no-mattilsynet —— SSL 证书链不完整
+    (curl rc=60); ru-fsvps —— **IPv6 半死**(rc=28 但已收 16088 字节, 换 -4 即 200/3.5s)。
+    根因: 降级链第②层的触发条件是字符串前缀 `'curl-exit-6'`, **漏掉 rc=28 形态**
+    (H18 已实证「6s 超时先于证书错误出现」), 且全链**没有 -4**(IPv6)这一层。
+  - **B 入口配置错 3**: co-minagricultura(主入口 /paginas/default.aspx **404**, 站点根 200)、
+    rs-minpolj(http 入口 302 → https, 而 https 侧 TLS 坏)、az-afsa(http 入口 302 → https)。
+    根因: 源表**只有单一 url**, 主入口死了就没有第二次机会(ru-fsvps 当年也是这么修的)。
+  - **C 反爬 4**: id-dvs/in-ppqs/cn-sps-aggregator/usda-aphis —— 403, 去掉 UA 与换浏览器 UA 都被拒。
+  - **D 源已失效 4**: in-dahd/la-mafd/mm-myanmar/kp-vet —— **DNS 根本不解析**(rc=6),
+    域名/站点已废; 另有 ph-bpi(rc=6)、ru-rshn-khv(rc=7 连不上)同类。
+  - 不可达 3: vn-mard/ro-ansvsa/de-fli(rc=28 连接超时)、au-agriculture(超时 0 字节)。
+- 修法(本次一并落地):
+  ①**降级链按退出码分类**(RC_RETRYABLE / RC_HARD_DEAD), 补 `-4`(治 IPv6 半死)与
+  浏览器 UA 层; 死时把**最后一个 curl 退出码写进 note** —— 死因分诊就靠它;
+  ②**多入口**: `config/sources.yaml` 新增 `alt_urls`, 探活逐个试, 任一入口活即算活,
+  并把**活的那个入口带回给取数段**(取数必须用同一个入口, 否则等于没救);
+  ③**死因留痕**: `fetch-status.json` 的 per_source 增 `probe_code`/`probe_note`/`entry_url`,
+  并单列 `sources_dead_detail`(含 `cause` A/B/C/D 分类); search-log 死源行带码与 note;
+  ④新增 `scripts/dead_sources.py`: 逐源 × 逐日的分诊表(死因 / 连续死天数 / 假活 / 建议动作)。
+- 验证(生产 VPS 实跑, 独立副本, 未动生产代码):
+  - 探活 **存活 30 → 38 / 47**, 死源 17 → 9, 探活耗时 48.8s;
+  - 复活: co-minagricultura(站点根)/rs-minpolj(https)/az-afsa(https)/de-fli(fli.de)/
+    in-dahd(dahd.gov.in)/cn-sps-aggregator(hntbt.org.cn)/ru-rshn-khv(无 www)/
+    ru-fsvps(-4);
+  - 端到端跑一轮 policy_fetch: **存档 5 条 → 18 条**, 10 个源产出政策
+    (co-minagricultura/ippc/mx-senasica/sa-mewa/tr-tarimorman/uk-daera/kz-agri 各 2,
+    uk-defra/usda-aphis 各 1, ar-senasa 2);
+  - 回归: `test_fetchlib.py` 42 例全绿 / `test_smoke.py` 280 例全绿 / `--selftest` 通过。
+- 遗留(未做, 按用户决策分轨):
+  - C 类 2 个 403(id-dvs/in-ppqs)与不可达 3 个(vn-mard/ro-ansvsa/de-fli)走**替代上游**:
+    WTO ePing 按 member 覆盖(允许按 tier 1 官方源入库, source 域记 wto.org),
+    `parse_eping.py` 已就绪但**尚未挂进确定性管线**;
+  - D 类 6 个源失效(in-dahd/la-mafd/mm-myanmar/kp-vet/ph-bpi/ru-rshn-khv)需重新定位
+    官方域名, 或降级出「每日必扫」清单;
+  - **假活比死源更大**: 30 个活源里 30 个当日零产出(见 `dead_sources.py` 第三段)——
+    多数是「入口页选错」(抓到首页不是新闻列表页)或「列表页不带日期线索」,
+    与死源是两回事但同样吃覆盖, 下一杠杆;
+  - 死源/覆盖率**尚未进日报与推送**(用户已决定要进, 待 report.py/push_report.py 落地)。
+
+### 2026-10-31 · 假活治理第一杠杆: 入口验收闸门 + 行内日期上下文 + 和历/佛历 + 首批 4 源换列表页
+
+#### H22 · 「30 活源 28 零产出」—— 入口是门户首页, 且列表页日期在锚文本外读不到
+- 位置: `scripts/fetch_pages.py`(extract_links/parse_date)、新增 `scripts/entry_audit.py`、
+  `config/sources.yaml`(4 源 url + 8 源 alt_urls)
+- 现象(生产实测 + 用户逐站人工核查「用首页应付」): 2026-10-31 存活 30 源里 28 个零候选 ——
+  search-log 三元组实锤: br-mapa 链接 984/带窗内日期 0、jp-maff 312/0、cl-sag 163/0、
+  uk-defra 162/0; 仅 2 源产出 3 条且全为非政策内容(会议报道/贷款解析/宠物科普) → 0 入库,
+  日报「新增 0 条」照常推送, 终检**事后**才判失败撤锁(时序缺陷, 见遗留)。
+- 根因两层: ①入口自建库起就是站点首页, 不是新闻/公报列表页; ②列表页日期在锚文本之外
+  (jp-maff `标题</a>（令和8年10月30日）` 纯文本尾随型、gov.br 同级 `<span>30/10/2026</span>` 型),
+  且 `parse_date` 不认识和历(令和/平成/昭和)与泰国佛历(25xx) → 「几百条文章链接 0 条进窗」。
+- 修法(三件套):
+  ①**入口验收闸门** `scripts/entry_audit.py`: 与管线同款 extract_links→pick_candidates→文章页
+    验日期, 判级 A(窗内候选≥1, 准入)/B(有文章型链接但窗内 0 日期)/C(首页壳/JS 站, 禁入)/X(死口);
+    以后改 sources.yaml 的 url/alt_urls **前必跑**, 从制度上杜绝「拿首页应付」;
+  ②`extract_links` 零宽前瞻捕获 `</a>` 后 120 字符行内上下文(在 `<a`/`</li>`/`</tr>` 边界截断,
+    不吞下一条、不跨条目归日期); `parse_date` 补和历(令和=2018+N/平成=1988+N/昭和=1925+N, 元年=1)
+    与佛历(BE−543);
+  ③**首批 4 源换新闻列表页**(全部 A 级实测): jp-maff→`/j/press/index.html`、uk-daera→`/news`、
+    cl-sag→`/noticias`、uy-mgap→gub.uy `comunicacion/noticias`。
+- 验证(VPS 生产网段实测): 二轮审计 16 站 **A=4**(jp-maff 验出窗内日期, 和历修复当场生效)/B=9/X=3;
+  回归: `test_smoke.py` 284 例全绿 / `test_fetchlib.py` 42 例全绿。
+- 遗留(三轮, 未做):
+  - B 级 9 站(br-mapa/ua-dpss/usda-aphis/pl-wetgiw/mn-vet/no-mattilsynet/ca-cfia/th-doa/ippc):
+    日期在锚文本**前方**布局或卡片式前端, 逐站定捕获策略或改 RSS;
+  - X 级 3 站(tr-tarimorman/uk-defra/za-dalrrd): 列表页路径需重查(gov.uk /news 竟 404, 结构变过);
+  - JS 壳 4 站(kr-mafra/mx-senasica/nz-beehive/th-dld): 找 RSS 作入口;
+  - **ePing API 挂接**(用户注册 key 中): 48 国 SPS/TBT 通报确定性取数, 替代「各国首页捞新闻」;
+  - **终检时序缺陷**: 「存档>0 但 0 入库」的失败判定发生在推送之后(2026-10-31 实测: 钉钉先收到
+    「新增 0 条」才判失败撤锁)——应前移到推送前, 并区分「拒收=安静日照推」与「抽取故障=中止不推」。
+
 ### 2026-10-29 深夜 · M19 根治的三处补漏(source_url 索引 / 存量回填 / 列载荷一致)
 
 #### ① `source_url` 加了列却没回填 —— 238 条存量记录在查重时形同隐身
@@ -481,13 +562,25 @@
   (已存档的由 collect 按日去重, 不会重复)。关键点: **新 etag 不提交就不落库** ——
   落了库下轮就是 304, 重驱通道即被堵死。触顶停止(`[拒绝]`)是全局预算条件不是本源
   失败, 照常提交。unchanged/304/error 路径不受影响, 照旧立即落库。
-- 残余(有意接受): 存档环节 `rc≠0` 但源处理正常完成时, 该文章快照仍会提交 ——
-  collect 拒收多为确定性原因(重复/格式), 重试无益; 瞬时性失败已在 fetch-status.json
-  与 search-log 留痕, 不静默。
-- 回归: `test_fetchlib.py` 新增 5 例 —— runner 层 3 例(延迟期不落库+提交幂等 / 失败轮
+- ~~残余(有意接受): 存档环节 `rc≠0` 但源处理正常完成时, 该文章快照仍会提交 ——
+  collect 拒收多为确定性原因(重复/格式), 重试无益~~ —— **这条是错的, 已改掉
+  (2026-10-30 复审)**: `rc≠0` 有两种形态, 只有一种是确定性的:
+  - ①输出含 `[拒绝]` = 当日存档触顶(全局预算条件, 不是本源失败)→ 照常提交快照;
+  - ②**其余 `rc≠0` = collect.py 自己崩了**(未捕获异常 → 退出码 1; collect.py 的
+    带内非零退出只有触顶与参数冲突, 后者本调用方不会触发)→ **瞬时**失败。原实现
+    把它 `continue` 掉、源处理照常「正常完成」→ 入口页新快照照样提交 → 下一轮
+    304/未变 → 整源跳过 → **候选永久丢**(与本节要修的病根是同一个)。原文档写的
+    「collect 拒收多为确定性原因(重复/格式)」与 collect.py 实际行为对不上。
+  - 现在 ② 走: **本源事务作废**(一个快照都不提交, 含入口页)+ **本源记失败**
+    (进 `fetch-status.json` 的 `sources_dead`, 不再伪装成 unchanged/安静日)→
+    下一轮入口页按旧凭据拿回 200 全文, 整源重驱, 候选自动补上。
+  - 代价(已知): 事务作废后, 下一轮重驱时本轮**已存成**的候选会再存一份(collect.py
+    不按 URL 去重, 只按当日条数配额; 抽取段按 URL 去重, 不会重复烧 LLM 调用)。
+- 回归: `test_fetchlib.py` 新增 6 例 —— runner 层 3 例(延迟期不落库+提交幂等 / 失败轮
   不提交下轮重判 changed+提交后 unchanged / **新 etag 未提交不落库**——下轮旧凭据
   才能换回 200 全文, 这是重驱通道的安全关键路径) + unchanged 路径不受延迟开关影响
-  1 例 + 进程级 1 例(存档崩溃 → 下轮候选补齐)。
+  1 例 + 进程级 2 例(存档抛异常 → 下轮候选补齐 / **collect 子进程 rc≠0 → 事务作废
+  → 下轮候选补齐**, 后者即上面补漏的那条)。
 
 #### R2 · 未闭合噪声标签吞指纹 → 其后变更静默漏检
 - 位置: `scripts/fetchlib/filters.py::_TextExtractor` / `html_to_text`。

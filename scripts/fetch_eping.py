@@ -234,6 +234,18 @@ def _clean(s):
     return re.sub(r"\s+", " ", (s or "").replace('"', "」").replace("`", "").replace("$", "")).strip()
 
 
+def _is_tbt(rec):
+    """TBT 通报判定(动植物检疫红线, 2026-10-31 用户拍板剔除)。
+
+    ePing 按 watch 成员拉的是 SPS+TBT 两种通报, TBT(技术性贸易壁垒)面是
+    汽车/药品/能源/频谱/消费品标签 —— 与动植物检疫无关(2026-10-31 生产实测:
+    越南药品法/汽车组装进口、美国原油天然气/频谱扩容混进日报)。只认字段
+    明示 TBT 才剔除: 字段缺失时放行(fail-open, 防形状漂移静默清空整个
+    ePing 面), 剔除计数打印留痕。
+    """
+    return str(rec.get("area") or "").strip().upper() == "TBT"
+
+
 def archive_items(items, date_str, raw_dir, max_archives_per_day, archive_lock):
     """预筛 + 存档 + 追加候选。返回 (存档数, 预筛数, 触顶?)。"""
     json_path = os.path.join(raw_dir, "eping.json")
@@ -241,6 +253,10 @@ def archive_items(items, date_str, raw_dir, max_archives_per_day, archive_lock):
         json.dump({"items": items}, f, ensure_ascii=False)
     recs = parse_eping._from_json(json_path)
     chosen = [r for r in recs if r["url"] and parse_eping._is_action(r) and r["dist"]]
+    tbt_n = sum(1 for r in chosen if _is_tbt(r))
+    chosen = [r for r in chosen if not _is_tbt(r)]
+    if tbt_n:
+        print("[fetch_eping] TBT 通报剔除 %d 条(动植物检疫红线, 只收 SPS)" % tbt_n)
     # 当日已存过的 URL 去重(重跑不重复占配额; 抽取段另有 done_urls 去重)
     done = set()
     cand_path = os.path.join(raw_dir, "candidates.jsonl")
@@ -369,21 +385,24 @@ def _selftest():
           "中国(红线)/非成员/聚合标签 正确跳过并留痕")
     check(reverse.get("C704") == "Vietnam", "反查表 code → 国别标签")
     sample = {
-        "id": "19877", "area": "TBT", "notificationType": "Regular notification",
+        "id": "19877", "area": "SPS", "notificationType": "Regular notification",
         "distributionDate": "2016-11-29T00:00:00.0000000+00:00",
-        "documentSymbol": "G/TBT/N/USA/1234", "notifyingMember": "United States of America",
+        "documentSymbol": "G/SPS/N/USA/1234", "notifyingMember": "United States of America",
         "notifyingMemberCode": "C840",
         "title": "Import ban on beef and poultry products",
         "description": "&lt;p&gt;Establishes provisions governing imports.&lt;/p&gt;",
         "productsFreeText": "Beef; Poultry",
         "keywords": [{"id": 29, "name": "Food safety"}],
-        "notifiedDocumentLink": "https://members.wto.org/crnattachments/2016/TBT/USA/16_4900_00_e.pdf",
+        "notifiedDocumentLink": "https://members.wto.org/crnattachments/2016/SPS/USA/16_4900_00_e.pdf",
     }
     tmp = tempfile.mkdtemp(prefix="radar-eping-selftest-")
     try:
         path = os.path.join(tmp, "eping.json")
+        sample_tbt = dict(sample, area="TBT", id="19878",
+                          documentSymbol="G/TBT/N/USA/5678",
+                          title="Draft decree on motor vehicle assembly imports")
         with open(path, "w", encoding="utf-8") as f:
-            json.dump({"items": [sample]}, f)
+            json.dump({"items": [sample, sample_tbt]}, f)
         recs = parse_eping._from_json(path)
         r = recs[0]
         check(r["url"].startswith("https://members.wto.org/crnattachments"),
@@ -391,8 +410,11 @@ def _selftest():
         check(r["dist"] == "2016-11-29", "_dist 归一 API 的 distributionDate")
         check(r["kw"] == "Food safety", "_kw 对象数组取 name")
         check(parse_eping._is_action(r), "Import ban 标题命中动作词")
+        check(len(recs) == 2 and recs[1]["area"] == "TBT" and _is_tbt(recs[1]),
+              "area 字段随 API 落到记录, TBT 可判")
+        check(not _is_tbt(r), "area 缺失时放行(fail-open, 防形状漂移清空 ePing 面)")
         page = synth_html(sample)
-        check("G/TBT/N/USA/1234" in page and "crnattachments" in page
+        check("G/SPS/N/USA/1234" in page and "crnattachments" in page
               and "Establishes provisions" in page, "综合档案含文号/直链/原文描述")
     finally:
         import shutil

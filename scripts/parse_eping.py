@@ -216,6 +216,7 @@ def _from_json(path):
             "title": str(_first(rec, "title", "title_cn", "description", "desc") or ""),
             "kw": _kw(rec),
             "url": _pdf(rec),
+            "area": str(_first(rec, "area", "domain", "spTbtArea") or ""),
             "raw": rec,
         })
     return out

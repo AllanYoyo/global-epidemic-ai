@@ -106,6 +106,10 @@ _caller_tz="${SCAN_TZ-__unset__}"
 _caller_fetch_to="${STAGE_FETCH_TIMEOUT-__unset__}"
 _caller_process_to="${STAGE_PROCESS_TIMEOUT-__unset__}"
 [ -n "${HOME:-}" ] && [ -f "$HOME/.hermes/.env" ] && . "$HOME/.hermes/.env"
+# ePing key 要传给子进程(fetch_eping.py 读 os.environ): 上面的 source 未 set -a,
+# shell 变量不导出 —— 2026-10-31 实测挂接点检查到 key、python 却拿不到。
+# 只显式 export 这一个键(与 fetch_eping._load_env_key 双保险)。
+[ -n "${EPING_API_KEY:-}" ] && export EPING_API_KEY
 [ "$_caller_run_cmd" = "__unset__" ] || export HERMES_RUN_CMD="$_caller_run_cmd"
 [ "$_caller_health" = "__unset__" ] || export HERMES_HEALTH_CMD="$_caller_health"
 [ "$_caller_timeout" = "__unset__" ] || export SCAN_TIMEOUT="$_caller_timeout"

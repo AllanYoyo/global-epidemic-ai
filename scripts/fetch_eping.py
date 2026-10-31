@@ -312,6 +312,35 @@ def uuid_hex():
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+def _load_env_key():
+    """从 ~/.hermes/.env 补载 EPING_API_KEY(已存在的同名变量**不覆盖**)。
+
+    与 push_scope.load_hermes_env 同纪律: 只补这一个键, 不把 .env 里其它
+    密钥带进进程。两个入口都靠它:
+      · 人工直跑(什么都不加载);
+      · run_scan.sh 管线路径 —— 它 source .env 但未 set -a, 变量不导出给
+        子进程(2026-10-31 实测: 挂接点检查到 key, python 却拿不到)。
+    """
+    if os.environ.get("EPING_API_KEY"):
+        return True
+    path = os.path.join(os.path.expanduser("~"), ".hermes", ".env")
+    if not os.path.isfile(path):
+        return False
+    try:
+        with open(path, encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                if k.strip() == "EPING_API_KEY" and v.strip():
+                    os.environ["EPING_API_KEY"] = v.strip().strip('"').strip("'")
+                    return True
+    except OSError:
+        pass
+    return False
+
+
 def _selftest():
     """离线自检: 成员别名匹配 / API 形状解析 / 直链提取 / 综合档案, 不联网。"""
     # 形状对齐 API 实测(2026-10-31 真跑): 成员表只有 value/text 两个字段
@@ -388,6 +417,7 @@ def main():
 
     date_str = args.date or (datetime.datetime.utcnow()
                              + datetime.timedelta(hours=8)).date().isoformat()
+    _load_env_key()
     key = os.environ.get("EPING_API_KEY")
     if not key:
         print("[fetch_eping][错误] 缺 EPING_API_KEY(~/.hermes/.env 配置) —— 不拉取")

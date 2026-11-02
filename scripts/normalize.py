@@ -23,8 +23,12 @@ import json
 import os
 import re
 import sqlite3
+import sys
 import urllib.parse
 from datetime import date as _date
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import scope_guard  # 收录口径红线(动植物检疫 vs 食品安全)的单一判定来源
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.environ.get("EPIDEMIC_DATA_DIR") or os.path.join(REPO, "data")
@@ -373,7 +377,6 @@ def check_source_domain(e):
     url = src.get("url")
     host = _source_host(url)
     tier = src.get("tier")
-
     # 主机取不到(缺 scheme / 相对路径 / 畸形 URL)时, 下面两处判定都会被 host 真值短路:
     # 第三方黑名单查不到、官方域校验也查不到 —— 结果是 `tbtsps.cn/x.html` 这种
     # **无 scheme** 的拉黑源能以 tier=1 + verified 直接入库(2026-10-22 审计实测复现)。
@@ -803,6 +806,17 @@ def validate(e):
             errs.append("source.quote 不得超过 120 字")
     if e.get("verification_status") and e["verification_status"] not in VERIF_STATUS:
         errs.append("verification_status 非法: %s" % e["verification_status"])
+    # 收录口径红线(2026-11-02): 本台账只监测**动植物检验检疫**的政策变化。
+    # 食品安全类(残留限量/农药兽药/饲料与食品添加剂/食品安全标准/肥料)不入台账。
+    # 放在入库端而不是只在抽取端: 抽取是 LLM 单轮调用, 规则只写在 prompt 里
+    # 等于靠模型自律; 入库端是所有上游路径(Agent 会话/P4 管线/手工 JSON)的
+    # 必经关口, 在这里拦才是确定性保证。判定逻辑单一来源见 scope_guard.py。
+    is_food, food_why, _hit = scope_guard.classify_scope(scope_guard.record_scope_text(e))
+    if is_food:
+        errs.append(
+            "收录口径不符: %s。本台账只监测动植物检验检疫的政策变化, "
+            "食品安全/农业投入品类政策不入台账(见 prompts/policy-extraction.md 红线段)"
+            % food_why)
     # 来源域名与 tier 自洽性: 第三方站点不得标 tier 1 / 不得判 verified
     dom_errs, _ = check_source_domain(e)
     errs.extend(dom_errs)

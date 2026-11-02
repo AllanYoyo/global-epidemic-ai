@@ -1139,6 +1139,11 @@ policy_keywords:
     - {cn: 兽医立法, en: veterinary legislation, aliases: ["veterinary law", "animal health law"]}
     - {cn: 植物检疫, en: plant quarantine, aliases: ["phytosanitary", "plant health"]}
   # -- 产品与生物材料 --
+  # 范围(2026-11-02 收紧): 只保留**动植物检疫**相关的产品与生物材料。
+  # 食品添加剂 / 饲料原料 / 宠物食品 / 维生素 D3 等属食品安全与农业投入品
+  # 主管口径, 不属本台账主题 —— 已移除(用户拍板: 只保留动植物检疫主线)。
+  # 判据是"这个产品是否被检疫规则管"(动物源产品、水产、种苗、木材包装…),
+  # 不是"这个产品能不能吃"。
   commodities:
     - {cn: 微生物, en: microorganisms, aliases: ["microbes", "pathogenic agents"]}
     - {cn: 动物源性生物制品, en: biological products of animal origin, aliases: ["animal biologicals", "biologics"]}
@@ -1149,16 +1154,7 @@ policy_keywords:
     - {cn: 动物源性产品, en: animal origin products, aliases: ["animal products", "products of animal origin"]}
     - {cn: 水产品, en: aquatic products, aliases: ["fishery products", "aquatic animal products"]}
     - {cn: 明胶, en: gelatin, aliases: ["gelatine", "collagen"]}
-    - {cn: 食品添加剂, en: food additives, aliases: ["feed additives", "processing aids"]}
-    - {cn: 维生素 D3, en: vitamin D3, aliases: ["cholecalciferol"]}
-    - {cn: 宠物食品, en: pet food, aliases: ["petfood", "animal feed for companion animals"]}
-    - {cn: 饲料原料, en: feed ingredients, aliases: ["feed raw materials", "feedstuff"]}
-    - {cn: 硫酸软骨素, en: chondroitin sulfate, aliases: ["chondroitin sulphate"]}
-    - {cn: 氨基葡萄糖, en: glucosamine, aliases: ["glucosamine sulfate"]}
-    - {cn: 壳聚糖, en: chitosan, aliases: ["chitosan derivatives"]}
-    - {cn: L-半胱氨酸, en: L-cysteine, aliases: ["cysteine hydrochloride"]}
-    - {cn: 兽药, en: veterinary drugs, aliases: ["veterinary medicines", "veterinary pharmaceuticals"]}
-    - {cn: 违禁物质, en: prohibited substances, aliases: ["banned substances", "residue limits", "MRL"]}
+    - {cn: 动物源性生物材料(检疫), en: animal origin materials, aliases: ["animal by-products", "processed animal protein"]}
   # -- 活动物与繁殖材料 --
   animals:
     - {cn: 马科动物, en: equines, aliases: ["equidae", "horses", "马匹"]}
@@ -1223,9 +1219,11 @@ policy_keywords:
     - {cn: 评议期, en: comment period, aliases: ["consultation period"]}
     - {cn: 过渡期, en: transition period, aliases: ["grace period", "phase-in period"]}
   # -- 法规与标准 --
+  # 范围(2026-11-02 收紧): 移除食品添加剂法规(EC 1331/2008)与饲料添加剂法规
+  # (EC 1831/2003) —— 二者是食品安全/饲料主管口径, 非动植物检疫。
+  # 保留动物副产品法规(EC 1069/2009)与动物源性食品卫生法规(EC 853/2004):
+  # 这两部是**动物源产品贸易的卫生检疫要求**主体, 属动检主线。
   regulations:
-    - {cn: 欧盟食品添加剂法规, en: EC No 1331/2008, aliases: ["EC 1331/2008"]}
-    - {cn: 欧盟饲料添加剂法规, en: EC No 1831/2003, aliases: ["EC 1831/2003"]}
     - {cn: 欧盟动物副产品法规, en: EC No 1069/2009, aliases: ["EC 1069/2009", "animal by-products regulation"]}
     - {cn: 欧盟动物源性食品卫生法规, en: EC No 853/2004, aliases: ["EC 853/2004"]}
     - {cn: 欧盟条例, en: EU Regulation, aliases: ["Commission Implementing Regulation", "Delegated Regulation"]}
@@ -1286,10 +1284,12 @@ policy_queries:
     - '"{disease_en}" "{country}" "suspends imports" OR "bans imports" {month_en_year}'
     - '"{disease_en}" "{country}" trade restriction OR import requirement {month_en_year}'
   product_access:  # 商品 × 准入动作
+    # 范围(2026-11-02 收紧): 移除宠物食品/饲料原料与明胶/软骨素/氨基葡萄糖/
+    # 壳聚糖两条检索式 —— 那些是食品与饲料准入, 非检疫准入。
+    # 保留动物源产品与水产品的**检疫**准入检索式。
     - '"{country}" import requirements "animal origin products" OR "fishery products" {month_en_year}'
     - '"{country_cn}" "{product_cn}" 进口 检疫 要求 公告 {year}'
-    - '"{country}" pet food OR "feed ingredients" import conditions {year}'
-    - 'gelatin OR "chondroitin sulfate" OR glucosamine OR chitosan import "{country}" {year}'
+    - '"{country}" import quarantine requirements "animal origin products" {year}'
   animals:         # 活动物/繁殖材料检疫条件
     - '"{country}" equines OR horses import health requirements {year}'
     - '"day-old chicks" OR "fertile hatching eggs" import conditions "{country}" {year}'
@@ -1323,7 +1323,7 @@ policy_queries:
   country_sweep:    # 国家 × 主题词组 × 动作词,不依赖单一病害
     - '"{country}" (amends OR revises OR updates OR introduces OR suspends OR resumes) (quarantine OR import requirement OR veterinary certificate OR phytosanitary) {year}'
     - '"{country}" (animal health law OR biosecurity law OR veterinary legislation) (draft OR amendment OR regulation) {year}'
-    - '"{country}" (SPS OR G/SPS/N OR TBT) (animal OR plant OR feed OR veterinary) {year}'
+    - '"{country}" (SPS OR G/SPS/N OR TBT) (animal OR plant OR quarantine OR phytosanitary) {year}'
     - '"{country}" (microchip OR "ISO 11784" OR "advance notification" OR "import permit") animals {year}'
     - '"{country}" (cell lines OR "bovine serum" OR "diagnostic kits" OR microorganisms) import regulation {year}'
     - '"{country_cn}" 动植物 检疫 (修订 OR 调整 OR 新增 OR 取消 OR 暂停 OR 恢复) {year}'

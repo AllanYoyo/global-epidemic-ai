@@ -11,9 +11,13 @@ logs/
 personal/
 
 # 运行时产物(不入库)
-data/geocache.json        # 地理编码缓存, 每次面板访问都在变
-data/eping-members.json   # ePing 成员码表缓存(TTL 7 天)
-scripts/_audit*.py        # 临时排查脚本
+# 注意: gitignore 的注释必须**独占一行** —— 行尾 `#` 会被当作模式的一部分,
+# 那样规则永远匹配不到(2026-11-02 修: data/geocache.json 与
+# data/ping-members.json 的规则都因行尾注释而失效, 后者一度以未跟踪文件
+# 身份躺在工作区, 随时可能被 git add . 误提交)。
+data/geocache.json
+data/eping-members.json
+scripts/_audit*.py
 
 # Python
 __pycache__/

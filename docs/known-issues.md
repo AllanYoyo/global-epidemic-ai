@@ -1389,7 +1389,46 @@
 
 ---
 
-## 维护说明
+## 2026-11-02 体检（收录口径：食品类政策混入台账）
+
+背景：用户指出「近期引入了很多食品方面的政策，这个不需要，主要还是动植物检验检疫政策变动」。追查发现食品类政策从**三个并行口子**进来，且各口子口径不一 —— 这正是本仓库反复吃过的亏（多套判定必然漂移）。
+
+### C1 · 食品类政策从 ePing 通报面批量涌入 → 已修
+- 位置: `scripts/fetch_eping.py` 的 `QUARANTINE_TBT_HINTS` / 新增 `FOOD_TBT_BLOCK`
+- 病根: 2026-10-31 收紧 TBT 时，白名单把 `pesticid` / `residue` / `mrl` / `veterinar` / `feed additive` 全放行了 —— 那是**食品安全**口径。各国 MRL 修订、农药不续批是 ePing 面的高产项，大量挤占动检通报名额并进日报。
+- 修法: 白名单重列为准检疫**专有**词（植物检疫/动物卫生/检疫证/有害生物/口岸查验…）；新增 `FOOD_TBT_BLOCK` 黑名单（农药/残留/MRL/兽药/饲料/宠物食品/肥料/营养补充剂），**黑名单优先于白名单**（"农药残留限量 + 检疫证书"这类两边都命中的要挡住）。
+- 影响: ePing 面只保留动植物检疫主线通报。
+
+### C2 · 检索词库主动去找食安政策 → 已修
+- 位置: `config/sources.yaml` 的 `policy_keywords.commodities` / `.regulations` / `policy_queries.product_access` / `.country_sweep`
+- 病根: 词库含「食品添加剂 / 饲料原料 / 宠物食品 / 违禁物质(MRL) / 维生素D3」等词条，检索式直接去搜「pet food import conditions」「gelatin OR chondroitin sulfate ... import」—— 检索面在**主动找**食安政策。
+- 修法: 移除上述词条与两条专项检索式；`country_sweep` 的 `(animal OR plant OR feed OR veterinary)` 收窄为 `(animal OR plant OR quarantine OR phytosanitary)`。保留 EC 1069/2009（动物副产品）与 EC 853/2004（动物源产品卫生检疫）—— 这两部是动物源产品**检疫要求**的主体，属动检主线。
+- 影响: 检索面不再引入食安类线索。
+
+### C3 · 抽取面主题清单把食安列为常见主题 → 已修
+- 位置: `prompts/policy-extraction.md`（Agent 路径）、`scripts/extract_records.py` 的 `SCOPE_RULES`（P4 管线）
+- 病根: `policy-extraction.md` 的主题清单含「食品/饲料添加剂与原料」「兽药与违禁物质」，抽取时照着抽；P4 管线的 `SCOPE_RULES` 只有"只收变化"的粗规则，无食品口径。
+- 修法: 两处 prompt 都加**不得收录**红线段（残留限量/农药兽药/饲料与食品添加剂/食品安全标准/农业投入品），并写明判据是"主管对象是不是动植物检疫"，例外是"进口动植物产品的检疫要求本身"。
+- 影响: 规则进上下文（2026-10-27 踩过的坑：规则不写进 prompt 等于没有）。
+
+### C4 · 缺少确定性闸门，规则只写在 prompt 里 → 已修
+- 位置: 新增 `scripts/scope_guard.py`；接入 `scripts/extract_records.py`（抽取端第五道闸门）与 `scripts/normalize.py` 的 `validate()`（入库端）
+- 病根: 抽取是 LLM 单轮调用，prompt 里既列主题又要求排除，模型有概率两边规则都"沾"一点就放行；且 prompt 规则对 Agent 会话路径之外的手工 JSON 无效。
+- 修法: 判定逻辑**单一来源**放 `scope_guard.py`（抽取端与入库端共用同一套信号表，避免口径漂移）；入库端是所有上游路径必经关口，在那里拦才是确定性保证。
+- 影响: 食品类记录在入库前被拒收，并给出可读原因。
+
+### C5 · 存量台账里已混入的食品类记录 → 已修（工具就绪）
+- 位置: 新增 `scripts/flag_food_scope.py`
+- 修法: 用同一套判定（`scope_guard.classify_scope`）扫存量，命中的标成 `verification_status=false_positive` —— **不删数据**（台账有对外引用，删除会让历史报告与推送正文里的 event_id 悬空），判错了用 `--unmark <event_id>` 撤回。默认只预览，`--apply` 才写库。
+- 影响: 存量里的食安记录不再进日报"今日新增"，同时保留痕迹。
+
+### C6 · 判据踩过的两个坑（留作回归防线）→ 已修
+- **标签 ≠ 内容**: WTO SPS 通报的 `keywords` 字段里 "Food safety" 是 WTO 自己的**主题分类标签**（与 "Pesticides"/"Veterinary drugs" 同级），几乎每条动检通报都挂着它。拿它当食品信号会把真检疫通报**整片误剔**（自检实测：一条"植物检疫证书要求"通报因 kw=Food safety 被剔）。现判定只看**标题与产品字段**，不看 kw。
+- **检疫信号只能是"检疫专有词"**: 「进口」「准入」「措施」这类两边都有的泛词留在检疫信号表里，会给食安记录开很大的豁免口子 —— 实测「宠物食品**进口准入**条件」就是这样被漏放的。现检疫信号只认检疫/疫区/有害生物/证书/口岸查验/通关/进境等专有词。
+- 回归防线: `scripts/test_smoke.py` 的 `FoodScopeTests`（14 例）钉死上述全部行为，含"农药残留超标的检疫退货处置"这类**不得误杀**的用例。
+
+---
+
 
 - 体检频率: 每月一次或在出现生产事故后; 由本次负责人在本文件顶部更新"上次体检"日期。
 - 优先级定义:

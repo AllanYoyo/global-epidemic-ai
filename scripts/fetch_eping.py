@@ -234,32 +234,78 @@ def _clean(s):
     return re.sub(r"\s+", " ", (s or "").replace('"', "」").replace("`", "").replace("$", "")).strip()
 
 
-# TBT 面的检疫关键词白名单: TBT 通报默认剔除(动植物检疫红线), 但农药/残留/
-# 兽医/检疫主题的 TBT 通报是真检疫政策 —— 2026-10-31 实测: 欧盟苯嘧啶(农药
-# 不续批)走的就是 TBT 面, 一刀切会误杀。匹配 title + kw + productsFreeText
-# (词根式, _fold 去音标后 in 匹配)。
+# TBT 面的**检疫**放行白名单: TBT 通报默认剔除(动植物检疫红线), 只有命中真
+# 检疫词的才放行。匹配 title + kw + productsFreeText(词根式, _fold 去音标后
+# in 匹配)。
+#
+# 2026-11-02 收紧(用户拍板「只保留动植物检疫主线, 食品类不要」): 原白名单把
+# 农药(pesticid)/残留(residue, maximum residue, mrl)/兽医(veterinar)/饲料
+# (feed additive)全放行了 —— 这些是**食品安全**口径, 不是动植物检疫。实测这批
+# 通报是 ePing 面的高产项(欧盟苯嘧啶不续批、各国 MRL 修订), 大量挤占动检
+# 通报的名额并进了日报。现按「检疫主线」重列:
+#   · 保留: phytosanitar(植物检疫) / zoosanit(动物卫生) / quarantine(检疫) /
+#     animal health / plant health / 有害生物与疫区 / 证书与准入程序类。
+#   · 剔除: 农药残留 MRL / 兽药残留 / 饲料与食品添加剂 / 宠物食品 / 种子种苗
+#     非检疫类(fertiliz 肥料等农业投入品一并剔除)。
+#
+# 判定顺序很重要: **先查食品黑名单再查检疫白名单** —— 「农药残留限量 + 检疫
+# 证书」这类通报两边都命中, 黑名单优先才能真正挡住。
+#
+# 仍保留 fail-open: area 字段缺失时不判 TBT(防形状漂移静默清空整个 ePing 面),
+# 剔除计数打印留痕。
 QUARANTINE_TBT_HINTS = (
-    "pesticid", "residue", "maximum residue", "mrl", "veterinar", "phytosanitar",
-    "zoosanit", "quarantine", "animal health", "plant health", "plant variet",
-    "seed", "fertiliz", "fertilis", "feed additive", "biosecurity",
+    "phytosanitar", "zoosanit", "quarantine", "animal health", "plant health",
+    "biosecurity", "plant pest", "pest control", "epidemic", "eradication",
+    "infestation", "carcinogen", "contaminat", "surveillance", "inspec",
+    "certificat", "phytosanitary certificate", "veterinary certificate",
+    # 检疫专有程序词(2026-11-02 补): 「进口许可」「进境」这类是检疫程序主线,
+    # 不补会让「进口许可(import permit)」「动物源产品进境要求」被误剔 ——
+    # 误剔真检疫通报的代价与漏放食安通报同样大。
+    "import permit", "pre-clearance", "border inspection", "animal origin",
+)
+
+# 食品/饲料/农业投入品黑名单 —— 优先于上面的检疫白名单判定。
+# 命中即剔除, 不管它是否同时命中检疫词(「农药残留限量 + 检疫证书」要挡住)。
+#
+# ⚠️ **不收 "food safety"**: WTO SPS 通报的 keywords 字段里, "Food safety" 是
+# WTO 自己的**主题分类标签**(与 "Pesticides"/"Veterinary drugs" 同级), 几乎
+# 每条动检通报都挂着它 —— 把它当食品信号会把真检疫通报整片误剔
+# (2026-11-02 自检实测: 一条"植物检疫证书要求"通报因 kw=Food safety 被剔)。
+# 标签 ≠ 内容: 判定只看**标题与产品字段**(通报实际讲什么), 不看 kw 分类标签。
+FOOD_TBT_BLOCK = (
+    "pesticid", "residue", "maximum residue", " mrl", "mrl ",
+    "veterinar", "feed additive", "feedstuff", "pet food", "petfood",
+    "food additive", "nutrition", "dietary",
+    "fertiliz", "fertilis", "veterinary drug", "veterinary medicine",
+    "meat product", "dairy", "beverage", "supplement",
 )
 
 
 def _is_tbt(rec):
-    """TBT 通报判定(默认剔除; 命中检疫词表则放行)。
+    """TBT 通报判定(默认剔除; 命中检疫词表且不命中食品黑名单才放行)。
 
     ePing 按 watch 成员拉的是 SPS+TBT 两种通报, TBT(技术性贸易壁垒)面多数是
     汽车/药品/能源/频谱/消费品标签 —— 与动植物检疫无关(2026-10-31 生产实测:
-    越南药品法/汽车组装进口、美国原油天然气/频谱扩容混进日报)。例外: 标题/
-    关键词/产品字段命中 QUARANTINE_TBT_HINTS 的 TBT 通报保留(农药不续批、
-    兽药残留类)。area 字段缺失时不是 TBT(fail-open, 防形状漂移静默清空
-    整个 ePing 面), 剔除计数打印留痕。
+    越南药品法/汽车组装进口、美国原油天然气/频谱扩容混进日报)。2026-11-02
+    再收紧: 原白名单放行的农药/残留/MRL/饲料/宠物食品属**食品安全**口径,
+    一并剔除(用户拍板: 只保留动植物检疫主线)。
+
+    判定顺序: 食品黑名单优先 → 检疫白名单放行 → 其余剔除。
+
+    **判定只看标题与产品字段, 不看 kw**: kw 是 WTO 的主题分类标签
+    ("Food safety" 几乎每条动检通报都挂), 用它判会把真检疫通报整片误剔。
+
+    area 字段缺失时不是 TBT(fail-open, 防形状漂移静默清空整个 ePing 面),
+    剔除计数打印留痕。
     """
     if str(rec.get("area") or "").strip().upper() != "TBT":
         return False
     raw = rec.get("raw") or {}
-    hay = parse_eping._fold("%s %s %s" % (rec.get("title") or "", rec.get("kw") or "",
-                                          raw.get("productsFreeText") or ""))
+    hay = parse_eping._fold("%s %s" % (rec.get("title") or "",
+                                       raw.get("productsFreeText") or ""))
+    # 食品/饲料黑名单优先: 命中即剔除, 不给检疫白名单豁免权。
+    if any(h in hay for h in FOOD_TBT_BLOCK):
+        return True
     return not any(h in hay for h in QUARANTINE_TBT_HINTS)
 
 
@@ -344,9 +390,19 @@ def uuid_hex():
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# .env 路径可覆盖(与 push_scope.HERMES_ENV_PATH 同纪律): 默认 ~/.hermes/.env,
+# 测试与隔离环境可指向别处。
+#
+# 为什么必须可覆盖(2026-11-02 实测): 路径硬编码时, 任何"断言无 key 时的行为"
+# 的用例都会在本机与生产 VPS 上**真的读到 ~/.hermes/.env 里的 key** —— 那两台
+# 机器都配了 EPING_API_KEY。于是用例不是断言"无 key 报错", 而是**真的去调
+# WTO API**(耗配额、留网络请求), 最后 rc=0 ≠ 2 失败。
+# 仓库在 push_scope 上早就踩过同款坑(HERMES_ENV_PATH 就是为此加的), 这里对齐。
+HERMES_ENV_PATH = os.path.join(os.path.expanduser("~"), ".hermes", ".env")
+
 
 def _load_env_key():
-    """从 ~/.hermes/.env 补载 EPING_API_KEY(已存在的同名变量**不覆盖**)。
+    """从 .env 补载 EPING_API_KEY(已存在的同名变量**不覆盖**)。
 
     与 push_scope.load_hermes_env 同纪律: 只补这一个键, 不把 .env 里其它
     密钥带进进程。两个入口都靠它:
@@ -356,7 +412,7 @@ def _load_env_key():
     """
     if os.environ.get("EPING_API_KEY"):
         return True
-    path = os.path.join(os.path.expanduser("~"), ".hermes", ".env")
+    path = HERMES_ENV_PATH
     if not os.path.isfile(path):
         return False
     try:
@@ -424,13 +480,23 @@ def _selftest():
                                      "the non-renewal of the approval of phenmedipham",
                                notifiedDocumentLink="https://members.wto.org/crnattachments/2016/TBT/EEC/16_4901_00_e.pdf",
                                productsFreeText="Phenmedipham (pesticide active substance)")
+        # 2026-11-02 收紧后新增: 真检疫 TBT(植物检疫证书)必须放行 ——
+        # 收紧食品类不能连带误剔检疫主线(误剔真通报与漏放食安通报同样有害)。
+        sample_tbt_phyto = dict(sample, area="TBT", id="19880",
+                                documentSymbol="G/TBT/N/EEC/5680",
+                                title="Phytosanitary certificate requirements for plants "
+                                      "for import",
+                                notifiedDocumentLink="https://members.wto.org/crnattachments/2016/TBT/EEC/16_4902_00_e.pdf",
+                                productsFreeText="Plants for planting")
         with open(path, "w", encoding="utf-8") as f:
-            json.dump({"items": [sample, sample_tbt, sample_tbt_pest]}, f)
+            json.dump({"items": [sample, sample_tbt, sample_tbt_pest, sample_tbt_phyto]}, f)
         recs = parse_eping._from_json(path)
         r = recs[0]
-        check(len(recs) == 3, "样本三条都解析")
-        check(_is_tbt(recs[1]) and not _is_tbt(recs[2]),
-              "TBT 默认剔除, 农药类 TBT 白名单放行(苯嘧啶不误杀)")
+        check(len(recs) == 4, "样本四条都解析")
+        check(_is_tbt(recs[1]) and _is_tbt(recs[2]),
+              "TBT 默认剔除; 农药类 TBT 同样剔除(2026-11-02 收紧: 农药/残留属食安口径)")
+        check(not _is_tbt(recs[3]),
+              "真检疫 TBT(植物检疫证书)放行, 收紧食品类不误剔检疫主线")
         check(r["url"].startswith("https://members.wto.org/crnattachments"),
               "_pdf 认 API 的 notifiedDocumentLink")
         check(r["dist"] == "2016-11-29", "_dist 归一 API 的 distributionDate")

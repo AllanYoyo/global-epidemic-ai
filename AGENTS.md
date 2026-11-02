@@ -2,6 +2,28 @@
 
 外国政府/国际组织动植物检疫**政策变化**监测系统。数据合同只允许 `record_type=policy`（疫情事件管线已在本分支移除，勿重新引入）。中国海关总署公告**不作为政策采集源**，仅在影响研判时作背景。Agent 全流程（检索→抽取→核验→研判）由 Hermes 执行；`scripts/` 是确定性工具层。
 
+## 收录口径红线（2026-11-02 用户拍板）：只收动植物检疫，食品类不入台账
+
+用户明确：「近期引入了很多食品方面的政策，这个不需要，主要还是动植物检验检疫政策变动。」
+
+**判定标准**：这条政策的主管对象是不是**动植物检疫**（检疫证、准入条件、有害生物与疫病、口岸查验、证书与标识）？主语是"食品/饲料/残留/添加剂"的，即使同时涉及进口准入，也**不入台账**——那是海关总署食品监管或农业农村部农资监管口线的政策。
+**例外**：进口动物/植物产品的**检疫要求本身**仍收录（如修订输华动物产品检疫证书要求、暂停某疫区农产品输华）——判据是"检疫要求"而非"食品标准"。
+
+食品类从**三个口子**进来，三处都已修（判定逻辑的单一来源是 `scripts/scope_guard.py`）：
+
+| 口子 | 位置 | 处置 |
+|---|---|---|
+| 通报面 | `scripts/fetch_eping.py` 的 `FOOD_TBT_BLOCK` | TBT 通报默认剔除；**食品黑名单优先于检疫白名单**（「农药残留+检疫证书」也要挡住） |
+| 检索面 | `config/sources.yaml` 的 `policy_keywords` / `policy_queries` | 已移除食品添加剂/饲料原料/宠物食品/MRL 等词条与检索式 |
+| 抽取面 | `prompts/policy-extraction.md` 红线段 + `extract_records.py` 的 `SCOPE_RULES` | prompt 带红线；抽取端有确定性闸门（第五道） |
+| 入库端 | `scripts/normalize.py` 的 `validate()` | **最后一道保险**，所有上游路径必经；命中即拒收 |
+
+**两处踩过的坑（别再踩）**：
+- **标签 ≠ 内容**：WTO SPS 通报的 `keywords` 字段里 "Food safety" 是 WTO 自己的**主题分类标签**（与 "Pesticides" 同级），几乎每条动检通报都挂着它 —— 拿它当食品信号会把真检疫通报整片误剔。判定只看**标题与产品字段**。
+- **检疫信号只能是"检疫专有词"**（检疫/疫区/有害生物/证书/口岸查验…）：「进口」「准入」「措施」这类两边都有的泛词，会给食安记录开一个很大的豁免口子（实测「宠物食品进口准入条件」就是这样被漏放的）。
+
+**存量清理**：`python scripts/flag_food_scope.py`（默认只预览）→ 确认后 `--apply`。处置口径与 `flag_non_policy.py` 一致：标成 `verification_status=false_positive`，**不删数据**，判错了用 `--unmark <event_id>` 撤回。
+
 ## 生产链路（2026-10-25 P4 起：脚本开车，LLM 只当顾问；全链路目标 ≤10 分钟）
 
 ```
@@ -128,6 +150,8 @@ POLICY_FETCH_ENGINE=legacy scripts/run_scan.sh policy    # 临时回退旧取数
 python scripts/normalize.py --input <json> --db     # 入库（支持 - 读 stdin）
 python scripts/merge_duplicates.py --db <库路径> --dry-run   # 存量同政策重复预览(默认不写库)
 python scripts/merge_duplicates.py --db <库路径> --apply     # 执行归并(--apply 前自动备份)
+python scripts/flag_food_scope.py                          # 存量食品类(非检疫口径)预览(默认不写库)
+python scripts/flag_food_scope.py --apply                  # 标记为 false_positive(--unmark <id> 可撤回)
 python scripts/risk.py --event-id <id> --dim trade=4 --dim biosecurity=3,...   # 影响写回
 python scripts/report.py --date YYYY-MM-DD                # Markdown 日报（跑批只产这个）
 python scripts/report.py --date YYYY-MM-DD --excel --docx   # 按需生成 Excel/Word（--policy 已废弃为 no-op）

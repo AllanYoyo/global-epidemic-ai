@@ -53,6 +53,13 @@ sys.path.insert(0, os.path.join(REPO, "templates"))
 import push_scope as _push_scope  # noqa: E402  (须在 sys.path 注入之后)
 _push_scope.HERMES_ENV_PATH = os.path.join(TMP, "no-such-.hermes-env")
 
+# fetch_eping 的 .env 路径同样要隔离(2026-11-02): 它原先硬编码 ~/.hermes/.env,
+# 而本机与生产 VPS 都配了 EPING_API_KEY —— 于是"断言无 key 时报错"的用例会
+# 真的读到 key、真的去调 WTO API(耗配额 + 留网络请求), rc=0 ≠ 2 失败。
+# fetch_ping 已加 HERMES_ENV_PATH 可覆盖(与 push_scope 同纪律), 这里指到不存在的文件。
+import fetch_eping as _fetch_eping  # noqa: E402
+_fetch_eping.HERMES_ENV_PATH = os.path.join(TMP, "no-such-.hermes-env")
+
 
 def _source_event(**overrides):
     """构造一条合法政策记录的最小集,单测可在它基础上改字段。"""
@@ -4250,9 +4257,17 @@ class FetchEpingTests(unittest.TestCase):
 
     def test_requires_key(self):
         # 无 key 时必须明确报错退出 2(fail-visible), 不得静默空跑
+        #
+        # 2026-11-02 修: 原实现只清了 os.environ, 没管 fetch_eping._load_env_key()
+        # 从 ~/.hermes/.env 的自载 —— 那本机与生产 VPS 都配了 EPING_API_KEY,
+        # 于是这个用例会**真的调 WTO API**(耗配额、留网络请求), rc=0 ≠ 2 失败。
+        # 现在把 fetch_eping.HERMES_ENV_PATH 指到不存在的文件(模块级已隔离,
+        # 这里再兜一次, 防止其它用例改动过它)。
         import fetch_eping
         old = sys.argv
         saved = os.environ.pop("EPING_API_KEY", None)
+        saved_env_path = fetch_eping.HERMES_ENV_PATH
+        fetch_eping.HERMES_ENV_PATH = os.path.join(TMP, "no-such-.hermes-env")
         sys.argv = ["fetch_eping.py", "--date", "2026-10-31"]
         buf = io.StringIO()
         try:
@@ -4260,6 +4275,7 @@ class FetchEpingTests(unittest.TestCase):
                 rc = fetch_eping.main()
         finally:
             sys.argv = old
+            fetch_eping.HERMES_ENV_PATH = saved_env_path
             if saved is not None:
                 os.environ["EPING_API_KEY"] = saved
         self.assertEqual(rc, 2)
@@ -4322,6 +4338,217 @@ class DeadSourcesTests(unittest.TestCase):
         rc2, out2 = self._report(os.path.join(root, "raw"), focus_day="2026-10-30")
         self.assertEqual(rc2, 0)
         self.assertIn("四、2026-10-30 明细", out2)
+
+
+class FoodScopeTests(unittest.TestCase):
+    """收录口径红线: 只收动植物检验检疫, 食品类不入台账(2026-11-02)
+
+    用户拍板「近期引入了很多食品方面的政策, 这个不需要, 主要还是动植物
+    检验检疫政策变动」。食品类从三个口子进来: ePing 通报面 / 检索词库 /
+    抽取面。本类钉死的是**判定逻辑**(scripts/scope_guard.py)与两个接入点
+    (normalize 入库端 / extract_records 抽取端), 以及 ePing 的 TBT 白名单。
+    """
+
+    def setUp(self):
+        import scope_guard
+        self.g = scope_guard
+
+    # ---- scope_guard 判定本体 ----
+
+    def test_food_signals_rejected(self):
+        """食品类特征信号命中 → 判非检疫口径。"""
+        cases = [
+            "欧盟委员会修订苯嘧啶的最大残留限量(MRL)",
+            "关于批准维生素D3作为饲料添加剂的法规",
+            "关于宠物食品进口准入条件的公告",
+            "兽药注册与休药期规定的修订",
+            "关于肥料登记与土壤调理剂使用的规定",
+            "Maximum residue limits for pesticide residues in foodstuffs",
+            "Nutrition and dietary supplement requirements",
+        ]
+        for text in cases:
+            is_food, why, _hit = self.g.classify_scope(text)
+            self.assertTrue(is_food, "应判食品类却放行了: %s" % text)
+            self.assertTrue(why, "应给出原因: %s" % text)
+
+    def test_quarantine_mainline_kept(self):
+        """动检主线 → 不得被误杀(误杀真政策的代价高于放过一条食安)。"""
+        cases = [
+            "南非因口蹄疫疫情暂停进口某国牛肉",
+            "阿根廷修订输华牛肉的兽医检疫证书要求",
+            "欧盟更新植物检疫证书电子认证(ePhyto)要求",
+            "巴西农业卫生检验局发布咖啡豆有害生物名录更新",
+            "某国通报新增植物有害生物并调整检疫措施",
+            "越南因高致病性禽流感暂停进口禽类制品",
+        ]
+        for text in cases:
+            is_food, _why, _hit = self.g.classify_scope(text)
+            self.assertFalse(is_food, "误杀了动检主线: %s" % text)
+
+    def test_quarantine_exemption_for_residue_disposal(self):
+        """「农药残留超标的检疫退货处置」是检疫处置, 不是食品安全标准修订。
+
+        这条是本模块最容易判错的一类: 强信号(农药残留)在前, 但检疫专有词
+        (检疫)在场 → 放行。误杀它就丢了一条真政策。
+        """
+        is_food, _why, _hit = self.g.classify_scope(
+            "对某批次农产品农药残留超标予以检疫退货处置")
+        self.assertFalse(is_food, "检疫处置被误杀")
+
+    def test_pet_food_import_not_exempt(self):
+        """「宠物食品**进口准入**条件」含检疫泛词, 但对象是食品 → 必须拒收。
+
+        2026-11 实测漏放路径: 「进口」「准入」这类泛词放在检疫信号表里, 会给
+        食安记录开一个很大的豁免口子。判据只能是检疫**专有**词。
+        """
+        is_food, _why, _hit = self.g.classify_scope("关于宠物食品进口准入条件的公告")
+        self.assertTrue(is_food, "宠物食品被检疫泛词豁免了")
+
+    def test_english_word_boundary_no_false_hit(self):
+        """英文按词边界匹配: 不得把 mrl 命中 myrtle、seed 命中 sesame。"""
+        for text in ("Restriction on myrtle plants",
+                     "Sesame seed import conditions",
+                     "A rule about the emerald necklace manufacturing"):
+            is_food, _why, hit = self.g.classify_scope(text)
+            self.assertFalse(is_food, "英文子串误伤: %s (hit=%s)" % (text, hit))
+
+    # ---- 接入点: normalize 入库端闸门 ----
+
+    def test_normalize_rejects_food_record(self):
+        """入库端拒收食品类记录(所有上游路径的必经关口)。"""
+        import normalize
+        e = _source_event(
+            policy_key="food-scope-1",
+            title_cn="关于修订食品中农药最大残留限量的法规",
+            summary_cn="修订 MRL 限量标准",
+            products=["谷物"])
+        errs = normalize.validate(dict(e))
+        self.assertTrue(errs, "食品类记录竟通过了入库校验")
+        self.assertTrue(any("收录口径" in x or "食品安全" in x for x in errs), errs)
+
+    def test_normalize_keeps_quarantine_record(self):
+        """动检主线记录不得被入库端闸门拦下。"""
+        import normalize
+        e = _source_event(
+            policy_key="quarantine-ok-1",
+            title_cn="因口蹄疫暂停进口某国牛肉产品",
+            summary_cn="暂停进口并要求兽医检疫证书",
+            products=["beef"])
+        errs = normalize.validate(dict(e))
+        self.assertEqual([x for x in errs if "收录口径" in x], [])
+
+    # ---- 接入点: extract_records 抽取端闸门 ----
+
+    def test_extract_screen_food_rejected(self):
+        """抽取端闸门: 食品类记录被拒收。"""
+        from extract_records import screen_non_policy, screen_food_scope
+        rec = {
+            "title_cn": "关于批准维生素D3作为饲料添加剂的法规",
+            "title_en": "Regulation approving vitamin D3 as feed additive",
+            "summary_cn": "饲料添加剂批准",
+            "source": {"quote": "批准作为饲料添加剂使用"},
+        }
+        reject, why = screen_food_scope(rec)
+        self.assertTrue(reject, "抽取端未拒收饲料添加剂")
+        self.assertIn("食品", why)
+        # 整条筛查链路也要拦住
+        r2, w2 = screen_non_policy(rec)
+        self.assertTrue(r2, "screen_non_policy 未拦住饲料添加剂")
+
+    def test_extract_screen_quarantine_kept(self):
+        """抽取端闸门: 动检主线不得被误杀。"""
+        from extract_records import screen_food_scope
+        rec = {
+            "title_cn": "越南因高致病性禽流感暂停进口禽类制品",
+            "title_en": "Suspension of poultry imports due to HPAI",
+            "summary_cn": "暂停进口",
+            "source": {"quote": "suspends imports of poultry products"},
+        }
+        reject, _why = screen_food_scope(rec)
+        self.assertFalse(reject, "抽取端误杀了禽流感暂停进口")
+
+    # ---- 接入点: ePing TBT 白名单 ----
+
+    def test_eping_tbt_food_blocked(self):
+        """ePing TBT 面: 农药/MRL/饲料类 TBT 通报必须剔除。
+
+        2026-11-02 收紧前的白名单把 pesticide/residue/mrl/veterinar/feed
+        additive 全放行了 —— 那是食品安全口径, 各国 MRL 通报是 ePing 面的
+        高产项, 大量挤占动检通报名额并进了日报。
+        """
+        import fetch_eping
+
+        def mk(area, title, kw="", products=""):
+            return {"area": area, "title": title, "kw": kw,
+                    "raw": {"productsFreeText": products}}
+
+        # 食品类 TBT → 判 TBT(=剔除)
+        for rec in (mk("TBT", "Draft decree on maximum residue limits for pesticides"),
+                    mk("TBT", "Non-renewal of approval of feed additive"),
+                    mk("TBT", "Regulation on pet food import conditions"),
+                    mk("TBT", "Veterinary drugs registration requirements")):
+            self.assertTrue(fetch_eping._is_tbt(rec),
+                            "食品类 TBT 未剔除: %s" % rec["title"])
+
+        # 真检疫 TBT → 放行
+        for rec in (mk("TBT", "Phytosanitary certificate requirements for plants"),
+                    mk("TBT", "Quarantine pest control measures"),
+                    mk("TBT", "Import permit for animal origin products")):
+            self.assertFalse(fetch_eping._is_tbt(rec),
+                             "真检疫 TBT 被误剔: %s" % rec["title"])
+
+        # SPS 一律不是 TBT(不受本闸门影响)
+        self.assertFalse(fetch_eping._is_tbt(mk("SPS", "Import ban on beef and poultry")))
+
+    def test_eping_tbt_food_block_beats_quarantine_allow(self):
+        """食品黑名单优先于检疫白名单: 两者都命中时仍剔除。
+
+        「农药残留限量 + 检疫证书」这类通报两边都命中 —— 若检疫白名单优先,
+        食品类就会漏进来(这正是收紧前的形态)。
+        """
+        import fetch_eping
+        rec = {"area": "TBT",
+               "title": "Maximum residue limits for pesticides in products "
+                        "requiring phytosanitary certificate",
+               "kw": "", "raw": {"productsFreeText": ""}}
+        self.assertTrue(fetch_eping._is_tbt(rec),
+                        "食品黑名单未压过检疫白名单")
+
+    # ---- 检索词库口径 ----
+
+    def test_sources_yaml_has_no_food_keywords(self):
+        """检索词库不得再含食品类关键词(否则检索面会主动去找食安政策)。
+
+        只校验**生效的词条/检索式**, 不校验注释 —— 注释里记录"某词条已移除"
+        是有意留痕(与仓库既有纪律一致), 留着不影响检索行为。
+        """
+        path = os.path.join(REPO, "config", "sources.yaml")
+        with open(path, encoding="utf-8") as f:
+            raw = f.read()
+        # 去掉注释行后只留生效内容
+        lines = [ln for ln in raw.splitlines() if not ln.strip().startswith("#")]
+        live = "\n".join(lines)
+        for banned in ("食品添加剂", "饲料原料", "宠物食品", "饲料添加剂",
+                       "违禁物质", "residue limits", "MRL"):
+            self.assertNotIn(banned, live,
+                             "policy_keywords/检索式 仍含食品类词条: %s" % banned)
+
+    def test_prompt_has_food_redline(self):
+        """抽取 prompt 必须有食品类红线段(规则要进上下文, 不许只存在于代码)。"""
+        path = os.path.join(REPO, "prompts", "policy-extraction.md")
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn("食品安全", text)
+        self.assertIn("不得收录", text)
+
+    def test_extract_prompt_has_food_rules(self):
+        """P4 管线的抽取 prompt(SCOPE_RULES)也必须带食品红线。
+
+        2026-10-27 踩过的坑: P4 的 prompt 只有字段清单, 规则没进上下文。
+        """
+        import extract_records
+        self.assertIn("食品安全", extract_records.SCOPE_RULES)
+        self.assertIn("残留限量", extract_records.SCOPE_RULES)
 
 
 if __name__ == "__main__":

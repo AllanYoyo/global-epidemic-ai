@@ -837,24 +837,16 @@ TAIWAN_EN = "Taiwan, China"
 _TW_CN_KEYS = ("台湾", "臺灣", "台灣", "台北", "臺北", "台北", "中华台北",
                "Chinese Taipei")
 _TW_EN_KEYS = ("taiwan", "chinese taipei", "taipei", "republic of china")
-# 开放文本里的替换(长词优先)。覆盖标题/摘要/口径这类**我们自己写**的中文表述。
-_TW_CN_REPL = (("中华台北", "中国台湾省"), ("臺灣", "中国台湾省"), ("台灣", "中国台湾省"),
-               ("台湾", "中国台湾省"), ("臺北", "中国台湾省"), ("台北", "中国台湾省"))
-# 英文主体名统一为 Taiwan, China。title_en / source.quote 是**原文**(官方英文标题与
-# 原文引用), 溯源链要求逐字保留, 故不参与替换 —— 原文归原文。
-_TW_EN_RE = re.compile(r"\b(?:Chinese Taipei|Taiwan)\b", re.I)
+# 开放文本里的替换。**必须幂等**: 「中国台湾省」本身含「台湾」, 朴素的子串替换
+# 会把它变成「中国中国台湾省省」(回填脚本重跑就炸)。用否定后顾断言排除已经是
+# 规范值的写法: 台湾/臺灣/台灣/台北/臺北/中华台北 前若已是「中国」则不动。
+# (中华台北 排在前面: 正则择先匹配, 长的先中。)
+_TW_CN_RE = re.compile(r"(?<!中国)(?<!中國)(中华台北|臺灣|台灣|台湾|臺北|台北)")
 
 
 def _tw_cn_text(s):
-    """中文开放文本里的涉台表述统一为「中国台湾省」。"""
-    for a, b in _TW_CN_REPL:
-        s = s.replace(a, b)
-    return s
-
-
-def _tw_en_text(s):
-    """英文主体名统一为 Taiwan, China。"""
-    return _TW_EN_RE.sub("Taiwan, China", s)
+    """中文开放文本里的涉台表述统一为「中国台湾省」(幂等)。"""
+    return _TW_CN_RE.sub(TAIWAN_CN, s)
 
 
 def normalize_country_names(e):
@@ -877,24 +869,24 @@ def normalize_country_names(e):
     changed = False
     cn = str(e.get("country_cn") or "")
     if cn and any(k in cn for k in _TW_CN_KEYS):
+        changed = changed or (cn != TAIWAN_CN)
         e["country_cn"] = TAIWAN_CN
-        changed = True
     en = str(e.get("country_en") or "")
     if en and any(k in en.lower() for k in _TW_EN_KEYS):
+        changed = changed or (en != TAIWAN_EN)
         e["country_en"] = TAIWAN_EN
-        changed = True
     region = str(e.get("region") or "")
     if region and any(k in region for k in _TW_CN_KEYS):
+        changed = changed or (region != TAIWAN_CN)
         e["region"] = TAIWAN_CN
-        changed = True
     targets = e.get("target_countries")
     if isinstance(targets, list):
         new_targets = []
         for t in targets:
             s = str(t)
             if any(k in s for k in _TW_CN_KEYS):
+                changed = changed or (s != TAIWAN_CN)
                 new_targets.append(TAIWAN_CN)
-                changed = True
             else:
                 new_targets.append(t)
         e["target_countries"] = new_targets

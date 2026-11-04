@@ -4390,6 +4390,25 @@ class TaiwanNormalizationTests(unittest.TestCase):
         self.assertIn("from Taiwan", e["title_en"])
         self.assertIn("from Taiwan", e["source"]["quote"])
 
+    def test_idempotent_and_changed_flag_honest(self):
+        """已是规范值的记录不应被报成"已改"(否则回填脚本会反复命中同一条)。"""
+        import normalize
+        rec = _source_event(country_cn="中国台湾省", country_en="Taiwan, China",
+                            region="中国台湾省", target_countries=["中国台湾省"],
+                            title_cn="澳大利亚更新中国台湾省蝴蝶兰种苗获准来源名单",
+                            scope="自中国台湾省输澳蝴蝶兰种苗")
+        e = dict(rec)
+        self.assertFalse(normalize.normalize_country_names(e),
+                         "规范值不应再被报成已改")
+        e2 = normalize.fill_defaults(dict(rec))
+        self.assertEqual(e2["country_cn"], "中国台湾省")
+        self.assertEqual(e2["target_countries"], ["中国台湾省"])
+        # 幂等: 再规范化一次, 文本不能变成「中国中国台湾省省」
+        e3 = dict(e2)
+        normalize.normalize_country_names(e3)
+        self.assertEqual(e3["title_cn"], e2["title_cn"], "标题替换必须幂等")
+        self.assertEqual(e3["scope"], e2["scope"], "口径替换必须幂等")
+
     def test_event_id_stable_across_aliases(self):
         """规范化必须发生在 event_id 计算之前 —— 否则同一政策会算出两套 id。"""
         import normalize

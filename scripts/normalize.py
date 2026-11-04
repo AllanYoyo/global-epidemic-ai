@@ -837,6 +837,24 @@ TAIWAN_EN = "Taiwan, China"
 _TW_CN_KEYS = ("台湾", "臺灣", "台灣", "台北", "臺北", "台北", "中华台北",
                "Chinese Taipei")
 _TW_EN_KEYS = ("taiwan", "chinese taipei", "taipei", "republic of china")
+# 开放文本里的替换(长词优先)。覆盖标题/摘要/口径这类**我们自己写**的中文表述。
+_TW_CN_REPL = (("中华台北", "中国台湾省"), ("臺灣", "中国台湾省"), ("台灣", "中国台湾省"),
+               ("台湾", "中国台湾省"), ("臺北", "中国台湾省"), ("台北", "中国台湾省"))
+# 英文主体名统一为 Taiwan, China。title_en / source.quote 是**原文**(官方英文标题与
+# 原文引用), 溯源链要求逐字保留, 故不参与替换 —— 原文归原文。
+_TW_EN_RE = re.compile(r"\b(?:Chinese Taipei|Taiwan)\b", re.I)
+
+
+def _tw_cn_text(s):
+    """中文开放文本里的涉台表述统一为「中国台湾省」。"""
+    for a, b in _TW_CN_REPL:
+        s = s.replace(a, b)
+    return s
+
+
+def _tw_en_text(s):
+    """英文主体名统一为 Taiwan, China。"""
+    return _TW_EN_RE.sub("Taiwan, China", s)
 
 
 def normalize_country_names(e):
@@ -848,7 +866,11 @@ def normalize_country_names(e):
     「Chinese Taipei」。
 
     覆盖 country_cn / country_en / region / target_countries 四处 —— 凡是出现在
-    台账里的涉台名称都归一。原文存档不动(溯源链保留原始表述)。
+    台账里的涉台名称都归一。另覆盖我们自己写的中文开放文本(title_cn / summary_cn /
+    scope): 日报与推送正文直接印这些字段, 留着「台湾」就等于没做规范化。
+
+    **不覆盖** title_en / source.quote: 那是官方英文标题与原文引用, 溯源链要求
+    逐字保留 —— 原文归原文, 我们自己的表述才归一。
 
     幂等: 「中国台湾省」本身含「台湾」→ 再次规范化仍是同一值。
     """
@@ -876,6 +898,14 @@ def normalize_country_names(e):
             else:
                 new_targets.append(t)
         e["target_countries"] = new_targets
+    # 我们自己写的中文开放文本: 日报/推送正文直接印这些字段。
+    for key in ("title_cn", "summary_cn", "scope"):
+        v = e.get(key)
+        if isinstance(v, str) and v:
+            new = _tw_cn_text(v)
+            if new != v:
+                e[key] = new
+                changed = True
     return changed
 
 

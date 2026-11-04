@@ -4369,6 +4369,27 @@ class TaiwanNormalizationTests(unittest.TestCase):
         self.assertEqual(e["region"], "中国台湾省")
         self.assertEqual(e["target_countries"], ["中国台湾省", "俄罗斯"])
 
+    def test_chinese_open_text_normalized_but_original_english_kept(self):
+        """我们自己写的中文表述要归一; 官方英文标题与原文引用逐字保留(溯源链硬要求)。"""
+        import normalize
+        e = normalize.fill_defaults(_source_event(
+            title_cn="澳大利亚更新台湾蝴蝶兰种苗获准来源名单",
+            summary_cn="澳更新台湾蝴蝶兰种苗获准来源设施名单",
+            scope="自台湾输澳蝴蝶兰种苗",
+            title_en="Australia updates the 'Approved sources of Phalaenopsis spp. "
+                     "nursery stock from Taiwan' list",
+            source={"tier": 1, "name": "澳方", "url": "https://www.agriculture.gov.au/p1",
+                    "publish_date": "2026-09-15",
+                    "quote": "the list of approved sources of Phalaenopsis spp. nursery "
+                             "stock from Taiwan"}))
+        self.assertIn("中国台湾省", e["title_cn"])
+        self.assertNotIn("台湾", e["title_cn"].replace("中国台湾省", ""))
+        self.assertIn("中国台湾省", e["summary_cn"])
+        self.assertEqual(e["scope"], "自中国台湾省输澳蝴蝶兰种苗")
+        # 原文不动
+        self.assertIn("from Taiwan", e["title_en"])
+        self.assertIn("from Taiwan", e["source"]["quote"])
+
     def test_event_id_stable_across_aliases(self):
         """规范化必须发生在 event_id 计算之前 —— 否则同一政策会算出两套 id。"""
         import normalize

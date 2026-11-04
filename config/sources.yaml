@@ -120,7 +120,9 @@ policy_eping_watch_countries:
   - {cn: 秘鲁, en: Peru}
   - {cn: 巴拉圭, en: Paraguay}
   - {cn: 厄瓜多尔, en: Ecuador}
-  - {cn: 中华台北, en: Chinese Taipei}
+  # 涉台条目: cn 统一「中国台湾省」(用户 2026-11-04 拍板); en 保留 WTO 成员名
+  # "Chinese Taipei" —— 它是**匹配键**(成员码 C158), 改了这条 watch 就匹配不上。
+  - {cn: 中国台湾省, en: Chinese Taipei}
   - {cn: 以色列, en: Israel}
   - {cn: 瑞士, en: Switzerland}
   - {cn: 埃及, en: Egypt}

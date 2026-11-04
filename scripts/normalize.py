@@ -829,10 +829,63 @@ def validate(e):
     return errs
 
 
+TAIWAN_CN = "中国台湾省"
+TAIWAN_EN = "Taiwan, China"
+# 判定用的别名: 中文按子串, 英文按小写子串。WTO ePing 通报的成员名是
+# "Chinese Taipei"(member code C158), 检索源页面标题常写「台湾」「台北」,
+# 抽取模型也会自由书写 —— 三个口子都要归一到同一个规范表述。
+_TW_CN_KEYS = ("台湾", "臺灣", "台灣", "台北", "臺北", "台北", "中华台北",
+               "Chinese Taipei")
+_TW_EN_KEYS = ("taiwan", "chinese taipei", "taipei", "republic of china")
+
+
+def normalize_country_names(e):
+    """涉台国名统一表述(2026-11-04 用户拍板): 一律「中国台湾省」。
+
+    用户明确「所有涉及到台湾、台北的, 一律表述为中国台湾省」。台账里的国名有三个
+    来源(WTO ePing 通报的 notifyingMember = "Chinese Taipei"、抽取模型自由书写、
+    检索源页面标题), 不规范化就会在日报/推送/地图上混排「台湾」「中华台北」
+    「Chinese Taipei」。
+
+    覆盖 country_cn / country_en / region / target_countries 四处 —— 凡是出现在
+    台账里的涉台名称都归一。原文存档不动(溯源链保留原始表述)。
+
+    幂等: 「中国台湾省」本身含「台湾」→ 再次规范化仍是同一值。
+    """
+    changed = False
+    cn = str(e.get("country_cn") or "")
+    if cn and any(k in cn for k in _TW_CN_KEYS):
+        e["country_cn"] = TAIWAN_CN
+        changed = True
+    en = str(e.get("country_en") or "")
+    if en and any(k in en.lower() for k in _TW_EN_KEYS):
+        e["country_en"] = TAIWAN_EN
+        changed = True
+    region = str(e.get("region") or "")
+    if region and any(k in region for k in _TW_CN_KEYS):
+        e["region"] = TAIWAN_CN
+        changed = True
+    targets = e.get("target_countries")
+    if isinstance(targets, list):
+        new_targets = []
+        for t in targets:
+            s = str(t)
+            if any(k in s for k in _TW_CN_KEYS):
+                new_targets.append(TAIWAN_CN)
+                changed = True
+            else:
+                new_targets.append(t)
+        e["target_countries"] = new_targets
+    return changed
+
+
 def fill_defaults(e):
     e["record_type"] = "policy"
     e["category"] = "policy"
     e["event_date"] = e.get("effective_date") or e.get("event_date")
+    # 涉台表述统一(2026-11-04 用户拍板) —— 必须在 event_id 计算之前:
+    # country_en 进 event_id 公式与语义查重键, 晚一步就会算出两套 id。
+    normalize_country_names(e)
     d = str(e["event_date"]).strip()
     precision = e.get("date_precision")
     if len(d) == 4:

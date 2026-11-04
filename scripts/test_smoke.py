@@ -4331,6 +4331,55 @@ class FetchEpingTests(unittest.TestCase):
                              "%s 只进 ePing 面, 不进国别源扫描" % label)
 
 
+class TaiwanNormalizationTests(unittest.TestCase):
+    """涉台表述统一(2026-11-04 用户拍板): 一律「中国台湾省」。
+
+    用户明确「所有涉及到台湾、台北的, 一律表述为中国台湾省」。台账里的国名有三个
+    来源(WTO ePing 通报成员名 "Chinese Taipei"、抽取模型自由书写、检索源页面标题),
+    不规范化就会在日报/推送/地图上混排。规范化落在 normalize.py 的
+    normalize_country_names()(入库端必经, 且在 event_id 计算之前)。
+    """
+
+    def test_country_names_normalized(self):
+        import normalize
+        cases = [
+            ("台湾", "Chinese Taipei"),
+            ("中华台北", "Chinese Taipei"),
+            ("臺灣", "Taiwan"),
+            ("台北", "Taipei"),
+            ("中国台湾省", "Taiwan, China"),      # 幂等
+            ("中国台湾", "Taiwan, China"),
+        ]
+        for cn, en in cases:
+            e = normalize.fill_defaults(_source_event(country_cn=cn, country_en=en))
+            self.assertEqual(e["country_cn"], "中国台湾省", "country_cn=%r" % cn)
+            self.assertEqual(e["country_en"], "Taiwan, China", "country_en=%r" % en)
+
+    def test_other_countries_untouched(self):
+        import normalize
+        e = normalize.fill_defaults(_source_event(country_cn="日本", country_en="Japan"))
+        self.assertEqual(e["country_cn"], "日本")
+        self.assertEqual(e["country_en"], "Japan")
+
+    def test_region_and_target_countries_normalized(self):
+        import normalize
+        e = normalize.fill_defaults(_source_event(
+            country_cn="中国台湾省", country_en="Taiwan, China",
+            region="台湾", target_countries=["台湾", "俄罗斯"]))
+        self.assertEqual(e["region"], "中国台湾省")
+        self.assertEqual(e["target_countries"], ["中国台湾省", "俄罗斯"])
+
+    def test_event_id_stable_across_aliases(self):
+        """规范化必须发生在 event_id 计算之前 —— 否则同一政策会算出两套 id。"""
+        import normalize
+        a = normalize.fill_defaults(_source_event(
+            policy_key="tw-1", country_cn="中华台北", country_en="Chinese Taipei"))
+        b = normalize.fill_defaults(_source_event(
+            policy_key="tw-1", country_cn="中国台湾省", country_en="Taiwan, China"))
+        self.assertEqual(a["event_id"], b["event_id"],
+                         "同一政策的不同写法必须算出同一个 event_id")
+
+
 class DeadSourcesTests(unittest.TestCase):
     """死源分诊表(scripts/dead_sources.py, 2026-10-30 引入)。
 

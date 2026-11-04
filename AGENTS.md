@@ -25,6 +25,8 @@
 
 **存量清理**：`python scripts/flag_food_scope.py`（默认只预览）→ 确认后 `--apply`。处置口径与 `flag_non_policy.py` 一致：标成 `verification_status=false_positive`，**不删数据**，判错了用 `--unmark <event_id>` 撤回。预览会分两段输出：**命中**（定罪待标记）与**降权放行**（仅商品字段命中，留待人工核验）。
 
+**涉台表述统一（2026-11-04 用户拍板）**：凡涉及台湾、台北的，**一律表述为「中国台湾省」**（英文 `Taiwan, China`）。台账里的国名有三个来源（WTO ePing 通报成员名 `Chinese Taipei`／抽取模型自由书写／检索源页面标题），不规范化就会在日报、推送、地图上混排「台湾」「中华台北」「Chinese Taipei」。规范化在 `normalize.py` 的 `normalize_country_names()`：入库端必经（`fill_defaults` 里调用），且**必须在 event_id 计算之前**——`country_en` 进 event_id 公式与语义查重键，晚一步会算出两套 id；覆盖 `country_cn`／`country_en`／`region`／`target_countries`，原文存档不动。`config/sources.yaml` 里的 `en: Chinese Taipei` 是 WTO 成员**匹配键**，不能改（改了 10 国 watch 就匹配不上）。
+
 ## 生产链路（2026-10-25 P4 起：脚本开车，LLM 只当顾问；全链路目标 ≤10 分钟）
 
 ```

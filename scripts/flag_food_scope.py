@@ -36,6 +36,7 @@
 import argparse
 import json
 import os
+import sqlite3
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -73,8 +74,13 @@ def _unmark(event_id, db_path=None):
 
 
 def _is_food_scope(e):
-    """这条记录是否属于食品类非检疫口径。返回 (是, 原因)。"""
-    is_food, why, _hit = scope_guard.classify_scope(scope_guard.record_scope_text(e))
+    """这条记录是否属于食品类非检疫口径。返回 (是, 原因)。
+
+    判定走 scope_guard.classify_record —— 与抽取端/入库端同一份逻辑、同一份
+    信号表(M22 修法后, 商品字段命中强信号会降权放行, 原因带
+    scope_guard.DOWNGRADE_PREFIX 前缀, 由 main 分流成"降权放行"清单)。
+    """
+    is_food, why, _hit = scope_guard.classify_record(e)
     return bool(is_food), why
 
 
@@ -91,9 +97,18 @@ def main():
     if args.unmark:
         return _unmark(args.unmark, args.db_path)
 
-    con = open_db(args.db_path)
+    try:
+        con = open_db(args.db_path)
+    except sqlite3.Error as exc:
+        # 2026-11-04 修 C13: 库打不开的路径此前是**不可达的死代码** ——
+        # open_db 从不返回 None(它会建库/建表), 真打不开时是抛异常, 于是脚本
+        # 直接崩成 traceback + 退出码 1, 违背 docstring「退出码 2=库打不开」。
+        # 现在把异常接住并按契约返回 2; 顺带修掉该分支里引用未定义变量
+        # db_path 的 NameError(应为 args.db_path)。
+        print("[错误] 打开数据库失败: %s (%s)" % (args.db_path or "(默认路径)", exc))
+        return 2
     if con is None:
-        print("[错误] 打开数据库失败: %s" % (db_path or "(默认路径)"))
+        print("[错误] 打开数据库失败: %s" % (args.db_path or "(默认路径)"))
         return 2
     try:
         rows = load_events(con)
@@ -101,6 +116,7 @@ def main():
         con.close()
 
     hits = []
+    downgrades = []
     for e in rows:
         if e.get("record_type") != "policy":
             continue
@@ -113,6 +129,9 @@ def main():
         is_food, why = _is_food_scope(e)
         if is_food:
             hits.append((e, why))
+        elif why.startswith(scope_guard.DOWNGRADE_PREFIX):
+            # 只在商品清单里命中强信号 → 降权放行(留待人工核验), 不标记。
+            downgrades.append((e, why))
 
     print("扫描 %d 条政策记录, 命中食品类(非检疫口径) %d 条%s"
           % (len(rows), len(hits), "(入库日 %s)" % args.date if args.date else ""))
@@ -120,6 +139,12 @@ def main():
         print("  - %s | %s | %s | %s"
               % (e.get("event_id"), str(e.get("first_seen"))[:10], why,
                  (e.get("title_cn") or e.get("title_en") or "")[:44]))
+    if downgrades:
+        print("\n降权放行 %d 条(仅商品字段命中强信号, 不够定罪, 留待人工核验):" % len(downgrades))
+        for e, why in downgrades:
+            print("  ~ %s | %s | %s | %s"
+                  % (e.get("event_id"), str(e.get("first_seen"))[:10], why,
+                     (e.get("title_cn") or e.get("title_en") or "")[:44]))
     if not hits:
         print("无需处理。")
         return 0

@@ -19,6 +19,16 @@
   输华」这类仍属检疫主线; 误杀真政策的代价远高于放过一条食安记录
   (与 extract_records.py 既有取向一致: 宁可留一条待核验项, 不丢真政策)。
 
+判定文本分两段(2026-11-04, M22 修法):
+  · **散文部分** = 标题 + 摘要 + 原文引用 —— 强信号(对象本身就是食品)必须
+    在这里命中才算数;
+  · **商品部分** = products 清单 + target_countries —— **降权**, 只有弱信号
+    专属词在这里命中才定罪; 强信号只在商品清单里出现不足以定罪。
+  为什么: 动检通报的 products 常是**整批限制清单**(活体动物/肉/乳/饲料/皮张/
+  旧设备/种用材料), 任何一项食品信号都会把整条真政策拖下水 —— 实证误杀:
+  哈萨克斯坦临时限制俄四州活体动物及畜产品进口(321bcf4df94f) 被整条判成
+  食安, 后靠手工 --unmark 挽回, 但旧口径未修, 下次 --apply 会重新误杀。
+
 信号表刻意分中英两套:
   · 中文按子串匹配(中文无词边界概念);
   · 英文按**词边界**匹配 —— 子串匹配会把 "mrl" 命中 "myrtle"、"seed" 命中
@@ -103,6 +113,25 @@ FOOD_STRONG_SIGNALS_EN = (
 )
 
 
+# ---- 弱信号专属词(＝食品信号表减去强信号表) ----
+# 为什么要分这一档(2026-11-04, M22 修法):
+#   强信号(宠物食品/饲料添加剂/MRL/…)在**散文部分**(标题/摘要/原文引用)命中 → 定罪;
+#   只在**商品字段**(products 清单)命中 → **降权**, 不足以定罪。
+#   实证: 哈萨克斯坦临时限制俄四州活体动物及畜产品进口(321bcf4df94f) 的 products
+#   是整批限制清单(活体动物/猪肉及野猪肉制品/乳制品/**饲料及饲料添加剂**/皮张/旧设备),
+#   其中只有「饲料及饲料添加剂」命中强信号, 而函件正文里没有任何检疫专有词 →
+#   旧口径把它整条判成食安并标了 false_positive(真政策误杀)。长尾限制清单是
+#   动检通报的常态, 商品字段命中不能单独定罪 —— 强信号必须在标题/摘要里出现。
+#   弱信号专属词(肥料/土壤调理/加工助剂/补充剂/强化剂/食品安全规范/农药再评估/
+#   withdrawal period/fertiliser/soil conditioner)没有这种"限制清单"歧义,
+#   出现在任何地方都定罪。
+FOOD_WEAK_ONLY_CN = tuple(s for s in FOOD_SIGNALS_CN if s not in FOOD_STRONG_SIGNALS_CN)
+FOOD_WEAK_ONLY_EN = tuple(s for s in FOOD_SIGNALS_EN if s not in FOOD_STRONG_SIGNALS_EN)
+
+# 降权放行的原因前缀(供下游区分"没命中"与"命中但降权放行")
+DOWNGRADE_PREFIX = "仅商品字段命中强信号"
+
+
 def _match_cn(text, signals):
     """中文信号按子串匹配。返回命中的信号或 None。"""
     low = text.lower()
@@ -121,32 +150,45 @@ def _match_en(text, signals):
     return None
 
 
-def classify_scope(text):
+def classify_scope(text, goods_text=""):
     """判定一段文本的收录口径。
 
     返回 (是否食品类非检疫口径, 原因文本, 命中信号)。
     判定文本为空 → 不判(返回 False), 让下游按缺字段处理。
 
-    判定顺序(2026-11-02 二次校准):
-      1. 先看**检疫主线信号**是否在场。在场 → 放行(除非命中"对象本身就是食品"
-         的强信号且该强信号是主语 —— 见第 2 步的例外)。
-      2. 强信号(对象本身就是食品: 宠物食品/饲料添加剂/MRL/兽药残留…)命中 →
-         判拒收。但若文本同时**明确以检疫措施为主语**(含检疫/疫区/证书/
-         有害生物/口岸查验等检疫专有词), 仍放行 —— 因为
-         「农药残留超标的检疫退货处置」是检疫处置, 不是食品安全标准修订。
-         判据是**检疫专有词**而非泛词(「进口」「措施」这类两边都有的词不算)。
-      3. 普通食品信号命中且无检疫主线信号 → 判拒收。
+    参数:
+      text      —— **散文部分**: 标题 + 摘要 + 原文引用(原文原话, 信号最强)。
+      goods_text —— **商品部分**: products 清单 + target_countries(降权, 见下)。
+
+    判定顺序(2026-11-04, M22 修法):
+      1. 先看**检疫主线信号**是否在场(散文或商品清单里出现都算)。在场 → 放行
+         (除非第 2 步命中散文强信号)。
+      2. **散文强信号**命中(对象本身就是食品: 宠物食品/饲料添加剂/MRL/兽药残留…)
+         → 判拒收。但若文本同时明确以检疫措施为主语(含检疫/疫区/证书/有害生物/
+         口岸查验等检疫专有词), 仍放行 —— 因为「农药残留超标的检疫退货处置」
+         是检疫处置, 不是食品安全标准修订。判据是**检疫专有词**而非泛词
+         (「进口」「措施」这类两边都有的词不算)。
+      3. **弱信号**命中(散文或商品清单均可) → 判拒收。
+      4. 只有**商品字段**命中强信号 → **降权放行**(返回 False, 原因带
+         DOWNGRADE_PREFIX 前缀留痕)。理由: 动检通报的 products 常是整批限制
+         清单(活体动物/肉/乳/饲料/皮张/旧设备), 任何一项食品信号都会把整条
+         真政策拖下水 —— 这就是 M22 的实证误杀路径。
     """
-    if not text or not text.strip():
+    prose = text or ""
+    goods = goods_text or ""
+    if not prose.strip() and not goods.strip():
         return False, "", None
+
+    all_text = (prose + " " + goods).strip()
 
     # 检疫主线信号: 只认**检疫专有词**(检疫/疫区/有害生物/证书/口岸查验…),
     # 不认「进口」「措施」这类两边都有的泛词 —— 泛词会把食安记录误判成检疫。
-    quarantine = (_match_cn(text, QUARANTINE_SIGNALS_CN)
-                  or _match_en(text, QUARANTINE_SIGNALS_EN))
+    quarantine = (_match_cn(all_text, QUARANTINE_SIGNALS_CN)
+                  or _match_en(all_text, QUARANTINE_SIGNALS_EN))
 
-    strong = (_match_cn(text, FOOD_STRONG_SIGNALS_CN)
-              or _match_en(text, FOOD_STRONG_SIGNALS_EN))
+    # 强信号只在**散文部分**命中才算数(M22 修法: 强信号须在标题/摘要命中)
+    strong = (_match_cn(prose, FOOD_STRONG_SIGNALS_CN)
+              or _match_en(prose, FOOD_STRONG_SIGNALS_EN))
     if strong:
         if quarantine:
             # 检疫专有词在场 → 这条讲的是检疫措施(哪怕涉及残留/饲料字样),
@@ -154,26 +196,50 @@ def classify_scope(text):
             return False, "", strong
         return True, ("食品安全类非检疫口径(强信号:%s, 无检疫主线信号)" % strong), strong
 
-    food = _match_cn(text, FOOD_SIGNALS_CN) or _match_en(text, FOOD_SIGNALS_EN)
-    if not food:
-        return False, "", None
-    if quarantine:
-        return False, "", food
-    return True, ("食品安全类非检疫口径(命中:%s, 无检疫主线信号)" % food), food
+    # 弱信号: 散文命中即可; 商品清单命中**弱信号专属词**也算(这类词没有
+    # "限制清单"歧义, 见 FOOD_WEAK_ONLY_CN 注释)。
+    weak = (_match_cn(prose, FOOD_WEAK_ONLY_CN)
+            or _match_en(prose, FOOD_WEAK_ONLY_EN)
+            or _match_cn(goods, FOOD_WEAK_ONLY_CN)
+            or _match_en(goods, FOOD_WEAK_ONLY_EN))
+    if weak:
+        if quarantine:
+            return False, "", weak
+        return True, ("食品安全类非检疫口径(命中:%s, 无检疫主线信号)" % weak), weak
+
+    # 只在商品字段命中强信号 → 降权放行, 但把信号带回去留痕。
+    goods_strong = (_match_cn(goods, FOOD_STRONG_SIGNALS_CN)
+                    or _match_en(goods, FOOD_STRONG_SIGNALS_EN))
+    if goods_strong:
+        return False, ("%s:%s(降权放行, 留待人工核验)" % (DOWNGRADE_PREFIX, goods_strong)), goods_strong
+    return False, "", None
 
 
 def record_scope_text(e):
-    """从一条政策记录里取出用于口径判定的文本。
+    """从一条政策记录里取出用于口径判定的**散文部分**。
 
-    取标题 + 摘要 + 原文引用(引用是原文原话, 信号最强) + 商品字段。
-    商品字段单列: 很多食安通报的标题很泛("关于批准 XXX 的法规"), 但 products
-    里写着"宠物食品""饲料添加剂", 靠商品字段才拦得住。
+    = 标题 + 摘要 + 原文引用(引用是原文原话, 信号最强)。
+
+    商品字段(products / target_countries)**不在这里** —— 它是降权部分, 见
+    record_scope_goods_text。两者分开是为了能区分"标题里写了宠物食品"(定罪)
+    与"限制清单里列了宠物食品"(不足以定罪), 见 classify_scope 第 4 步。
     """
     src = e.get("source") if isinstance(e.get("source"), dict) else {}
     parts = [
         str(e.get("title_cn") or ""), str(e.get("title_en") or ""),
         str(e.get("summary_cn") or ""), str(src.get("quote") or ""),
     ]
+    return " ".join(p for p in parts if p)
+
+
+def record_scope_goods_text(e):
+    """从一条政策记录里取出**商品部分**(降权判定用)。
+
+    products 清单 + target_countries。动检通报的 products 常是整批限制清单
+    (活体动物/肉/乳/饲料/皮张/旧设备/种用材料), 食品词出现在其中只说明
+    "被限制的货物里有一项是食品", 不能说明这条政策的主语是食品。
+    """
+    parts = []
     for key in ("products", "target_countries"):
         v = e.get(key)
         if isinstance(v, list):
@@ -181,3 +247,13 @@ def record_scope_text(e):
         elif v:
             parts.append(str(v))
     return " ".join(p for p in parts if p)
+
+
+def classify_record(e):
+    """判定一条政策记录(完整记录)是否属于食品类非检疫口径。
+
+    三个接入点(extract_records 抽取闸门 / normalize 入库闸门 / flag_food_scope
+    存量清理)统一走这里, 避免各自拼判定文本导致口径漂移。
+    返回 (是否食品类非检疫口径, 原因文本, 命中信号)。
+    """
+    return classify_scope(record_scope_text(e), record_scope_goods_text(e))

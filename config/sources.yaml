@@ -107,6 +107,27 @@ policy_watch_countries:
     - {cn: 德国动物疾病信息系统, en: Germany FLI TSIS, aliases: [FLI, TSIS], source_ids: [de-fli]}
     - {cn: 哥伦比亚农业部, en: Colombia MinAgricultura, aliases: [MinAgricultura, ICA], source_ids: [co-minagricultura]}
 
+# ---- ePing 专项 watch 国别(2026-11-04, P1-2) ----
+# 与 policy_watch_countries **刻意分开**: 这 10 国目前没有对应的国别源
+# (sources.yaml 里无 pe-/py-/ec-/tw-/il-/ch-/eg-/ae-/bo-/ma- 入口), 挂进
+# policy_watch_countries 会被 scan_targets._pick 当成"有源的国家"去扫一个
+# 不存在的入口 —— 白占扫描配额, 还会拿占位 URL 去抓取。
+# 本表只喂 ePing 通报面(fetch_eping 的 watch 成员), 不影响国别源扫描。
+# 名字→成员码的匹配规则在 scripts/fetch_eping.py MEMBER_ALIASES;
+# 成员码表来自 WTO /members(缓存 data/ping-members.json, TTL 7 天)。
+# 红线: 中国成员码(C156)一律排除 —— 中国自身措施不入台账。
+policy_eping_watch_countries:
+  - {cn: 秘鲁, en: Peru}
+  - {cn: 巴拉圭, en: Paraguay}
+  - {cn: 厄瓜多尔, en: Ecuador}
+  - {cn: 中华台北, en: Chinese Taipei}
+  - {cn: 以色列, en: Israel}
+  - {cn: 瑞士, en: Switzerland}
+  - {cn: 埃及, en: Egypt}
+  - {cn: 阿联酋, en: United Arab Emirates}
+  - {cn: 玻利维亚, en: Bolivia}
+  - {cn: 摩洛哥, en: Morocco}
+
 # ---- 情报源分级: 1 官方(可直接支撑 verified) / 2 专业(需交叉) / 3 媒体(仅线索) ----
 # schedule 档位: am_pm=晨扫+晚扫 / am=仅晨扫 / daily=每日政策档 / weekly=每周一晨扫附加 / passive=不主动扫
 # track 轨道: policy=政策动作源(policy 档主动扫) / outbreak=疫情事件源(不扫, 仅研判背景) / background=中国侧与名录(不扫, 仅背景)

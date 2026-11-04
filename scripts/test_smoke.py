@@ -24,6 +24,7 @@ import io
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -4281,6 +4282,54 @@ class FetchEpingTests(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertIn("EPING_API_KEY", buf.getvalue())
 
+    def test_addendum_without_pdf_falls_back_to_official_doc_link(self):
+        """P0-1: Add./Corr./Rev. 无 PDF 附件 → 回退官方通报文档直链(不编造 URL)。
+
+        实锤丢过 G/SPS/N/THA/807/Add.1(泰国 DLD 暂停进口活禽令)这类真政策 ——
+        原实现因 url 为空把整族丢弃。ePing 网页详情页形状实测全 404(编造 URL
+        会让溯源链断在假地址上), 故回退 linkToNotification 指向的 WTO 官方文档
+        (2026-11-04 生产实测 200 可达)。TBT 面不回落, 照旧走 TBT 红线。
+        """
+        import parse_eping
+        rec = {
+            "id": "121011", "area": "SPS",
+            "documentSymbol": "G/SPS/N/THA/807/Add.1",
+            "notifyingMember": "Thailand",
+            "title": "The DLD order on temporary suspension of importation or transit of "
+                     "live poultry and poultry carcasses from the Netherlands",
+            "distributionDate": "2026-10-30T00:00:00+00:00",
+            "notifiedDocumentLink": "",
+            "linkToNotification": "https://docs.wto.org/imrd/directdoc.asp?"
+                                  "DDFDocuments/T/G/SPS/NTHA807A1.docx",
+        }
+        self.assertEqual(parse_eping._source_url(rec, "SPS"), rec["linkToNotification"])
+        self.assertEqual(parse_eping._source_url(dict(rec, area="TBT"), "TBT"), "",
+                         "TBT 无附件不回落(保持原行为)")
+        self.assertTrue(parse_eping._is_action({"title": rec["title"], "kw": ""}),
+                        "Addendum 标题命中动作词, 不得被动作预筛掉")
+
+    def test_eping_watch_countries_ten_and_china_excluded(self):
+        """P1-2: ePing 专项 watch = 10 国; 中国成员码不在其中(红线)。"""
+        import scan_targets
+        import fetch_eping
+        labels = scan_targets.eping_watch_labels()
+        self.assertEqual(len(labels), 10, labels)
+        for want in ("Peru", "Paraguay", "Ecuador", "Chinese Taipei", "Israel",
+                     "Switzerland", "Egypt", "United Arab Emirates", "Bolivia", "Morocco"):
+            self.assertIn(want, labels)
+        for cn in ("China", "中华人民共和国", "中国"):
+            self.assertNotIn(cn, labels, "中国自身措施不入台账(红线)")
+        missing = [l for l in labels if l not in fetch_eping.MEMBER_ALIASES]
+        self.assertEqual(missing, [], "MEMBER_ALIASES 缺标签(会被静默跳过): %s" % missing)
+
+    def test_eping_watch_countries_do_not_pollute_country_scan(self):
+        """专项 watch 不得进国别源扫描(这 10 国没有国别源, 挂进去会白扫)。"""
+        import scan_targets
+        picked_en = [en for _t, _cn, en, _sid, _u in scan_targets._pick("2026-11-04")]
+        for label in scan_targets.eping_watch_labels():
+            self.assertNotIn(label, picked_en,
+                             "%s 只进 ePing 面, 不进国别源扫描" % label)
+
 
 class DeadSourcesTests(unittest.TestCase):
     """死源分诊表(scripts/dead_sources.py, 2026-10-30 引入)。
@@ -4411,6 +4460,90 @@ class FoodScopeTests(unittest.TestCase):
                      "A rule about the emerald necklace manufacturing"):
             is_food, _why, hit = self.g.classify_scope(text)
             self.assertFalse(is_food, "英文子串误伤: %s (hit=%s)" % (text, hit))
+
+    # ---- M22 修法(2026-11-04): 商品字段命中强信号 → 降权, 强信号须在标题/摘要 ----
+
+    def test_goods_only_strong_signal_downgraded(self):
+        """M22 实证误杀: 哈萨克斯坦临时限制俄四州**活体动物**进口被整条判成食安。
+
+        真凶是 products 限制清单里的「饲料及饲料添加剂」—— 整批限制清单
+        (活体动物/肉/乳/饲料/皮张/旧设备)里任何一项食品信号都会把整条真政策
+        拖下水。修法: 强信号必须在**散文部分**(标题/摘要/引用)命中才算数,
+        只在商品清单命中 → 降权放行。
+        """
+        rec = {
+            "title_cn": "哈萨克斯坦9月19日起临时限制俄四州活体动物及畜产品进口与过境",
+            "title_en": "Kazakhstan temporarily restricts imports and transit of livestock "
+                        "products from four Russian regions from 19 September 2026",
+            "summary_cn": "自2026年9月19日起，哈萨克斯坦对俄罗斯四个州的活动物及畜产品"
+                          "实施临时进口和过境限制。",
+            "source": {"quote": "Kazakhstan has imposed temporary restrictions on the import "
+                                 "and transit of livestock products."},
+            "products": ["活体动物", "猪肉及野猪肉制品", "乳制品", "饲料及饲料添加剂",
+                         "肠衣、皮张等原料", "旧设备", "狩猎战利品", "种用遗传物质"],
+        }
+        is_food, why, _hit = self.g.classify_record(rec)
+        self.assertFalse(is_food, "活畜限制政策被误杀(products 降权失效)")
+        self.assertTrue(why.startswith(self.g.DOWNGRADE_PREFIX),
+                        "降权放行必须留痕以便人工核验, why=%r" % why)
+
+    def test_goods_strong_signal_still_food_when_in_title(self):
+        """降权只作用于**仅**商品字段命中: 标题里写了宠物食品/饲料添加剂 → 仍拒收。
+
+        存量 45 条食安记录(欧盟饲料添加剂系列/加拿大热处理宠物食品/日本饲料
+        添加剂省令)的信号都在标题里, 降权不得把它们放回来。
+        """
+        cases = [
+            {"title_cn": "欧盟授权珍珠岩作为特定家禽和猪饲料添加剂",
+             "products": ["珍珠岩饲料添加剂", "育肥家禽饲料"]},
+            {"title_cn": "加拿大拟修订美产热处理宠物食品进口要求",
+             "products": ["热处理宠物食品"]},
+            {"title_cn": "日本拟修订饲料及饲料添加剂标准省令",
+             "products": ["胍基乙酸(饲料添加剂)", "猪饲料"]},
+        ]
+        for rec in cases:
+            is_food, why, _hit = self.g.classify_record(rec)
+            self.assertTrue(is_food, "标题里的食品强信号被降权放行了: %s" % rec["title_cn"])
+            self.assertIn("强信号", why)
+
+    def test_goods_only_weak_signal_still_food(self):
+        """弱信号专属词(肥料/土壤调理…)在商品清单里命中仍定罪 —— 没有限制清单歧义。"""
+        rec = {"title_cn": "关于某产品进口条件的规定",
+               "products": ["肥料", "土壤调理剂"]}
+        is_food, why, _hit = self.g.classify_record(rec)
+        self.assertTrue(is_food, "弱信号在商品字段命中应定罪, why=%r" % why)
+
+    def test_classify_record_parts_split(self):
+        """散文与商品两段必须能分开取: record_scope_text 只给散文。"""
+        rec = {"title_cn": "标题里的饲料添加剂", "products": ["宠物食品"],
+               "target_countries": ["菲律宾"]}
+        prose = self.g.record_scope_text(rec)
+        goods = self.g.record_scope_goods_text(rec)
+        self.assertIn("饲料添加剂", prose)
+        self.assertNotIn("宠物食品", prose)
+        self.assertIn("宠物食品", goods)
+        self.assertIn("菲律宾", goods)
+
+    def test_flag_food_scope_db_path_error_contract(self):
+        """C13 修: 库打不开时必须退出码 2。
+
+        原实现里这条路径是**不可达的死代码** —— open_db 从不返回 None(它会
+        建库/建表), 真打不开时是抛 sqlite3.Error, 于是脚本直接崩成 traceback
+        + 退出码 1, 违背 docstring「退出码 2=库打不开」的契约; 该分支里还
+        引用了未定义的变量 db_path(应为 args.db_path)→ NameError。
+        用目录当库路径触发真实的 sqlite 错误。
+        """
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "flag_food_scope.py")
+        bad = tempfile.mkdtemp(prefix="yi-not-a-db-")
+        try:
+            argv = [sys.executable, script, "--db-path", bad]
+            p = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+            out = (p.stdout or "") + (p.stderr or "")
+            self.assertEqual(p.returncode, 2, out)
+            self.assertIn("打开数据库失败", out)
+            self.assertNotIn("Traceback", out)
+        finally:
+            shutil.rmtree(bad, ignore_errors=True)
 
     # ---- 接入点: normalize 入库端闸门 ----
 

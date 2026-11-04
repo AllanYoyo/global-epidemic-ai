@@ -158,6 +158,39 @@ def _pdf(rec):
     return ""
 
 
+def _doc_link(rec):
+    """官方通报文档直链(Add./Corr./Rev. 这类**无 PDF 附件**的通报用它)。
+
+    ePing API 的 linkToNotification 指向 WTO 官方文档(documents.wto.org 的
+    directdoc.asp), 2026-11-04 生产实测 200 可达 —— 它就是这类通报**本身的
+    正式文件**(如 G/SPS/N/THA/807/Add.1 泰国 DLD 暂停进口活禽令)。
+
+    为什么不用 ePing 网页详情页: 实测 eping.wto.org 的几种详情页 URL 形状
+    (/en/SPS/Notification/<id> 等)全部 404 —— 编造 URL 会让溯源链断在假地址上。
+    """
+    v = _first(rec, "linkToNotification") or ""
+    v = str(v).strip()
+    return v if v.startswith("http") else ""
+
+
+def _source_url(rec, area=""):
+    """归档用原文直链: PDF 优先; SPS 面缺 PDF 时回退官方通报文档直链。
+
+    为什么回退(2026-11-04, P0-1): Add./Corr./Rev. 类通报**本来就没有 PDF 附件**
+    (它们是对已通报文件的补充/更正), 原实现因 url 为空把整族丢弃 ——
+    实锤丢过 G/SPS/N/THA/807/Add.1(泰国 DLD 暂停进口活禽令)与
+    G/SPS/N/ARE/334/Corr.1(沙特临时禁止进口禽类)这类真政策。
+
+    TBT 面**不回落**(照旧走 TBT 红线+黑名单), 保持原行为不变。
+    """
+    pdf = _pdf(rec)
+    if pdf:
+        return pdf
+    if str(area or "").strip().upper() == "TBT":
+        return ""
+    return _doc_link(rec)
+
+
 def _kw(rec):
     v = _first(rec, "kw", "keywords", "spsKeywords", "subjects", "tags", "categories")
     if isinstance(v, (list, tuple)):
@@ -209,14 +242,18 @@ def _from_json(path):
     for rec in data:
         if not isinstance(rec, dict):
             continue
+        area = str(_first(rec, "area", "domain", "spTbtArea") or "")
         out.append({
             "member": str(_first(rec, "member", "notifyingMember", "notifying_member", "country") or "-"),
             "dist": _dist(rec),
             "sym": str(_first(rec, "sym", "documentSymbol", "symbol", "notificationSymbol") or "-"),
             "title": str(_first(rec, "title", "title_cn", "description", "desc") or ""),
             "kw": _kw(rec),
-            "url": _pdf(rec),
-            "area": str(_first(rec, "area", "domain", "spTbtArea") or ""),
+            "url": _source_url(rec, area),
+            # 有 PDF 附件的通报正文更全(存档正文虽是元数据综合, 但 PDF 链接可溯源),
+            # 配额有限时优先存它们, 无附件的 Add./Corr. 往后排(见 fetch_eping.archive_items)。
+            "_has_pdf": bool(_pdf(rec)),
+            "area": area,
             "raw": rec,
         })
     return out

@@ -251,7 +251,12 @@
   ④5xx 重试若退化成 304 会被记成「未变」而非 error; ⑤`test_parity_with_legacy_candidate_set`
   实为子集断言(名字与文档都写「==」), 挡不住召回率塌陷。
 
-#### M22 · scope_guard 误杀模式: products 清单里的食品复合词把真动物卫生限制拖进强信号 (2026-11-03 新增)
+#### M22 · scope_guard 误杀模式: products 清单里的食品复合词把真动物卫生限制拖进强信号 (2026-11-03 新增) · **2026-11-04 已修复**
+- **修复方式**: 判定文本分两段 —— 散文（标题/摘要/原文引用）与商品（products/target_countries）。
+  **强信号必须在散文里命中才算数**；只在商品字段命中 → **降权放行**并留痕（`scope_guard.DOWNGRADE_PREFIX`）。
+  `flag_food_scope.py` 预览分「命中」与「降权放行」两段输出。三处接入点统一走 `scope_guard.classify_record()`。
+  实证: 哈萨克活畜限制（`321bcf4df94f`）不再被判食安，下次 `--apply` 不会重新误杀；存量 45 条食安记录
+  （欧盟饲料添加剂系列/宠物食品/MRL 等）信号都在标题里，判定不变。
 - 位置: `scripts/scope_guard.py` `classify_scope` / `record_scope_text`(products 与标题/摘要同权进判定文本)
 - 现象(2026-11-03 生产实测): 哈萨克斯坦对俄四州活畜与畜产品进口限制(321bcf4df94f,
   动检主线)被 `flag_food_scope.py` 判为食品类 —— `products` 清单含「饲料及饲料添加剂」
@@ -365,7 +370,11 @@
 - 现象: 一次网络抖动/限速导致查不到坐标, 结果被永久缓存成 `None`, 该国所有点此后都不显示在地图上, 且没有任何日志。
 - 建议处理: 失败结果不写缓存(或短 TTL), 并打 `[WARN]` 日志。
 
-#### C13 · `flag_food_scope.py` 错误路径 NameError: main() 引用未定义的 db_path (2026-11-03 新增)
+#### C13 · `flag_food_scope.py` 错误路径 NameError: main() 引用未定义的 db_path (2026-11-03 新增) · **2026-11-04 已修复**
+- **修复方式**: 库打不开的路径此前是**不可达的死代码**（`open_db` 从不返回 None，真打不开时是抛
+  `sqlite3.Error` → 脚本崩成 traceback + 退出码 1，违背 docstring「退出码 2=库打不开」）。现在把异常接住
+  并返回 2，同时修掉该分支引用未定义变量 `db_path` 的 NameError（改为 `args.db_path`）。已补一条
+  触发真实 sqlite 错误的最小用例。
 - 位置: `scripts/flag_food_scope.py:96`(main 里 `open_db` 返回 None 分支)
 - 现象: 应为 `args.db_path` —— 照抄自 `flag_non_policy.py` 的 `_unmark`(那里 db_path 是
   参数名所以成立), 搬进 main 忘改。当前 `open_db()` 失败即抛异常、从不返回 None, 分支为

@@ -175,6 +175,39 @@ def parse_watch_countries(text):
     return tiers
 
 
+def parse_eping_watch_countries(text):
+    """ePing 专项 watch 国别标签(2026-11-04, P1-2)。
+
+    与 policy_watch_countries **分开**: 这批国家没有国别源, 只进 ePing 通报面。
+    挂进 policy_watch_countries 会被 _pick 当成"有源的国家"去扫不存在的入口。
+    返回 label(en) 列表(顺序即配置顺序)。
+    """
+    out = []
+    in_seg = False
+    for line in text.splitlines():
+        if re.match(r"^policy_eping_watch_countries:\s*$", line):
+            in_seg = True
+            continue
+        if not in_seg:
+            continue
+        if line and not line[0].isspace():
+            break
+        if line.lstrip().startswith("#"):
+            continue
+        m = re.match(r"^\s*-\s*\{(.+)\}\s*$", line)
+        if m:
+            en = re.search(r"en: ([^,}]+)", m.group(1))
+            if en:
+                out.append(_val(en.group(1)))
+    return out
+
+
+def eping_watch_labels():
+    """读 sources.yaml 取 ePing 专项 watch 标签(只影响 ePing 面)。"""
+    with open(SOURCES_PATH, encoding="utf-8") as f:
+        return parse_eping_watch_countries(f.read())
+
+
 def _pick(date_str, group=None):
     """选定当日的 (档位, 国别cn, 国别en, 源id, 入口URL) 列表。
 

@@ -811,7 +811,7 @@ def validate(e):
     # 放在入库端而不是只在抽取端: 抽取是 LLM 单轮调用, 规则只写在 prompt 里
     # 等于靠模型自律; 入库端是所有上游路径(Agent 会话/P4 管线/手工 JSON)的
     # 必经关口, 在这里拦才是确定性保证。判定逻辑单一来源见 scope_guard.py。
-    is_food, food_why, _hit = scope_guard.classify_scope(scope_guard.record_scope_text(e))
+    is_food, food_why, _hit = scope_guard.classify_record(e)
     if is_food:
         errs.append(
             "收录口径不符: %s。本台账只监测动植物检验检疫的政策变化, "

@@ -71,21 +71,29 @@ API_TIMEOUT = 30
 MEMBER_ALIASES = {
     "Argentina": r"^argentina$",
     "Australia": r"^australia$",
+    "Bolivia": r"^bolivia",
     "Brazil": r"^brazil$",
     "Canada": r"^canada$",
     "Chile": r"^chile$",
+    "Chinese Taipei": r"^chinese taipei$",
     "Colombia MinAgricultura": r"^colombia",
+    "Ecuador": r"^ecuador$",
+    "Egypt": r"^egypt$",
     "India": r"^india$",
     "Indonesia": r"^indonesia$",
+    "Israel": r"^israel$",
     "Japan": r"^japan$",
     "Kazakhstan": r"^kazakhstan$",
     "Laos": r"^lao\b|^lao people",
     "Malaysia": r"^malaysia$",
     "Mexico": r"^mexico$",
     "Mongolia": r"^mongolia$",
+    "Morocco": r"^morocco$",
     "Myanmar": r"^myanmar",
     "New Zealand": r"^new zealand$",
     "Norway": r"^norway$",
+    "Paraguay": r"^paraguay$",
+    "Peru": r"^peru$",
     "European Commission SANTE": r"^european union",
     "Poland": r"^european union",
     "Romania": r"^european union",
@@ -94,9 +102,11 @@ MEMBER_ALIASES = {
     "Saudi Arabia": r"^saudi",
     "South Africa": r"^south africa$",
     "South Korea": r"^republic of korea|^korea, rep",
+    "Switzerland": r"^switzerland$",
     "Thailand": r"^thailand$",
     "Turkey": r"^turkiye|^turkey$",
     "Ukraine": r"^ukraine$",
+    "United Arab Emirates": r"^united arab emirates$",
     "United Kingdom": r"^united kingdom$",
     "United States": r"^united states",
     "Uruguay": r"^uruguay$",
@@ -206,12 +216,22 @@ def synth_html(rec):
 
     description 是 WTO API 原文(HTML 片段) —— **逐字保留**(转义还原一次),
     溯源链上抽取段的 source.quote 必须出自这份原文。
+
+    2026-11-04(P0-1): Add./Corr./Rev. 类通报没有 PDF 附件, 直链用官方通报文档
+    (linkToNotification), 存档里如实标注"official document"而不是空着的
+    "official PDF" —— 溯源链上不能出现编造的地址。
     """
     sym = str(rec.get("documentSymbol") or "").strip()
     title = str(rec.get("title") or "").strip() or sym or "WTO notification"
     desc = html.unescape(str(rec.get("description") or ""))
     links = [l for l in str(rec.get("notifiedDocumentLink") or "").split(",") if l.strip()]
     kw = parse_eping._kw(rec)
+    if links:
+        link_label = "official PDF"
+        link_text = " , ".join(_clean(l) for l in links)
+    else:
+        link_label = "official document"
+        link_text = _clean(parse_eping._doc_link(rec))
     return ("<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>%s</title></head>"
             "<body><h1>%s</h1>"
             "<p>documentSymbol: %s</p>"
@@ -219,15 +239,15 @@ def synth_html(rec):
             "<p>distributionDate: %s | commentDeadline: %s</p>"
             "<p>products: %s</p>"
             "<p>keywords: %s</p>"
-            "<p>official PDF: %s</p>"
+            "<p>%s: %s</p>"
             "<div>%s</div>"
             "<p>(source: WTO ePing API api.wto.org/eping —— 通报元数据存档, "
-            "原文以上述 official PDF 为准)</p></body></html>"
+            "原文以上述链接为准)</p></body></html>"
             % (_clean(title), _clean(title), _clean(sym), _clean(rec.get("notifyingMember") or ""),
                _clean(rec.get("area") or ""), _clean(rec.get("notificationType") or ""),
                _clean(parse_eping._dist(rec) or ""), _clean(str(rec.get("commentDeadlineDate") or "")[:10]),
                _clean(rec.get("productsFreeText") or ""), _clean(kw),
-               " , ".join(_clean(l) for l in links), desc))
+               link_label, link_text, desc))
 
 
 def _clean(s):
@@ -320,6 +340,13 @@ def archive_items(items, date_str, raw_dir, max_archives_per_day, archive_lock):
     chosen = [r for r in chosen if not _is_tbt(r)]
     if tbt_n:
         print("[fetch_eping] TBT 通报剔除 %d 条(动植物检疫红线, 只收 SPS)" % tbt_n)
+    # 配额有限: 有 PDF 附件的通报先存(可溯源到原文 PDF), 无附件的 Add./Corr.
+    # 往后排 —— 它们的存档正文只有通报元数据综合, 价值次一级, 但不能丢
+    # (P0-1: 泰国暂停进口令这类真政策就藏在里面)。排序稳定, 同组保持原序。
+    chosen.sort(key=lambda r: 0 if r.get("_has_pdf") else 1)
+    n_add = sum(1 for r in chosen if not r.get("_has_pdf"))
+    if n_add:
+        print("[fetch_eping] 无 PDF 附件通报(Add./Corr./Rev., 回退官方文档直链) %d 条" % n_add)
     # 当日已存过的 URL 去重(重跑不重复占配额; 抽取段另有 done_urls 去重)
     done = set()
     cand_path = os.path.join(raw_dir, "candidates.jsonl")
@@ -457,6 +484,26 @@ def _selftest():
           and "Serbia" in unmatched and "WTO ePing" in unmatched,
           "中国(红线)/非成员/聚合标签 正确跳过并留痕")
     check(reverse.get("C704") == "Vietnam", "反查表 code → 国别标签")
+    # 2026-11-04 (P1-2): ePing 专项 watch 的 10 个新成员, 名字→成员码匹配。
+    members_p12 = [
+        {"value": "C604", "text": "Peru"},
+        {"value": "C600", "text": "Paraguay"},
+        {"value": "C218", "text": "Ecuador"},
+        {"value": "C158", "text": "Chinese Taipei"},
+        {"value": "C376", "text": "Israel"},
+        {"value": "C756", "text": "Switzerland"},
+        {"value": "C818", "text": "Egypt"},
+        {"value": "C784", "text": "United Arab Emirates"},
+        {"value": "C068", "text": "Bolivia, Plurinational State of"},
+        {"value": "C504", "text": "Morocco"},
+    ]
+    m_p12, _rev_p12, unmatched_p12 = match_members(
+        ["Peru", "Paraguay", "Ecuador", "Chinese Taipei", "Israel", "Switzerland",
+         "Egypt", "United Arab Emirates", "Bolivia", "Morocco"], members_p12)
+    check(len(m_p12) == 10 and not unmatched_p12
+          and m_p12.get("Chinese Taipei") == "C158" and m_p12.get("Bolivia") == "C068"
+          and m_p12.get("United Arab Emirates") == "C784",
+          "P1-2 十个新 watch 成员全部匹配到 WTO 成员码")
     sample = {
         "id": "19877", "area": "SPS", "notificationType": "Regular notification",
         "distributionDate": "2016-11-29T00:00:00.0000000+00:00",
@@ -488,11 +535,26 @@ def _selftest():
                                       "for import",
                                 notifiedDocumentLink="https://members.wto.org/crnattachments/2016/TBT/EEC/16_4902_00_e.pdf",
                                 productsFreeText="Plants for planting")
+        # 2026-11-04 (P0-1): Add./Corr./Rev. 类通报**本来就没有 PDF 附件**
+        # (它们是对已通报文件的补充/更正) —— 实锤丢过 G/SPS/N/THA/807/Add.1
+        # (泰国 DLD 暂停进口活禽令)。SPS 面回退官方通报文档直链, TBT 面不回落。
+        sample_add = dict(sample, id="121011", area="SPS",
+                          documentSymbol="G/SPS/N/THA/807/Add.1",
+                          title="The DLD order on temporary suspension of importation or transit "
+                                "of live poultry and poultry carcasses from the Netherlands "
+                                "to prevent the spread of Highly Pathogenic Avian Influenza",
+                          notifiedDocumentLink="",
+                          linkToNotification="https://docs.wto.org/imrd/directdoc.asp?"
+                                             "DDFDocuments/T/G/SPS/NTHA807A1.docx")
+        sample_add_tbt = dict(sample_add, id="120845", area="TBT",
+                              documentSymbol="G/TBT/N/TUR/71/Rev.1/Add.1",
+                              title="The Turkish Food Codex Communique on Distilled Alcoholic Beverages")
         with open(path, "w", encoding="utf-8") as f:
-            json.dump({"items": [sample, sample_tbt, sample_tbt_pest, sample_tbt_phyto]}, f)
+            json.dump({"items": [sample, sample_tbt, sample_tbt_pest, sample_tbt_phyto,
+                                 sample_add, sample_add_tbt]}, f)
         recs = parse_eping._from_json(path)
         r = recs[0]
-        check(len(recs) == 4, "样本四条都解析")
+        check(len(recs) == 6, "样本六条都解析")
         check(_is_tbt(recs[1]) and _is_tbt(recs[2]),
               "TBT 默认剔除; 农药类 TBT 同样剔除(2026-11-02 收紧: 农药/残留属食安口径)")
         check(not _is_tbt(recs[3]),
@@ -508,6 +570,17 @@ def _selftest():
         page = synth_html(sample)
         check("G/SPS/N/USA/1234" in page and "crnattachments" in page
               and "Establishes provisions" in page, "综合档案含文号/直链/原文描述")
+        # ---- P0-1: 无 PDF 附件的 Add./Corr./Rev. 通报 ----
+        check(recs[4]["url"] == "https://docs.wto.org/imrd/directdoc.asp?"
+              "DDFDocuments/T/G/SPS/NTHA807A1.docx",
+              "SPS 无 PDF 附件 → 回退官方通报文档直链(不编造 URL)")
+        check(recs[4]["_has_pdf"] is False, "无附件通报标记正确(配额排序用)")
+        check(parse_eping._is_action(recs[4]),
+              "Addendum 标题命中动作词(suspension)→ 不被动作词筛掉")
+        check(recs[5]["url"] == "", "TBT 无附件不回落(照旧走 TBT 红线)")
+        add_page = synth_html(sample_add)
+        check("official document" in add_page and "NTHA807A1.docx" in add_page,
+              "无附件通报的存档正文标注官方文档直链")
     finally:
         import shutil
         shutil.rmtree(tmp, ignore_errors=True)
@@ -543,6 +616,8 @@ def main():
     labels = set()
     for _t, _cn, en, _sid, _u in picked:
         labels.add(en)
+    # ePing 专项 watch 国别(2026-11-04, P1-2): 这批国家没有国别源, 只进通报面。
+    labels.update(scan_targets.eping_watch_labels())
     members = _load_members(DATA_DIR, key)
     matched, reverse, unmatched = match_members(labels, members)
     if unmatched:

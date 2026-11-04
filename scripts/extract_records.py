@@ -323,7 +323,7 @@ def screen_food_scope(rec):
     闸门共用同一套信号表。刻意不在本文件另抄一份: 抽取面与入库面两套口径必然
     漂移(这正是本仓库反复吃过的亏), 一处改了另一处没跟上就会漏放。
     """
-    is_food, why, _hit = scope_guard.classify_scope(scope_guard.record_scope_text(rec))
+    is_food, why, _hit = scope_guard.classify_record(rec)
     return (True, why) if is_food else (False, "")
 
 

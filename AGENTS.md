@@ -18,11 +18,12 @@
 | 抽取面 | `prompts/policy-extraction.md` 红线段 + `extract_records.py` 的 `SCOPE_RULES` | prompt 带红线；抽取端有确定性闸门（第五道） |
 | 入库端 | `scripts/normalize.py` 的 `validate()` | **最后一道保险**，所有上游路径必经；命中即拒收 |
 
-**两处踩过的坑（别再踩）**：
+**三处踩过的坑（别再踩）**：
 - **标签 ≠ 内容**：WTO SPS 通报的 `keywords` 字段里 "Food safety" 是 WTO 自己的**主题分类标签**（与 "Pesticides" 同级），几乎每条动检通报都挂着它 —— 拿它当食品信号会把真检疫通报整片误剔。判定只看**标题与产品字段**。
 - **检疫信号只能是"检疫专有词"**（检疫/疫区/有害生物/证书/口岸查验…）：「进口」「准入」「措施」这类两边都有的泛词，会给食安记录开一个很大的豁免口子（实测「宠物食品进口准入条件」就是这样被漏放的）。
+- **商品字段命中不能定罪**（2026-11-04 M22 修法）：`products` 是**限制清单**，动检通报常整批列出（活体动物/肉/乳/饲料/皮张/旧设备/种用材料），其中任何一项食品信号都会把整条真政策拖下水。**强信号（宠物食品/饲料添加剂/MRL/兽药残留…）必须在标题/摘要/原文引用里命中才算数**；只在商品字段命中 → **降权放行**（`scope_guard` 返回 `DOWNGRADE_PREFIX` 原因留痕，待人工核验）。实证误杀：哈萨克斯坦临时限制俄四州活体动物及畜产品进口（`321bcf4df94f`）曾被整条判成食安。判定文本分两段：`record_scope_text()` 取散文、`record_scope_goods_text()` 取商品，三处接入点统一走 `scope_guard.classify_record()`。
 
-**存量清理**：`python scripts/flag_food_scope.py`（默认只预览）→ 确认后 `--apply`。处置口径与 `flag_non_policy.py` 一致：标成 `verification_status=false_positive`，**不删数据**，判错了用 `--unmark <event_id>` 撤回。
+**存量清理**：`python scripts/flag_food_scope.py`（默认只预览）→ 确认后 `--apply`。处置口径与 `flag_non_policy.py` 一致：标成 `verification_status=false_positive`，**不删数据**，判错了用 `--unmark <event_id>` 撤回。预览会分两段输出：**命中**（定罪待标记）与**降权放行**（仅商品字段命中，留待人工核验）。
 
 ## 生产链路（2026-10-25 P4 起：脚本开车，LLM 只当顾问；全链路目标 ≤10 分钟）
 

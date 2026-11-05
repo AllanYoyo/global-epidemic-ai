@@ -2566,6 +2566,37 @@ class PipelineP4Tests(unittest.TestCase):
         wrong = {"title_cn": "x", "source": {"url": "https://evil/x", "quote": "x"}}
         self.assertIn("url 与存档不符", er.validate(wrong, "https://a.b/c"))
 
+    def test_validate_url_transcription_rescue(self):
+        # 模型回显长 URL 的转录变形 → 采纳存档 url, 不判失败(2026-11-05 实测:
+        # P0-1 无附件通报 THA/807/Add.1 的官方文档直链两次重试都死在
+        # 「url 与存档不符」—— 模型读对了存档, 只是转述变形, 整条报废)。
+        # 异主机/幻觉改写(文号变形)仍拒收: 反幻觉校验保留。
+        import extract_records as er
+        archive = ("https://docs.wto.org/imrd/directdoc.asp?"
+                   "DDFDocuments/T/G/SPS/NTHA807A1.docx")
+        # ① 截断形态(前段一致, 尾巴没了) → 采纳存档 url
+        rec1 = {"title_cn": "x", "source": {
+            "url": "https://docs.wto.org/imrd/directdoc.asp?DDFDocuments/T/G/SPS",
+            "quote": "x"}}
+        self.assertIsNone(er.validate(rec1, archive))
+        self.assertEqual(rec1["source"]["url"], archive)
+        # ② 漏杠 + 大小写漂移(归一化后同串) → 采纳存档 url
+        rec2 = {"title_cn": "x", "source": {
+            "url": "https://DOCs.wto.org/imrd/directdoc.asp?DDFDocuments/T/G/SPSNTHA807A1.docx",
+            "quote": "x"}}
+        self.assertIsNone(er.validate(rec2, archive))
+        self.assertEqual(rec2["source"]["url"], archive)
+        # ③ 幻觉改写(文号被改形: NTHA807A1 → N/THA/807/Add1) → 仍拒收
+        bad = {"title_cn": "x", "source": {
+            "url": "https://docs.wto.org/imrd/directdoc.asp?DDFDocuments/T/G/SPS/N/THA/807/Add1.docx",
+            "quote": "x"}}
+        self.assertIn("url 与存档不符", er.validate(bad, archive))
+        # ④ 异主机 → 仍拒收
+        evil = {"title_cn": "x", "source": {
+            "url": "https://evil.example/imrd/directdoc.asp?DDFDocuments/T/G/SPS/NTHA807A1.docx",
+            "quote": "x"}}
+        self.assertIn("url 与存档不符", er.validate(evil, archive))
+
     def test_extract_records_429_fast_fail(self):
         # Token Plan 耗尽: 不烧第二次重试, 剩余文档留待下轮, search-log 留痕
         import extract_records as er

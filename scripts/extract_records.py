@@ -29,6 +29,7 @@ import os
 import re
 import subprocess
 import sys
+from urllib.parse import urlparse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from normalize import biz_today, DATA_DIR
@@ -449,6 +450,35 @@ def parse_kv_output(text):
     return rec
 
 
+def _url_host(u):
+    """url 主机名(小写, 去 www. 前缀); 解析不了返回空串。"""
+    try:
+        host = urlparse(u).netloc.lower()
+    except ValueError:
+        return ""
+    return host[4:] if host.startswith("www.") else host
+
+
+def _url_alnum(u):
+    """url 归一化形态: 只留小写字母数字 —— 抹掉 / ? = . : - 等转录噪声。"""
+    return re.sub(r"[^a-z0-9]", "", u.lower())
+
+
+def _url_rescuable(model_url, archive_url):
+    """模型回显的 url 是否可判定为「同一文档的转录变形」。
+
+    判据: **同主机** + 归一化后一方是另一方前缀。命中覆盖四类形态:
+    截断(尾巴没了) / 漏杠(路径少个分隔) / 大小写漂移 / 扩展名差异。
+    判定不了(异主机、路径中途分叉如把文号改写成别的形态) → False,
+    调用方维持拒收 —— 反幻觉校验不放松。
+    """
+    hm, ha = _url_host(model_url), _url_host(archive_url)
+    if not hm or hm != ha:
+        return False
+    nm, na = _url_alnum(model_url), _url_alnum(archive_url)
+    return bool(nm) and bool(na) and (na.startswith(nm) or nm.startswith(na))
+
+
 def validate(rec, url):
     """最小校验: 标题/URL/quote 三硬项 + quote 长度。返回错误或 None。"""
     src = rec.get("source") or {}
@@ -457,9 +487,17 @@ def validate(rec, url):
         return "缺标题"
     if not (src.get("url") or rec.get("url")):
         return "缺 url"
-    if src.get("url") and url and src["url"].rstrip("/") != url.rstrip("/") \
-            and src["url"] not in url and url not in src["url"]:
-        return "url 与存档不符(%s)" % src["url"][:60]
+    if src.get("url") and url and src["url"].rstrip("/") != url.rstrip("/"):
+        if _url_rescuable(src["url"], url):
+            # 模型回显长 URL 的**转录变形**(截断/漏杠/大小写/扩展名差异): 存档 url
+            # 才是溯源权威(collect 实际抓的那份), 模型只是转述者 —— 以存档为准
+            # 采纳, 不判失败。2026-11-05 实测: P0-1 无附件通报 THA/807/Add.1 的
+            # 官方文档直链(docs.wto.org/...NTHA807A1.docx)两次重试都死在
+            # 「url 与存档不符」上 —— 模型读对了存档, 只是转述变形, 整条报废。
+            src["url"] = url
+        elif src["url"] not in url and url not in src["url"]:
+            # 异主机/路径中途分叉仍拒收: 反幻觉校验保留(旧口径的包含容错不变)。
+            return "url 与存档不符(%s)" % src["url"][:60]
     quote = src.get("quote") or ""
     if quote and len(quote) > 120:
         src["quote"] = quote[:120]  # 截断而非拒收(保守可入库)

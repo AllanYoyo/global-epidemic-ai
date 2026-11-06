@@ -1130,7 +1130,7 @@ def main():
         records = _load_input(args.input)
     except (OSError, ValueError) as exc:
         print("[错误] 读取/解析输入失败: %s" % exc)
-        return 2
+        return 1  # 输入不可读 = 真失败(B6 三分退出码), 不是"部分成功"
     events, failed = [], []
     for i, e in enumerate(records):
         errs = validate(e)
@@ -1149,7 +1149,9 @@ def main():
     for i, errs in failed:
         print("[校验失败] 第%d条: %s" % (i, "; ".join(errs)))
     if not events:
-        return 2
+        # 全部被校验拒收(failed 非空) = 部分成功里的极端形态, 流程本身跑完了 → 2;
+        # 输入本来就是空的(failed 为空) = 什么都没发生 → 0。
+        return 2 if failed else 0
     max_age = args.max_age_days
     if max_age is None:
         try:
@@ -1201,7 +1203,14 @@ def main():
         (" + SQLite: %s" % (args.db_path or DB_PATH)) if con else ""))
     if stale:
         print("提示: 确属新线索或历史回补/库重建时, 用 --max-age-days <N> 放宽窗口, 0 为关闭校验")
-    return 1 if (failed or stale) else 0
+    # ---- 退出码合同(2026-11-06 B6 落地, 三分) ----
+    #   0 = 全成功(无任何拒收)
+    #   2 = 部分成功: 有校验失败/旧闻拒收, 但流程完整跑完(该入的都入了)
+    #       —— 调度侧(run_scan)对 2 必须继续研判与出报, 不得当作整轮失败。
+    #       2026-11-06 生产实锤: 1 条记录缺 country_en → 旧口径 rc=1 →
+    #       run_scan 短路跳过 report.py → 当日日报 md 没生成 → 整轮被判失败。
+    #   1 = 真失败: 输入不可读/解析崩/意外异常 —— 这种才该中止后续流程。
+    return 2 if (failed or stale) else 0
 
 
 if __name__ == "__main__":

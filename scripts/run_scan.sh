@@ -743,11 +743,14 @@ $HEALTH_BLOCK"
         "$PY" "$REPO/scripts/normalize.py" --input "$FETCH_DIR/extracted-policy.jsonl" \
           --out "$DATA_DIR/events/$SCAN_DATE/" --db --max-age-days 7 || RC=$?
       fi
-      if [ "$RC" -eq 0 ]; then
+      # rc=2 = 部分成功(有校验失败/旧闻拒收, 但该入的都入了) —— 继续研判与出报,
+      # 不得当作整轮失败(2026-11-06 实锤: 1 条缺 country_en → 旧口径 rc=1 →
+      # report 被短路 → 当日日报 md 没生成 → 整轮被判失败, 见 known-issues B6)。
+      if [ "$RC" -eq 0 ] || [ "$RC" -eq 2 ]; then
         # 研判写回失败不阻塞出报(记录留待 --list-pending)
         "$PY" "$REPO/scripts/extract_records.py" --date "$SCAN_DATE" --stage risk || true
       fi
-      if [ "$RC" -eq 0 ]; then
+      if [ "$RC" -eq 0 ] || [ "$RC" -eq 2 ]; then
         "$PY" "$REPO/scripts/report.py" --date "$SCAN_DATE" || RC=$?
       fi
       PR_RC=0
@@ -755,7 +758,10 @@ $HEALTH_BLOCK"
         broadcast) "$PY" "$REPO/scripts/push_report.py" --date "$SCAN_DATE" --broadcast; PR_RC=$? ;;
         review)    "$PY" "$REPO/scripts/push_report.py" --date "$SCAN_DATE" --review-channel "$SCOPE_CHANNEL"; PR_RC=$? ;;
       esac
-      if [ "$RC" -ne 0 ] || [ "$PR_RC" -ne 0 ]; then
+      if [ "$RC" -eq 2 ]; then
+        echo "[提示] 入库部分完成(有校验失败/旧闻拒收, rc=2) —— 非整轮失败, 已照常出报"
+      fi
+      if { [ "$RC" -ne 0 ] && [ "$RC" -ne 2 ]; } || [ "$PR_RC" -ne 0 ]; then
         echo "[失败] 确定性加工/推送异常(加工 rc=$RC, 推送 rc=$PR_RC)"
         RC=1
       else

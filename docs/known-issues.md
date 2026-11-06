@@ -311,11 +311,6 @@
 - 现象: Python 复用模块缓存所以不是真性能问题, 但同进程内 `_geo_cache` 是 module-level 全局, DB 连接每次新建——并发稍微大一点, "一边写一边读" 窗口被 B1 放大。
 - 建议处理: `from normalize import load_events, open_db` 提到模块顶部; 长期用 gunicorn worker 模型替换 Flask dev server。
 
-#### B6 · `normalize.py` 退出码: 部分旧闻拒收即返回 1(语义待定)
-- 位置: `scripts/normalize.py` `main()` 末尾 `return 1 if (failed or stale) else 0`
-- 现象: **旧闻拒收是检索撞到常年挂网旧公告的正常预期行为**, 但与"校验失败"共用退出码 1。日常扫描几乎天天会拒收一两条旧公告 → 天天 exit 1, Agent/脚本容易把"部分成功"误读成"整批失败"而中断后续流程。
-- 建议处理: 拆成两个退出码(如 0=全成功 / 1=有校验失败 / 2=有旧闻拒收但入库成功), 或旧闻拒收不参与退出码、只打提示。**本项是接口语义变更, 需先与调度侧对齐再改。**
-
 ### 低 (可选/优化)
 
 #### C1 · `datetime.datetime.utcnow()` 在 Python 3.12+ 已弃用
@@ -389,6 +384,21 @@
 ---
 
 ## 已修复 (历史)
+
+### 2026-11-06 · B6 退出码三分: 部分拒收不再炸掉当日日报
+
+#### B6 · `normalize.py` 退出码: 部分拒收返回 1 被误读成整批失败 → 已修(2026-11-06 生产实锤后闭环)
+- 位置: `scripts/normalize.py` `main()`、`scripts/run_scan.sh` 确定性加工链
+- 病根: 旧闻拒收/校验失败与真失败共用退出码 1。2026-11-06 生产实锤——1 条记录缺
+  country_en → normalize rc=1 → `run_scan.sh` 的 `if RC -eq 0` 短路跳过 report.py →
+  当日日报 md 没生成 → 产物校验判「本轮未完成」+ 撤销全量锁(本条预言的故障形态首次
+  真实引爆; 钉钉卡片因 push 直读 DB 而幸存, 但 md 产物与轮次状态全错)。
+- 修法: 退出码三分 —— **0=全成功 / 2=有拒收但流程完成(部分成功) / 1=真失败**(输入
+  不可读、崩溃, 旧口径误标 2)。run_scan 对 rc=2 继续研判与出报、最终判定不把 2 当
+  失败, 并打印 `[提示] 入库部分完成(...rc=2)` 留痕。
+- 影响: 校验失败/旧闻拒收不再炸掉当日日报; 输入不可读从 2 改 1(旧口径会继续出报,
+  掩盖真问题)。回归防线: `test_main_exit_code_contract_partial_and_fatal` +
+  `test_main_gate_rejects_new_stale_but_merges_known_id`(rc=2 断言)。
 
 ### 2026-10-30 傍晚 · 17/47 死源: 死因留痕 + 降级链补强 + 多入口(存活 30 → 38)
 

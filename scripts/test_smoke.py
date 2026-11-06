@@ -3697,8 +3697,10 @@ class NormalizeStaleGateTests(unittest.TestCase):
             products=["马科动物"], event_date="2026-01-28", effective_date="2026-01-28",
             source={"tier": 1, "name": "APHIS", "url": "https://www.aphis.usda.gov/old-news",
                     "publish_date": "2026-01-28", "quote": "postpones implementation"})])
+        # 旧闻拒收 = 部分成功 rc=2(B6 三分退出码, 2026-11-06): 流程跑完了,
+        # 调度侧必须继续出报 —— 旧口径返回 1 曾把当日日报整轮炸掉。
         self.assertEqual(self._run_main(
-            ["--input", inp, "--out", out, "--db-path", db]), 1)
+            ["--input", inp, "--out", out, "--db-path", db]), 2)
         con = self.normalize.open_db(db)
         try:
             self.assertEqual(len(self.normalize.load_events(con)), 1)
@@ -3713,6 +3715,44 @@ class NormalizeStaleGateTests(unittest.TestCase):
             self.assertEqual(len(self.normalize.load_events(con)), 2)
         finally:
             con.close()
+
+    def test_main_exit_code_contract_partial_and_fatal(self):
+        # B6 三分退出码(2026-11-06): 0=全成功 / 2=有拒收但流程完成 / 1=真失败。
+        # 2026-11-06 生产实锤: 1 条缺 country_en → 旧口径 rc=1 → run_scan 短路
+        # 跳过 report.py → 当日日报 md 没生成 → 整轮被判失败。
+        tmp = tempfile.mkdtemp(prefix="radar-exit-")
+        db = os.path.join(tmp, "exit.db")
+        inp = os.path.join(tmp, "in.jsonl")
+        out = os.path.join(tmp, "out")
+
+        def write_input(records):
+            with open(inp, "w", encoding="utf-8") as f:
+                for r in records:
+                    f.write(json.dumps(r, ensure_ascii=False) + "\n")
+
+        # 1) 好 + 坏各一条 → 部分成功 rc=2, 好的那条照常入库(关旧闻窗口, 隔离变量)
+        write_input([
+            _source_event(),
+            {"record_type": "policy", "title_cn": "缺国别的记录",
+             "event_date": "2026-11-01", "source": {"url": "https://x.example/a"}},
+        ])
+        self.assertEqual(self._run_main(
+            ["--input", inp, "--out", out, "--db-path", db, "--max-age-days", "0"]), 2)
+        con = self.normalize.open_db(db)
+        try:
+            self.assertEqual(len(self.normalize.load_events(con)), 1)
+        finally:
+            con.close()
+
+        # 2) 输入文件不存在 → 真失败 rc=1(旧口径是 2, 会继续出报, 掩盖问题)
+        self.assertEqual(self._run_main(
+            ["--input", os.path.join(tmp, "no-such.jsonl"),
+             "--out", out, "--db-path", db]), 1)
+
+        # 3) 空输入 → 什么都没发生 rc=0(不是部分成功)
+        write_input([])
+        self.assertEqual(self._run_main(
+            ["--input", inp, "--out", out, "--db-path", db, "--max-age-days", "0"]), 0)
 
 
 class RiskContractTests(unittest.TestCase):

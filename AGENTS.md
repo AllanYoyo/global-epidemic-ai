@@ -150,7 +150,7 @@ python scripts/policy_fetch.py --selftest                 # 内核离线自检(�
 python scripts/policy_fetch.py --no-conditional --date X   # 忽略条件请求强制重取(防错误 304 漏检)
 python scripts/test_fetchlib.py                           # 内核离线测试(42 例, stdlib unittest)
 POLICY_FETCH_ENGINE=legacy scripts/run_scan.sh policy    # 临时回退旧取数器(取基线/排障)
-python scripts/normalize.py --input <json> --db     # 入库（支持 - 读 stdin）
+python scripts/normalize.py --input <json> --db     # 入库（支持 - 读 stdin）；退出码 0=全成功 / 2=有拒收但流程完成(调度继续出报, B6) / 1=真失败
 python scripts/merge_duplicates.py --db <库路径> --dry-run   # 存量同政策重复预览(默认不写库)
 python scripts/merge_duplicates.py --db <库路径> --apply     # 执行归并(--apply 前自动备份)
 python scripts/flag_food_scope.py                          # 存量食品类(非检疫口径)预览(默认不写库)

@@ -129,6 +129,13 @@ policy_eping_watch_countries:
   - {cn: 阿联酋, en: United Arab Emirates}
   - {cn: 玻利维亚, en: Bolivia}
   - {cn: 摩洛哥, en: Morocco}
+  # 2026-11-07 增补 3 国(2026-10-27 交接件母本「动物疫情信息参考网站」里的疫区国:
+  # 黑山 HPAI/LSD、北马其顿 ND、波黑 AI) —— 均在 WTO 成员码表
+  # (Montenegro=C893 / North Macedonia=C807 / Bosnia and Herzegovina=C070),
+  # 无国别源, 只进 ePing 通报面(与上面 10 国同纪律)。
+  - {cn: 黑山, en: Montenegro}
+  - {cn: 北马其顿, en: North Macedonia}
+  - {cn: 波黑, en: Bosnia and Herzegovina}
 
 # ---- 情报源分级: 1 官方(可直接支撑 verified) / 2 专业(需交叉) / 3 媒体(仅线索) ----
 # schedule 档位: am_pm=晨扫+晚扫 / am=仅晨扫 / daily=每日政策档 / weekly=每周一晨扫附加 / passive=不主动扫

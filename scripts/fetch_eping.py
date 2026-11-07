@@ -72,6 +72,7 @@ MEMBER_ALIASES = {
     "Argentina": r"^argentina$",
     "Australia": r"^australia$",
     "Bolivia": r"^bolivia",
+    "Bosnia and Herzegovina": r"^bosnia",
     "Brazil": r"^brazil$",
     "Canada": r"^canada$",
     "Chile": r"^chile$",
@@ -88,9 +89,11 @@ MEMBER_ALIASES = {
     "Malaysia": r"^malaysia$",
     "Mexico": r"^mexico$",
     "Mongolia": r"^mongolia$",
+    "Montenegro": r"^montenegro$",
     "Morocco": r"^morocco$",
     "Myanmar": r"^myanmar",
     "New Zealand": r"^new zealand$",
+    "North Macedonia": r"^north macedonia",
     "Norway": r"^norway$",
     "Paraguay": r"^paraguay$",
     "Peru": r"^peru$",
@@ -484,7 +487,8 @@ def _selftest():
           and "Serbia" in unmatched and "WTO ePing" in unmatched,
           "中国(红线)/非成员/聚合标签 正确跳过并留痕")
     check(reverse.get("C704") == "Vietnam", "反查表 code → 国别标签")
-    # 2026-11-04 (P1-2): ePing 专项 watch 的 10 个新成员, 名字→成员码匹配。
+    # 2026-11-04 (P1-2): ePing 专项 watch 的新成员, 名字→成员码匹配。
+    # 2026-11-07 增补 3 国(母本疫区国): 黑山/北马其顿/波黑 —— 均在 WTO 码表。
     members_p12 = [
         {"value": "C604", "text": "Peru"},
         {"value": "C600", "text": "Paraguay"},
@@ -496,14 +500,20 @@ def _selftest():
         {"value": "C784", "text": "United Arab Emirates"},
         {"value": "C068", "text": "Bolivia, Plurinational State of"},
         {"value": "C504", "text": "Morocco"},
+        {"value": "C893", "text": "Montenegro"},
+        {"value": "C807", "text": "North Macedonia"},
+        {"value": "C070", "text": "Bosnia and Herzegovina"},
     ]
     m_p12, _rev_p12, unmatched_p12 = match_members(
         ["Peru", "Paraguay", "Ecuador", "Chinese Taipei", "Israel", "Switzerland",
-         "Egypt", "United Arab Emirates", "Bolivia", "Morocco"], members_p12)
-    check(len(m_p12) == 10 and not unmatched_p12
+         "Egypt", "United Arab Emirates", "Bolivia", "Morocco",
+         "Montenegro", "North Macedonia", "Bosnia and Herzegovina"], members_p12)
+    check(len(m_p12) == 13 and not unmatched_p12
           and m_p12.get("Chinese Taipei") == "C158" and m_p12.get("Bolivia") == "C068"
-          and m_p12.get("United Arab Emirates") == "C784",
-          "P1-2 十个新 watch 成员全部匹配到 WTO 成员码")
+          and m_p12.get("United Arab Emirates") == "C784"
+          and m_p12.get("Montenegro") == "C893" and m_p12.get("North Macedonia") == "C807"
+          and m_p12.get("Bosnia and Herzegovina") == "C070",
+          "P1-2 十三个 watch 成员全部匹配到 WTO 成员码")
     sample = {
         "id": "19877", "area": "SPS", "notificationType": "Regular notification",
         "distributionDate": "2016-11-29T00:00:00.0000000+00:00",

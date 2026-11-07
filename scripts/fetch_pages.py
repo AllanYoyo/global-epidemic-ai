@@ -175,17 +175,21 @@ def extract_links(html, base_url):
     **行内日期上下文(2026-10-31)**: 多数政府新闻列表的日期不在 <a> 锚文本里,
     而在同一行的紧随文本里 —— 两种形态: 纯文本 `标题</a>（令和8年10月30日）`
     (jp-maff 实测) 与同级标签 `标题</a> <span>30/10/2026</span>`(gov.br 型)。
-    这里把 </a> 后 90 字符(含标签, 剥标签取纯文本)拼进锚文本, 截断上限放宽到
-    160 保证日期段不被切掉, pick_candidates 的 parse_date 才看得见。
+    这里把 </a> 后的一段(含标签, 剥标签取纯文本)拼进锚文本, pick_candidates
+    的 parse_date 才看得见。
+    前瞻窗口 2026-11-07 由 120 放宽到 400: gov.br 模板在 </a> 与日期之间隔着
+    150+ 字符的缩进空白与中间标签(</h2>/<span class=descricao>/<span class=data>),
+    120 字符在到达日期文本前就断了(实测 0 条关联)。结构性截断守卫
+    (?!<a\b|</li>|</tr>) 不变 —— 不跨条目归日期的性质保持; 放宽只是让
+    「标题与日期之间隔着美化排版」的页面也能取到自家日期。
     刻意只取**后方**上下文: 前方上下文会吞到上一条的日期, 造成错行归日。
     上下文用**前瞻捕获**(?=)零宽取用 —— 不消费字符, 否则密集列表里会吞掉
-    紧邻的下一条 <a>, 丢大部分链接; 并在 <a</li></tr> 边界处截断, 不跨条目
-    归日期(2026-10-31 自查修正)。
+    紧邻的下一条 <a>, 丢大部分链接。
     代价: 存档标题会带日期尾巴(纯展示字段, 溯源链读的是原文, 不受影响)。"""
     from urllib.parse import urljoin
     links = []
     for m in re.finditer(r"<a\b[^>]*href=[\"']([^\"']+)[\"'][^>]*>"
-                         r"(.*?)</a>(?=((?:(?!<a\b|</li>|</tr>).){0,120}))",
+                         r"(.*?)</a>(?=((?:(?!<a\b|</li>|</tr>).){0,400}))",
                          html, re.I | re.S):
         href = m.group(1).strip()
         tail = re.sub(r"<[^>]+>", " ", m.group(3) or "").strip()
@@ -199,7 +203,7 @@ def extract_links(html, base_url):
             continue
         if tail:
             anchor = (anchor + " " + tail).strip()
-        links.append((href, _clean(anchor)[:160]))
+        links.append((href, _clean(anchor)[:200]))
     return links
 
 

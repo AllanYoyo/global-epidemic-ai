@@ -74,17 +74,23 @@ MEMBER_ALIASES = {
     "Bolivia": r"^bolivia",
     "Bosnia and Herzegovina": r"^bosnia",
     "Brazil": r"^brazil$",
+    "Bahrain": r"^bahrain",
     "Canada": r"^canada$",
     "Chile": r"^chile$",
     "Chinese Taipei": r"^chinese taipei$",
     "Colombia MinAgricultura": r"^colombia",
+    "Dominican Republic": r"^dominican rep",
     "Ecuador": r"^ecuador$",
     "Egypt": r"^egypt$",
+    "El Salvador": r"^el salvador",
+    "Honduras": r"^honduras$",
     "India": r"^india$",
     "Indonesia": r"^indonesia$",
     "Israel": r"^israel$",
     "Japan": r"^japan$",
+    "Jordan": r"^jordan$",
     "Kazakhstan": r"^kazakhstan$",
+    "Kuwait": r"^kuwait",
     "Laos": r"^lao\b|^lao people",
     "Malaysia": r"^malaysia$",
     "Mexico": r"^mexico$",
@@ -93,8 +99,12 @@ MEMBER_ALIASES = {
     "Morocco": r"^morocco$",
     "Myanmar": r"^myanmar",
     "New Zealand": r"^new zealand$",
+    "Nicaragua": r"^nicaragua$",
     "North Macedonia": r"^north macedonia",
     "Norway": r"^norway$",
+    "Oman": r"^oman$",
+    "Panama": r"^panama$",
+    "Qatar": r"^qatar$",
     "Paraguay": r"^paraguay$",
     "Peru": r"^peru$",
     "European Commission SANTE": r"^european union",
@@ -503,17 +513,32 @@ def _selftest():
         {"value": "C893", "text": "Montenegro"},
         {"value": "C807", "text": "North Macedonia"},
         {"value": "C070", "text": "Bosnia and Herzegovina"},
+        {"value": "C414", "text": "Kuwait, the State of"},
+        {"value": "C634", "text": "Qatar"},
+        {"value": "C048", "text": "Bahrain, Kingdom of"},
+        {"value": "C512", "text": "Oman"},
+        {"value": "C400", "text": "Jordan"},
+        {"value": "C591", "text": "Panama"},
+        {"value": "C558", "text": "Nicaragua"},
+        {"value": "C340", "text": "Honduras"},
+        {"value": "C222", "text": "El Salvador"},
+        {"value": "C214", "text": "Dominican Republic"},
     ]
     m_p12, _rev_p12, unmatched_p12 = match_members(
         ["Peru", "Paraguay", "Ecuador", "Chinese Taipei", "Israel", "Switzerland",
          "Egypt", "United Arab Emirates", "Bolivia", "Morocco",
-         "Montenegro", "North Macedonia", "Bosnia and Herzegovina"], members_p12)
-    check(len(m_p12) == 13 and not unmatched_p12
+         "Montenegro", "North Macedonia", "Bosnia and Herzegovina",
+         "Kuwait", "Qatar", "Bahrain", "Oman", "Jordan",
+         "Panama", "Nicaragua", "Honduras", "El Salvador", "Dominican Republic"],
+        members_p12)
+    check(len(m_p12) == 23 and not unmatched_p12
           and m_p12.get("Chinese Taipei") == "C158" and m_p12.get("Bolivia") == "C068"
           and m_p12.get("United Arab Emirates") == "C784"
           and m_p12.get("Montenegro") == "C893" and m_p12.get("North Macedonia") == "C807"
-          and m_p12.get("Bosnia and Herzegovina") == "C070",
-          "P1-2 十三个 watch 成员全部匹配到 WTO 成员码")
+          and m_p12.get("Bosnia and Herzegovina") == "C070"
+          and m_p12.get("Kuwait") == "C414" and m_p12.get("Bahrain") == "C048"
+          and m_p12.get("El Salvador") == "C222" and m_p12.get("Dominican Republic") == "C214",
+          "P1-2 二十三个 watch 成员全部匹配到 WTO 成员码")
     sample = {
         "id": "19877", "area": "SPS", "notificationType": "Regular notification",
         "distributionDate": "2016-11-29T00:00:00.0000000+00:00",

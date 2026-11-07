@@ -136,6 +136,21 @@ policy_eping_watch_countries:
   - {cn: 黑山, en: Montenegro}
   - {cn: 北马其顿, en: North Macedonia}
   - {cn: 波黑, en: Bosnia and Herzegovina}
+  # 2026-11-07 再增 10 国(用户批"增加信息来源"第二批): GCC 海湾 5 国 + 中美洲 5 国
+  # —— 都是 SPS 通报高产成员(海湾各国有食安与动物卫生主管机构常规通报)。
+  # 码表实测: Kuwait=C414 / Qatar=C634 / Bahrain=C048 / Oman=C512 / Jordan=C400 /
+  # Panama=C591 / Nicaragua=C558 / Honduras=C340 / El Salvador=C222 /
+  # Dominican Republic=C214。
+  - {cn: 科威特, en: Kuwait}
+  - {cn: 卡塔尔, en: Qatar}
+  - {cn: 巴林, en: Bahrain}
+  - {cn: 阿曼, en: Oman}
+  - {cn: 约旦, en: Jordan}
+  - {cn: 巴拿马, en: Panama}
+  - {cn: 尼加拉瓜, en: Nicaragua}
+  - {cn: 洪都拉斯, en: Honduras}
+  - {cn: 萨尔瓦多, en: El Salvador}
+  - {cn: 多米尼加共和国, en: Dominican Republic}
 
 # ---- 情报源分级: 1 官方(可直接支撑 verified) / 2 专业(需交叉) / 3 媒体(仅线索) ----
 # schedule 档位: am_pm=晨扫+晚扫 / am=仅晨扫 / daily=每日政策档 / weekly=每周一晨扫附加 / passive=不主动扫

@@ -4380,14 +4380,16 @@ class FetchEpingTests(unittest.TestCase):
                         "Addendum 标题命中动作词, 不得被动作预筛掉")
 
     def test_eping_watch_countries_ten_and_china_excluded(self):
-        """P1-2 + 2026-11-07 增补: ePing 专项 watch = 13 国; 中国成员码不在其中(红线)。"""
+        """P1-2 + 2026-11-07 两批增补: ePing 专项 watch = 23 国; 中国成员码不在其中(红线)。"""
         import scan_targets
         import fetch_eping
         labels = scan_targets.eping_watch_labels()
-        self.assertEqual(len(labels), 13, labels)
+        self.assertEqual(len(labels), 23, labels)
         for want in ("Peru", "Paraguay", "Ecuador", "Chinese Taipei", "Israel",
                      "Switzerland", "Egypt", "United Arab Emirates", "Bolivia", "Morocco",
-                     "Montenegro", "North Macedonia", "Bosnia and Herzegovina"):
+                     "Montenegro", "North Macedonia", "Bosnia and Herzegovina",
+                     "Kuwait", "Qatar", "Bahrain", "Oman", "Jordan",
+                     "Panama", "Nicaragua", "Honduras", "El Salvador", "Dominican Republic"):
             self.assertIn(want, labels)
         for cn in ("China", "中华人民共和国", "中国"):
             self.assertNotIn(cn, labels, "中国自身措施不入台账(红线)")
@@ -4395,7 +4397,7 @@ class FetchEpingTests(unittest.TestCase):
         self.assertEqual(missing, [], "MEMBER_ALIASES 缺标签(会被静默跳过): %s" % missing)
 
     def test_eping_watch_countries_do_not_pollute_country_scan(self):
-        """专项 watch 不得进国别源扫描(这 13 国没有国别源, 挂进去会白扫)。"""
+        """专项 watch 不得进国别源扫描(这 23 国没有国别源, 挂进去会白扫)。"""
         import scan_targets
         picked_en = [en for _t, _cn, en, _sid, _u in scan_targets._pick("2026-11-04")]
         for label in scan_targets.eping_watch_labels():

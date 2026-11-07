@@ -56,6 +56,8 @@ SLUG_LIKE = re.compile(r"/[a-z0-9][a-z0-9\-_]{12,}$", re.I)
 #           / 24 de octubre de 2026(西) / 24 de outubro de 2026(葡)
 #           / 令和8年10月30日(和历, 2026-10-31 补: jp-maff 列表页实测)
 #           / 30/10/2569(泰国佛历 BE, 公元 = BE - 543)
+#           / 07 ноября 2026(俄, 2026-11-07 补: eaeu-eec /pd/ 列表页实测)
+#           / 07 листопада 2026(乌) / 07 listopada 2026(波) —— 斯拉夫语月份名属格
 DATE_PATTERNS = [
     re.compile(r"(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})"),
     re.compile(r"(\d{1,2})[-/.](\d{1,2})[-/.](20\d{2})"),
@@ -68,6 +70,12 @@ DATE_PATTERNS = [
                r"agosto|setembro|outubro|novembro|dezembro)\s+de\s+(20\d{2})", re.I),
     re.compile(r"(令和|平成|昭和)(元|\d{1,2})年(\d{1,2})月(\d{1,2})日"),
     re.compile(r"(\d{1,2})[-/.](\d{1,2})[-/.](2[4-9]\d{2})"),
+    re.compile(r"(\d{1,2})\s+(января|февраля|марта|апреля|мая|июня|июля|августа|"
+               r"сентября|октября|ноября|декабря|"
+               r"січня|лютого|березня|квітня|травня|червня|липня|серпня|"
+               r"вересня|жовтня|листопада|грудня|"
+               r"stycznia|lutego|marca|kwietnia|maja|czerwca|lipca|sierpnia|"
+               r"września|października|listopada|grudnia)\s+(20\d{2})", re.I),
 ]
 MONTHS_EN = {m: i + 1 for i, m in enumerate(
     ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"])}
@@ -77,6 +85,17 @@ MONTHS_ES = {"enero": 1, "febrero": 2, "marzo": 3, "abril": 4, "mayo": 5, "junio
 MONTHS_PT = {"janeiro": 1, "fevereiro": 2, "marco": 3, "março": 3, "abril": 4, "maio": 5,
              "junho": 6, "julho": 7, "agosto": 8, "setembro": 9, "outubro": 10,
              "novembro": 11, "dezembro": 12}
+# 斯拉夫语月份属格(俄/乌/波): 三语的月份词互不冲突(同形词月份一致, 如
+# pl marca=3 与 ru марта=3), 可合并一张表。
+MONTHS_SLAVIC = {"января": 1, "февраля": 2, "марта": 3, "апреля": 4, "мая": 5,
+                 "июня": 6, "июля": 7, "августа": 8, "сентября": 9, "октября": 10,
+                 "ноября": 11, "декабря": 12,
+                 "січня": 1, "лютого": 2, "березня": 3, "квітня": 4, "травня": 5,
+                 "червня": 6, "липня": 7, "серпня": 8, "вересня": 9, "жовтня": 10,
+                 "листопада": 11, "грудня": 12,
+                 "stycznia": 1, "lutego": 2, "marca": 3, "kwietnia": 4, "maja": 5,
+                 "czerwca": 6, "lipca": 7, "sierpnia": 8, "września": 9,
+                 "października": 10, "listopada": 11, "grudnia": 12}
 
 
 def _clean(s):
@@ -121,9 +140,16 @@ def parse_date(text):
                     return None
                 y = era_y + (1 if g[1] == "元" else int(g[1]))
                 mo, d = int(g[2]), int(g[3])
-            else:
+            elif i == 7:
                 # 泰国佛历(BE) day-first: 2400-2999 → 公元 = BE - 543
                 d, mo, y = int(g[0]), int(g[1]), int(g[2]) - 543
+            elif i == 8:
+                # 斯拉夫语月份名(俄/乌/波属格): 07 ноября 2026 г. 的尾缀「 г.」
+                # 不在模式里, 无需处理
+                mo = MONTHS_SLAVIC.get(g[1].lower())
+                if not mo:
+                    return None
+                d, y = int(g[0]), int(g[2])
             return datetime.date(y, mo, d)
         except (ValueError, IndexError):
             continue

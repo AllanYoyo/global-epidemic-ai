@@ -2164,8 +2164,10 @@ class FetchGroupingTests(unittest.TestCase):
                                  full[(k - 1) * scan_targets.GROUP_CHUNK:
                                       k * scan_targets.GROUP_CHUNK], date)
         # 每日全扫(2026-10-25): 47 源(跨档重复挂载去重) → 8 块(6×7+5, 钉死防回归)
+        # 2026-11-07: eaeu-eec-sps-news 退役为 background(入口指向 epingalert.org,
+        # 与 ePing API 骨干同质) → 46 源, 末块 5→4
         self.assertEqual(scan_targets.groups_info("2026-10-25"),
-                         {1: 6, 2: 6, 3: 6, 4: 6, 5: 6, 6: 6, 7: 6, 8: 5})
+                         {1: 6, 2: 6, 3: 6, 4: 6, 5: 6, 6: 6, 7: 6, 8: 4})
 
     def test_scan_targets_groups_cli_machine_readable(self):
         # run_scan.sh 逐 token 解析 n1=.. nK=.. —— 格式钉死防漂移(块数可变)

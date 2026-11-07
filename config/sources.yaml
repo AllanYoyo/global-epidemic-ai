@@ -465,7 +465,11 @@ sources:
     notes: 德国联邦动物卫生研究所疫情报告系统
   - id: pl-wetgiw
     name: 波兰兽医检验局(WetGIW)
-    url: https://www.wetgiw.gov.pl/
+    # 2026-11-07 入口修正(P0-2): 首页 53 条文章链但 0 日期(B 级根因), 实测
+    # /main/aktualnosci 列表页自带 ISO 日期(200/17 处) —— 换之; komunikaty
+    # (兽医局长公告, 兽医口径最正)与 RSS 兜底。feed 由 WebFetch 页面发现确认。
+    url: https://www.wetgiw.gov.pl/main/aktualnosci
+    alt_urls: [https://www.wetgiw.gov.pl/main/komunikaty, https://www.wetgiw.gov.pl/rss]
     coverage: [animal]
     tier: 1
     schedule: am
@@ -506,8 +510,13 @@ sources:
     notes: "Excel注疫区: HPAI/ASF"
   - id: rs-minpolj
     name: 塞尔维亚农业与环境保护部(含兽医局)
-    url: http://www.minpolj.gov.rs/
-    alt_urls: [https://www.minpolj.gov.rs/]
+    # 2026-11-07 入口修正(P0-2): 主入口双重重定向(http://www -> https://www ->
+    # https://apex)使探活超时判死(X/HTTP 0) —— 改连终点 https://apex(200 实测)。
+    # 注意: 站点首页是 JS 壳(仅 4 个 href, 含未渲染的模板变量), WordPress 后端
+    # (post-sitemap.xml 在册)但 /news 301、wp-json 返回 JSON 与锚点启发式不兼容
+    # —— 入口活了, 产出仍是 JS 壳问题, 待 RSS/渲染方案(known-issues 留痕)。
+    url: https://minpolj.gov.rs/
+    alt_urls: [https://minpolj.gov.rs/feed/]
     coverage: [animal]
     tier: 1
     schedule: weekly
@@ -897,7 +906,9 @@ sources:
     notes: 动植物卫生和进口许可
   - id: br-mapa
     name: 巴西农业与畜牧部(MAPA)
-    url: https://www.gov.br/agricultura/pt-br
+    # 2026-11-07 入口修正(P0-2): 首页 JS 日期渲染导致 0 日期(B 级根因), 实测
+    # /pt-br/assuntos/noticias 200/124 处日期(葡语月份名, DATE_PATTERNS 已支持)。
+    url: https://www.gov.br/agricultura/pt-br/assuntos/noticias
     coverage: [measures, animal, plant]
     tier: 1
     schedule: am
@@ -1077,7 +1088,10 @@ sources:
   # ---- 欧亚经济委员会/联盟(2026-10 按样例补; 与欧盟同构的区域统一立法主体) ----
   - id: eaeu-eec
     name: 欧亚经济委员会/欧亚经济联盟(EEC/EAEU)
-    url: https://regulation.eaeunion.org/
+    # 2026-11-07 入口修正(P0-2): 首页壳(C 级)换 /pd/ 公众磋商列表页
+    # (200/23 处日期实测; SPS 属其可筛主管领域之一; 俄语月份名日期由
+    # DATE_PATTERNS 2026-11-07 增补支持)。
+    url: https://regulation.eaeunion.org/pd/
     coverage: [measures, animal, plant]
     tier: 1
     schedule: am
@@ -1092,11 +1106,14 @@ sources:
       注意: 俄罗斯以本国名义通报时文号前缀为 RUS, 措施主体仍是 EEC——按通报成员找会漏, 须按措施主体找。
   - id: eaeu-eec-sps-news
     name: 欧亚经济委员会 SPS 通报(经成员国代报)
+    # 2026-11-07 退役为 background: 入口 epingalert.org 是 ePing 网页版 —— 与
+    # ePing API 骨干同源同质(且 EAEU 通报经成员国代报, 已由各国 watch 覆盖),
+    # 疑似遗留误配。EAEU 本体措施由 eaeu-eec(/pd/)承接。
     url: https://epingalert.org/en/
     coverage: [measures]
     tier: 1
     schedule: daily
-    track: policy
+    track: background
     lang: [en]
     method: search
     notes: |

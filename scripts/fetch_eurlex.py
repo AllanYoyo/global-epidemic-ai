@@ -164,7 +164,10 @@ def _state_save(state):
 
 
 def _series_pre(series):
-    return "3202%d%s" % (datetime.date.today().year % 100, series)
+    """celex 前缀: sector 3 + 4 位年份 + 系列字母 —— 3|2026|R = 32026R。
+    (2026-11-15 修: 原写法 "3202"+年尾两位 拼出 320226R, 二分全程 404,
+    边界收敛到 1 —— 自检字符串断言恰好也放行了它, 实跑状态文件才暴露。)"""
+    return "3%d%s" % (datetime.date.today().year, series)
 
 
 def _frontier(series, state):

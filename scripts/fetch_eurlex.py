@@ -280,67 +280,69 @@ def run(date_str, max_archives_per_day=0):
                     pass
 
     n_arch, n_food, n_nonsp, n_fail = 0, 0, 0, 0
-    for series in SERIES:
-        pre, start = _frontier(series, state)
-        found, _last = discover(pre, start)
-        if not found:
-            # 当日无新件: 边界即处理完, 也要落盘 —— 否则每轮都重复二分探测
-            # (实测 2026-11-15 首跑: 周末无新件, 状态空转 40+ 次 CELLAR 探测)
-            state[series] = pre + str(start)
+    year = datetime.date.today().year
+    start = _frontier(year, state)
+    found, _last = discover(year, start)
+    if not found:
+        # 当日无新件: 边界即处理完, 也要落盘 —— 否则每轮都重复二分探测
+        # (实测 2026-11-15 首跑: 周末无新件, 状态空转 40+ 次 CELLAR 探测)
+        state = {"year": year, "last": start}
+        _state_save(state)
+        print("[fetch_eurlex] 共享序列 %d 之后无新件, 边界已落盘" % start)
+        return 0
+    print("[fetch_eurlex] 共享序列新件 %d 条(%d..%d)"
+          % (len(found), found[0][0], found[-1][0]))
+    processed = start
+    for n, letter in found:
+        celex = _celex(year, letter, n)
+        if CELLAR + celex in done:
+            processed = n               # 已在当日候选里(重跑), 视为处理完
             continue
-        print("[fetch_eurlex] %s 系列新件 %d 条(%d..%d)"
-              % (series, len(found), found[0], found[-1]))
-        processed = start
-        for n in found:
-            celex = pre + str(n)
-            if CELLAR + celex in done:
-                processed = n           # 已在当日候选里(重跑), 视为处理完
-                continue
-            html = fetch_doc(celex)
-            if not html:
-                n_fail += 1
-                continue                # 取文失败: 不推进 processed, 下轮重试
-            text = strip_html(html)
-            title = extract_title(text, celex, series)
-            ok, hit, kind = classify(title + " " + text[:4000])
-            if not ok:
-                processed = n           # 正确剔除 = 处理完
-                if kind == "食品":
-                    n_food += 1
-                    print("[fetch_eurlex] 食品黑名单剔除 %s (%s)" % (celex, hit))
-                else:
-                    n_nonsp += 1
-                continue
-            if max_archives_per_day and \
-                    count_archives(raw_dir) >= max_archives_per_day:
-                print("[fetch_eurlex] 当日存档触顶, %s 系列余件下轮补" % series)
-                state[series] = pre + str(processed)
-                _state_save(state)
-                return n_arch
-            r = collect_archive(raw_dir, date_str, celex, title, text, series,
-                                max_archives_per_day, archive_lock)
-            if r == "capped":
-                print("[fetch_eurlex] 当日存档触顶(collect 拒绝), 余件下轮补")
-                state[series] = pre + str(processed)
-                _state_save(state)
-                return n_arch
-            if r == "fail":
-                state[series] = pre + str(processed)   # 系统性失败: 保断点
-                _state_save(state)
-                return n_arch
-            n_arch += 1
-            processed = n
-            with open(cand_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps({
-                    "title": title[:120],
-                    "url": CELLAR + celex,
-                    "country_en": "European Union",
-                    "publish_date": str(biz_today()),
-                    "source_name": "eu-eurlex",
-                    "brief": "",
-                    "topics": [],
-                }, ensure_ascii=False) + "\n")
-        state[series] = pre + str(processed)
+        html = fetch_doc(celex)
+        if not html:
+            n_fail += 1
+            continue                    # 取文失败: 不推进 processed, 下轮重试
+        text = strip_html(html)
+        title = extract_title(text, celex, letter)
+        ok, hit, kind = classify(title + " " + text[:4000])
+        if not ok:
+            processed = n               # 正确剔除 = 处理完
+            if kind == "食品":
+                n_food += 1
+                print("[fetch_eurlex] 食品黑名单剔除 %s (%s)" % (celex, hit))
+            else:
+                n_nonsp += 1
+            continue
+        if max_archives_per_day and \
+                count_archives(raw_dir) >= max_archives_per_day:
+            print("[fetch_eurlex] 当日存档触顶, 号位 %d 起余件下轮补" % n)
+            state = {"year": year, "last": processed}
+            _state_save(state)
+            return n_arch
+        r = collect_archive(raw_dir, date_str, celex, title, text, letter,
+                            max_archives_per_day, archive_lock)
+        if r == "capped":
+            print("[fetch_eurlex] 当日存档触顶(collect 拒绝), 余件下轮补")
+            state = {"year": year, "last": processed}
+            _state_save(state)
+            return n_arch
+        if r == "fail":
+            state = {"year": year, "last": processed}   # 系统性失败: 保断点
+            _state_save(state)
+            return n_arch
+        n_arch += 1
+        processed = n
+        with open(cand_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "title": title[:120],
+                "url": CELLAR + celex,
+                "country_en": "European Union",
+                "publish_date": str(biz_today()),
+                "source_name": "eu-eurlex",
+                "brief": "",
+                "topics": [],
+            }, ensure_ascii=False) + "\n")
+    state = {"year": year, "last": processed}
     _state_save(state)
     print("[fetch_eurlex] EU 条例/决定新存档 %d 条(食品剔除 %d, 非检疫剔除 %d, 取文失败 %d)"
           % (n_arch, n_food, n_nonsp, n_fail))

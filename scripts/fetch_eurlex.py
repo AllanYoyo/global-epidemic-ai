@@ -16,13 +16,15 @@ Agent 路径抓到的, P4 确定性管线(10-25 起)接管后这条流断了 26 
     (实测拿到 32026R0551 条例英文全文) —— 本模块的通道;
   · 公开 SPARQL 端点: 只存本体词表, 法律内容不在其中 —— 发现层不可用。
 
-所以发现层走 **celex 序号推进探测**: EU 法规按系列连续编号(celex 32026R0551
-= 条例, 32026D2130 = 决定, 32026L210 = 指令), CELLAR 对存在的号返回 303、
-不存在的返回 404 —— 存在性判定零成本。状态文件记每系列最后**处理完**的号,
-每轮向前推进直到连续 3 个 404(该系列当日无更多新件, 容忍 ≤2 的编号空洞)。
-首次运行用**二分探测**定位当前边界 —— 刻意不回补边界之前的积压: normalize
-的旧闻窗口(7 天)反正会拒收, 回补是无用功(10-25 前的欧盟内容已有 12 条
-Agent 时代记录在库)。跨年切换: 存量 celex 的年份前缀与当前年不符时重新二分。
+所以发现层走 **共享号空间推进探测**: EU 法规的年度编号 2026/NNNN 是跨机构
+共享序列(条例/指令/决定交错占用同一号码空间, 实测 2026/1500 是决定而
+32026R1500 不存在), celex = 3 + 年份 + 系列字母 + 4 位零填充号。CELLAR 对
+存在的资源返回 303、不存在返回 404 —— 对每个号依次探 R/D/L(3 次存在性
+判定)即得该号位上的 act。状态文件记共享序列最后**处理完**的 N, 每轮向前
+推进直到连续 3 个号位空置。首次运行用**二分探测**定位当前边界 —— 刻意不回
+补边界之前的积压: normalize 的旧闻窗口(7 天)反正会拒收, 回补是无用功(10-25
+前的欧盟内容已有 12 条 Agent 时代记录在库)。跨年切换: 存量年份与当前年
+不符时重新二分。
 
 获取层: 内容协商(Accept: application/xhtml+xml + Accept-Language: eng)取
 EUR-Lex 服务端渲染的 HTML(oj- 类名体系), 剥标签取文本。标题/日期用分层正则
@@ -62,9 +64,19 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 STATE_PATH = os.path.join(DATA_DIR, "eurlex-state.json")
 TIMEOUT = 20
 
-# celex 系列: R(条例, 年内千位) / D(决定, 年内千位) / L(指令, 年内百位)。
+# 年度编号 2026/NNNN 为跨机构共享序列, R/L/D 交错占用; 系列字母在探测时确定。
 SERIES = ("R", "D", "L")
 CELEX_RE = re.compile(r"^3202[4-9][RLD]\d{3,5}$")
+
+
+def _year_pre(year):
+    """celex 年份前缀: sector 3 + 4 位年份 —— 3|2026 = 32026。
+    (2026-11-15 修: 原写法 "3202"+年尾两位 拼出 320226R, 二分全程 404。)"""
+    return "3%d" % year
+
+
+def _celex(year, letter, n):
+    return "%s%s%04d" % (_year_pre(year), letter, n)
 
 # 食品黑名单(优先于检疫白名单; 镜像 fetch_eping.FOOD_TBT_BLOCK 纪律)
 FOOD_BLOCK = (
@@ -163,43 +175,43 @@ def _state_save(state):
         json.dump(state, f, ensure_ascii=False)
 
 
-def _series_pre(series):
-    """celex 前缀: sector 3 + 4 位年份 + 系列字母 —— 3|2026|R = 32026R。
-    (2026-11-15 修: 原写法 "3202"+年尾两位 拼出 320226R, 二分全程 404,
-    边界收敛到 1 —— 自检字符串断言恰好也放行了它, 实跑状态文件才暴露。)"""
-    return "3%d%s" % (datetime.date.today().year, series)
+def _act_exists(year, n):
+    """共享号 N 上是否有 act: 依次探 R/D/L, 返回命中的系列字母或 None。"""
+    for letter in SERIES:
+        if _curl_code(CELLAR + _celex(year, letter, n)) in ("303", "200"):
+            return letter
+    return None
 
 
-def _frontier(series, state):
-    """定位某系列的当前最大已发布号: 记录存在且年份前缀一致 -> 返回记录值;
+def _frontier(year, state):
+    """定位共享序列的当前最大已发布号: 记录存在且年份一致 -> 返回记录值;
     否则(首次/跨年) -> 二分探测当前边界。"""
-    pre = _series_pre(series)
-    cur = state.get(series)
-    if cur and str(cur).startswith(pre):
-        return pre, int(str(cur)[7:])
-    lo, hi = 1, 3000
-    while _curl_code(CELLAR + pre + str(hi)) in ("303", "200"):
+    if state.get("year") == year and isinstance(state.get("last"), int):
+        return state["last"]
+    lo, hi = 1, 4000
+    while _act_exists(year, hi):
         lo = hi
         hi *= 2
         if hi > 20000:
             break
     while lo + 1 < hi:
         mid = (lo + hi) // 2
-        if _curl_code(CELLAR + pre + str(mid)) in ("303", "200"):
+        if _act_exists(year, mid):
             lo = mid
         else:
             hi = mid
-    return pre, lo
+    return lo
 
 
-def discover(pre, start, probes=30, miss_stop=3):
-    """从 start+1 向前推进, 返回 (新件号列表, 最后处理到的号)。
-    连续 miss_stop 个 404 即停(容忍 ≤2 的编号空洞); probes 上限控制单轮时长。"""
+def discover(year, start, probes=30, miss_stop=3):
+    """从 start+1 向前推进, 返回 ((号, 系列字母) 列表, 最后处理到的号)。
+    连续 miss_stop 个空号位即停; probes 上限控制单轮时长。"""
     found, misses, last = [], 0, start
     for i in range(1, probes + 1):
         n = start + i
-        if _curl_code(CELLAR + pre + str(n)) in ("303", "200"):
-            found.append(n)
+        letter = _act_exists(year, n)
+        if letter:
+            found.append((n, letter))
             misses = 0
         else:
             misses += 1
@@ -369,10 +381,10 @@ def _selftest():
     #    会真探测 CELLAR, 不放进自检)
     old = STATE_PATH
     STATE_PATH = os.path.join(tempfile.mkdtemp(prefix="eurlex-st-"), "state.json")
-    _state_save({"R": "32026R0551"})
-    check(_state_load().get("R") == "32026R0551", "状态文件往返")
-    check(not "32019R9999".startswith(_series_pre("R")),
-          "跨年前缀不符 -> _frontier 重新二分(不用旧值)")
+    _state_save({"year": 2026, "last": 2600})
+    check(_state_load().get("last") == 2600, "状态文件往返")
+    check(_celex(2026, "R", 551) == "32026R0551", "celex 构造(4 位零填充)")
+    check(_celex(2026, "D", 2130) == "32026D2130", "celex 构造(决定)")
     STATE_PATH = old
     # 7) celex 形态
     check(CELEX_RE.match("32026R0551") is not None, "celex 正则")

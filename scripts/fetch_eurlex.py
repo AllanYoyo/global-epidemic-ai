@@ -269,6 +269,9 @@ def run(date_str, max_archives_per_day=0):
         pre, start = _frontier(series, state)
         found, _last = discover(pre, start)
         if not found:
+            # 当日无新件: 边界即处理完, 也要落盘 —— 否则每轮都重复二分探测
+            # (实测 2026-11-15 首跑: 周末无新件, 状态空转 40+ 次 CELLAR 探测)
+            state[series] = pre + str(start)
             continue
         print("[fetch_eurlex] %s 系列新件 %d 条(%d..%d)"
               % (series, len(found), found[0], found[-1]))

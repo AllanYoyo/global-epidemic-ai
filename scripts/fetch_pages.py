@@ -76,9 +76,14 @@ DATE_PATTERNS = [
                r"вересня|жовтня|листопада|грудня|"
                r"stycznia|lutego|marca|kwietnia|maja|czerwca|lipca|sierpnia|"
                r"września|października|listopada|grudnia)\s+(20\d{2})", re.I),
+    re.compile(r"(\d{1,2})\s+(January|February|March|April|May|June|July|August|"
+               r"September|October|November|December)\s+(20\d{2})", re.I),
 ]
 MONTHS_EN = {m: i + 1 for i, m in enumerate(
     ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"])}
+MONTHS_EN_FULL = {m: i + 1 for i, m in enumerate(
+    ["january", "february", "march", "april", "may", "june", "july", "august",
+     "september", "october", "november", "december"])}
 MONTHS_ES = {"enero": 1, "febrero": 2, "marzo": 3, "abril": 4, "mayo": 5, "junio": 6,
              "julio": 7, "agosto": 8, "septiembre": 9, "setiembre": 9, "octubre": 10,
              "noviembre": 11, "diciembre": 12}
@@ -147,6 +152,12 @@ def parse_date(text):
                 # 斯拉夫语月份名(俄/乌/波属格): 07 ноября 2026 г. 的尾缀「 г.」
                 # 不在模式里, 无需处理
                 mo = MONTHS_SLAVIC.get(g[1].lower())
+                if not mo:
+                    return None
+                d, y = int(g[0]), int(g[2])
+            elif i == 9:
+                # EN 日-月名-年(欧盟 act 头部形态): 5 November 2026
+                mo = MONTHS_EN_FULL.get(g[1].lower())
                 if not mo:
                     return None
                 d, y = int(g[0]), int(g[2])

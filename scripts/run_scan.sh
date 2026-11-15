@@ -525,6 +525,13 @@ if [ -n "${HERMES_RUN_CMD:-}" ]; then
         "$PY" "$REPO/scripts/fetch_eping.py" --date "$SCAN_DATE" --archive \
           || echo "[WARN] ePing 拉取失败(不阻塞主取数, 下轮重试)"
       fi
+      # ---- EUR-Lex 通报源(2026-11-15 挂接, 确定性零 LLM 零 key, fail-open) ----
+      # 欧盟官方公报的条例/决定经 CELLAR 内容协商拉取(celex 序号推进, 状态在
+      # data/eurlex-state.json) —— 欧盟检疫措施不走 ePing 主体(以 MRL/食品为主,
+      # 被收录红线拒收)。拉取失败不阻塞主取数, 只留痕下轮重试。
+      echo "[$(date '+%F %T')] EUR-Lex 通报拉取(CELLAR)..."
+      "$PY" "$REPO/scripts/fetch_eurlex.py" --date "$SCAN_DATE" --archive \
+        || echo "[WARN] EUR-Lex 拉取失败(不阻塞主取数, 下轮重试)"
       else
       # ---- 死通道跳过名单(2026-10-23 引入, 确定性) ----
       # 10-22/10-23 实测: 约 20 个通道连续两日一字不差地不可用(403/连接失败/

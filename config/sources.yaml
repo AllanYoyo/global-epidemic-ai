@@ -52,7 +52,7 @@ policy_watch_countries:
     - {cn: 智利, en: Chile, aliases: [SAG], source_ids: [cl-sag]}
   # 每日必扫: 区域/国际机构措施(不属单一国家, 但直接改变对华准入, 近两日实测唯一稳定产出源)
   regional:
-    - {cn: 欧盟委员会卫生与食品安全总司, en: European Commission SANTE, aliases: [SANTE, SERS, emergency measures, Implementing Regulation], source_ids: [eu-sante-sers]}
+    - {cn: 欧盟委员会卫生与食品安全总司, en: European Commission SANTE, aliases: [SANTE, SERS, emergency measures, Implementing Regulation], source_ids: [eu-sante-sers, eu-eurlex]}
     - {cn: WTO SPS/TBT 通报预警, en: WTO ePing, aliases: [ePing, G/SPS/N, SPS notification], source_ids: [wto-eping]}
     - {cn: 国际植物保护公约, en: IPPC, aliases: [IPPC, ISPM, ePhyto, emergency measures], source_ids: [ippc]}
     # 欧亚经济委员会: 与欧盟同构的区域统一立法主体, 样例高频命中
@@ -1085,6 +1085,22 @@ sources:
     lang: [en]
     method: browse
     notes: 欧盟动物疫病紧急措施与贸易限制公告(SERS); 政策变化监测重点源
+
+  - id: eu-eurlex
+    name: 欧盟官方公报(EUR-Lex/CELLAR, 条例与决定)
+    # 2026-11-15 新增(欧洲断供复盘): 台账里 12 条 EUR-Lex 来源的欧盟记录是
+    # P4 前 Agent 路径抓的, P4 接管后断流 26 天 —— 欧盟的检疫机器(HPAI 防护区
+    # 条例、第三国暂停令)每天发布在 EUR-Lex, 不走 ePing 主体。发现层走 CELLAR
+    # celex 序号推进(fetch_eurlex.py), eur-lex 门户本体是 AWS WAF(纯 curl 无解)。
+    url: http://publications.europa.eu/resource/celex/32026R0551
+    coverage: [measures, animal, plant]
+    tier: 1
+    schedule: am
+    track: policy
+    lang: [en]
+    method: api
+    notes: CELLAR 内容协商免注册无 WAF; celex 序号推进发现(R/L/D 系列, 状态在
+      data/eurlex-state.json); 食品黑名单优先于检疫白名单(镜像 fetch_eping 纪律)
   # ---- 欧亚经济委员会/联盟(2026-10 按样例补; 与欧盟同构的区域统一立法主体) ----
   - id: eaeu-eec
     name: 欧亚经济委员会/欧亚经济联盟(EEC/EAEU)

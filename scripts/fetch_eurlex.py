@@ -109,8 +109,10 @@ def _curl_code(url):
 
 
 def fetch_doc(celex):
-    """内容协商取全文(eng 渲染)。返回 (html or None)。"""
-    cmd = ["curl", "-sk", "--max-time", str(TIMEOUT + 10), "-A", UA,
+    """内容协商取全文(eng 渲染)。返回 (html or None)。
+    必须带 -L: celex 资源是 303 重定向到 CELLAR 分发件(实测 2026-11-15,
+    不跟随拿到的是空体, 17/17 全败)。"""
+    cmd = ["curl", "-skL", "--max-time", str(TIMEOUT + 10), "-A", UA,
            "-H", "Accept: application/xhtml+xml",
            "-H", "Accept-Language: eng",
            CELLAR + celex]

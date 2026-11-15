@@ -140,8 +140,25 @@ TITLE_RE = re.compile(
     r"[0-9]{1,2}\s+\w+\s+20\d{2}[^.]{0,240})")
 
 
+OJ_REF_RE = re.compile(r"series\s+20\d{2}/\d+\s+[\d.]+\s+(.{20,400}?)"
+                       r"(?:\(Text with|THE EUROPEAN)")
+
+
+def extract_pub_date(text):
+    """从 OJ 引用行取发布日期(L series 2026/1453 10.7.2026)。"""
+    m = re.search(r"series\s+20\d{2}/\d+\s+(\d{1,2}\.\d{1,2}\.\d{4})", text)
+    return parse_date(m.group(1)) if m else None
+
+
 def extract_title(text, celex, series):
-    """分层取标题: act 头部形态 -> 兜底。"""
+    """分层取标题: ①OJ 引用行后的大写 act 标题(截到 THE EUROPEAN COMMISSION
+    之前 —— 修订类 act 的前言先引用被修订单, 小写 TITLE_RE 会抓到引用而非
+    自身标题, 2026-11-15 实测); ②旧的小写头部形态; ③兜底。"""
+    m = OJ_REF_RE.search(text[:6000])
+    if m:
+        t = m.group(1).strip()
+        if len(t) >= 20:
+            return t
     m = TITLE_RE.search(text)
     if m:
         return m.group(1).strip()
@@ -177,10 +194,22 @@ def _state_save(state):
         json.dump(state, f, ensure_ascii=False)
 
 
-def _act_exists(year, n):
-    """共享号 N 上是否有 act: 依次探 R/D/L, 返回命中的系列字母或 None。"""
-    for letter in SERIES:
-        if _curl_code(CELLAR + _celex(year, letter, n)) in ("303", "200"):
+def _probe_one(year, letter, n):
+    code = _curl_code(CELLAR + _celex(year, letter, n))
+    return letter if code in ("303", "200") else None
+
+
+def _act_exists(year, n, pool=None):
+    """共享号 N 上是否有 act: 依次探 R/D/L, 返回命中的系列字母或 None。
+    pool ThreadPoolExecutor 时三探并行(单号 3 连发 ~3s -> ~0.5s)。"""
+    if pool is None:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=3) as p:
+            rs = list(p.map(lambda l: _probe_one(year, l, n), SERIES))
+    else:
+        rs = list(pool.map(lambda l: _probe_one(year, l, n), SERIES))
+    for letter, r in zip(SERIES, rs):
+        if r:
             return letter
     return None
 
@@ -205,22 +234,35 @@ def _frontier(year, state):
     return lo
 
 
-def discover(year, start, probes=30, miss_stop=3):
+def discover(year, start, probes=200, miss_stop=120):
     """从 start+1 向前推进, 返回 ((号, 系列字母) 列表, 最后处理到的号)。
-    连续 miss_stop 个空号位即停; probes 上限控制单轮时长。"""
+
+    并行批次探测(8 线程 × 每号 3 探); 空号位容忍 miss_stop=120 —— 未刊发的
+    决定不占 OJ 号位, 共享序列有**大空洞**(实测 1473-1475 之后连空 200+ 号位
+    到 2187, 7-10 月间 ~700 号位只有 ~200 个 OJ 件), 小 miss_stop 会在第一个
+    空洞死掉漏掉全部后续 act。单轮 probes 上限与时长挂钩(200 号 × 3 探 ÷ 8
+    并发 ≈ 75s 上限)。"""
+    from concurrent.futures import ThreadPoolExecutor
     found, misses, last = [], 0, start
-    for i in range(1, probes + 1):
-        n = start + i
-        letter = _act_exists(year, n)
-        if letter:
-            found.append((n, letter))
-            misses = 0
-        else:
-            misses += 1
-            if misses >= miss_stop:
-                last = n - misses        # 最后一个存在号
-                return found, last
-        last = n
+    pool = ThreadPoolExecutor(max_workers=8)
+    try:
+        i = 1
+        while i <= probes:
+            batch = list(range(start + i, min(start + i + 8, start + probes + 1)))
+            rs = list(pool.map(lambda n: _act_exists(year, n, pool), batch))
+            for n, r in zip(batch, rs):
+                if r:
+                    found.append((n, r))
+                    misses = 0
+                else:
+                    misses += 1
+                    if misses >= miss_stop:
+                        last = n - misses
+                        return found, last
+                last = n
+            i += len(batch)
+    finally:
+        pool.shutdown(wait=False)
     return found, last
 
 
@@ -306,7 +348,8 @@ def run(date_str, max_archives_per_day=0):
             continue                    # 取文失败: 不推进 processed, 下轮重试
         text = strip_html(html)
         title = extract_title(text, celex, letter)
-        ok, hit, kind = classify(title + " " + text[:4000])
+        pub = extract_pub_date(text[:6000])
+        ok, hit, kind = classify(title + " " + text[:12000])
         if not ok:
             processed = n               # 正确剔除 = 处理完
             if kind == "食品":

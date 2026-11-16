@@ -1,47 +1,50 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""疫见全球 · 欧盟 EUR-Lex 通报源(2026-11-15 新增, 与 fetch_eping 同构的骨干增强)
+"""疫见全球 · 欧盟 EUR-Lex 通报源(2026-11-15 建源, 11-17 Web Services 版)
 
-为什么需要它(2026-11-15 生产复盘): 台账里躺着 12 条 EUR-Lex 来源的欧盟记录
-(HPAI 防护区条例、第三国禽类暂停、边境检疫官控商品清单扩容——全是真检疫措施,
-2026-09-19 → 10-20), 但 sources.yaml 里**没有 eur-lex 源** —— 那批是 P4 之前
-Agent 路径抓到的, P4 确定性管线(10-25 起)接管后这条流断了 26 天。欧盟的检疫
-机器 = 每天在 EUR-Lex 发布的实施条例/决定(秋季 HPAI 季节几乎日更), 且它们
-**不走 ePing 主体**(EU 的 ePing 通报以 MRL/食品为主, 被收录红线正确拒收)。
+为什么需要它(生产复盘): 台账里躺着 12 条 EUR-Lex 来源的欧盟记录(HPAI 防护区
+条例、第三国禽类暂停、边境检疫官控商品清单扩容——全是真检疫措施, 2026-09-19
+→ 10-20), 但 sources.yaml 里**没有 eur-lex 源** —— 那批是 P4 之前 Agent 路径
+抓到的, P4 确定性管线(10-25 起)接管后这条流断了 26 天。欧盟的检疫机器 = 每天
+在 EUR-Lex 发布的实施条例/决定(秋季 HPAI 季节几乎日更), 且它们**不走 ePing
+主体**(EU 的 ePing 通报以 MRL/食品为主, 被收录红线正确拒收)。
 
-三条路径的实测结论(2026-11-15 侦查):
+路径侦查与定线(全部实测, 详见 git log):
   · eur-lex.europa.eu HTML 门户: AWS WAF 反爬(CloudFront challenge), 纯 curl
-    无解 —— 不可用;
-  · publications.europa.eu CELLAR 内容协商: **免注册、无 WAF、全文可达**
-    (实测拿到 32026R0551 条例英文全文) —— 本模块的通道;
-  · 公开 SPARQL 端点: 只存本体词表, 法律内容不在其中 —— 发现层不可用。
+    无解 —— 2026-11-17 用户注册 Web Services 并提交调用方 IP 后白名单放行
+    (实测门户 202 -> 200);
+  · publications.europa.eu CELLAR 内容协商: 免注册、无 WAF、全文可达(实测
+    拿到 32026R0551 条例英文全文) —— 获取层通道;
+  · 公开 SPARQL 端点: 只存本体词表, 法律内容不在其中;
+  · 中间迭代的教训: EU 年度编号 2026/NNNN 是**跨机构共享序列**(R/L/D 交错,
+    实测 32026R1500 不存在而 32026R2400 存在), 且未刊发决定不占号位 ->
+    1473 之后连续 200+ 空号位 —— **按号码走路发现不可行**(按系列/共享号/
+    并行大 miss_stop 三轮都穿不过去), 最终由 Web Services 的日期查询取代。
 
-所以发现层走 **共享号空间推进探测**: EU 法规的年度编号 2026/NNNN 是跨机构
-共享序列(条例/指令/决定交错占用同一号码空间, 实测 2026/1500 是决定而
-32026R1500 不存在), celex = 3 + 年份 + 系列字母 + 4 位零填充号。CELLAR 对
-存在的资源返回 303、不存在返回 404 —— 对每个号依次探 R/D/L(3 次存在性
-判定)即得该号位上的 act。状态文件记共享序列最后**处理完**的 N, 每轮向前
-推进直到连续 3 个号位空置。首次运行用**二分探测**定位当前边界 —— 刻意不回
-补边界之前的积压: normalize 的旧闻窗口(7 天)反正会拒收, 回补是无用功(10-25
-前的欧盟内容已有 12 条 Agent 时代记录在库)。跨年切换: 存量年份与当前年
-不符时重新二分。
+最终发现层: SOAP doQuery(端点 https://eur-lex.europa.eu/EURLexWebService,
+SOAP 1.2 + WS-Security UsernameToken11, WSDL eurlex-ws?wsdl, 请求模式
+eurlex-ws?xsd=3 —— searchRequest = expertQuery/page/pageSize/searchLanguage,
+子元素必须带 elx: 前缀(elementFormDefault=qualified), searchLanguage 用
+两位码 en)。expertQuery=PD>=日期 分页返回 NOTICE 元数据(celex/标题/OJ 发布
+日期) —— **发现所需全部信息在一次查询里**。凭据: 注册批准邮件里的**专用
+webservice 用户名**(生成的 ID, 不是 EU Login 邮箱 —— 实测邮箱认证
+FailedAuthentication), 与密码一起放 ~/.hermes/.env(仓库永不入库)。
 
-获取层: 内容协商(Accept: application/xhtml+xml + Accept-Language: eng)取
-EUR-Lex 服务端渲染的 HTML(oj- 类名体系), 剥标签取文本。标题/日期用分层正则
-+ 兜底(act 头部形态 `Commission Implementing Regulation (EU) 2026/551 of
-5 November 2026 ...`), 日期解析复用 fetch_pages.parse_date(英区月份已在词表)。
+获取层: CELLAR 内容协商(Accept: application/xhtml+xml + Accept-Language:
+eng, 必须 -L 跟随 303 重定向)取全文, 剥标签取文本。
 
 红线过滤(镜像 fetch_eping 纪律): **食品黑名单优先于检疫白名单** —— MRL/
 添加剂类 EU 条例(产量很大)就算标题里带 health 字样也要挡住; 检疫白名单
 (plant health/animal health/quarantine/保护区域/具体疫病名…)命中才放行,
-其余剔除并计数留痕。下游抽取闸门/normalize 照常二次把关。
+其余剔除并计数留痕。判据粒度是标题(EU act 标题几乎必含主题词); 正文级
+主题由下游 LLM 抽取二次把关。下游抽取闸门/normalize 照常三重把关。
 
 溯源链: source.url 用 CELLAR 永久 URI(curl 可达, europa.eu 在官方域白名单);
 EUR-Lex 人读链接写在存档正文里(--file 通道, collect 不必回访被 WAF 挡的门户)。
 
-诚实取舍: X 系列(勘误/其它文件)不探测(勘误多为文本修正, 且回补会被旧闻窗
-拒收); 新件漏发/隔日补发的极端形态会因序号推进而错过(与 fetch_eping 的
-窗口不重发同源)。CELLAR 探测不耗配额、不需要 key。
+诚实取舍: 标题级主题判据会漏掉"主题只在正文"的少数 act(下游归零风险与
+fetch_eping 的动作预筛同源); 配额 1000 次/日, 本模块日耗 ~1-5 次SOAP 调用
++ N 次 CELLAR 取文, 远在配额内。
 """
 import argparse
 import datetime
@@ -61,22 +64,11 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CELLAR = "http://publications.europa.eu/resource/celex/"
 EURLEX_HUMAN = "https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:{celex}"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-STATE_PATH = os.path.join(DATA_DIR, "eurlex-state.json")
-TIMEOUT = 20
-
-# 年度编号 2026/NNNN 为跨机构共享序列, R/L/D 交错占用; 系列字母在探测时确定。
-SERIES = ("R", "D", "L")
-CELEX_RE = re.compile(r"^3202[4-9][RLD]\d{3,5}$")
-
-
-def _year_pre(year):
-    """celex 年份前缀: sector 3 + 4 位年份 —— 3|2026 = 32026。
-    (2026-11-15 修: 原写法 "3202"+年尾两位 拼出 320226R, 二分全程 404。)"""
-    return "3%d" % year
-
-
-def _celex(year, letter, n):
-    return "%s%s%04d" % (_year_pre(year), letter, n)
+TIMEOUT = 30
+SOAP_ENDPOINT = "https://eur-lex.europa.eu/EURLexWebService"
+SOAP_ACTION = "https://eur-lex.europa.eu/EURLexWebService/doQuery"
+PAGE_SIZE = 100
+WINDOW_DAYS = 7          # 与 normalize 旧闻窗口对齐(PD>=今天-7)
 
 # 食品黑名单(优先于检疫白名单; 镜像 fetch_eping.FOOD_TBT_BLOCK 纪律)
 FOOD_BLOCK = (
@@ -95,23 +87,107 @@ QUAR_ALLOW = (
     "consignments of", "animal disease", "wood packaging",
 )
 
+ENV_TPL = """<?xml version="1.0" encoding="UTF-8"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+               xmlns:wsse="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd"
+               xmlns:elx="http://eur-lex.europa.eu/search">
+  <soap:Header>
+    <wsse:Security soap:mustUnderstand="true">
+      <wsse:UsernameToken>
+        <wsse:Username>%s</wsse:Username>
+        <wsse:Password Type="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordText">%s</wsse:Password>
+      </wsse:UsernameToken>
+    </wsse:Security>
+  </soap:Header>
+  <soap:Body>
+    <elx:searchRequest>
+      <elx:expertQuery>%s</elx:expertQuery>
+      <elx:page>%s</elx:page>
+      <elx:pageSize>%s</elx:pageSize>
+      <elx:searchLanguage>en</elx:searchLanguage>
+    </elx:searchRequest>
+  </soap:Body>
+</soap:Envelope>"""
 
-def _curl_code(url):
-    """存在性判定: CELLAR 对存在的资源返回 303/200, 不存在返回 404。"""
-    cmd = ["curl", "-sk", "-o", "/dev/null", "-w", "%{http_code}",
-           "--max-time", str(TIMEOUT), "-A", UA,
-           "-H", "Accept-Language: eng", url]
+
+def _load_ws_creds():
+    """从 ~/.hermes/.env 读 EUR-Lex Web Services 凭据(与 EPING_API_KEY 同纪律,
+    仓库永不入库)。用户名是注册批准邮件里的**专用 webservice 用户名**(生成的
+    ID, 不是 EU Login 邮箱 —— 实测邮箱认证 FailedAuthentication)。"""
+    env = {}
+    path = os.path.join(os.path.expanduser("~"), ".hermes", ".env")
+    if os.path.isfile(path):
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if "=" in line and not line.startswith("#"):
+                    k, v = line.split("=", 1)
+                    env[k.strip()] = v
+    user = env.get("EURLEX_WS_USER") or env.get("EURLEX_WS_EMAIL") or ""
+    pwd = env.get("EURLEX_WS_PASSWORD") or ""
+    return user, pwd
+
+
+def soap_query(expert_query, page, creds):
+    """SOAP 1.2 doQuery(SOAPAction + WS-Security UsernameToken11 明文密码)。
+    请求体元素必须全部带 elx: 前缀(elementFormDefault=qualified, 实测空
+    namespace 报 unexpected element)。返回响应文本(失败/空返回空串)。"""
+    user, pwd = creds
+    body = ENV_TPL % (user, pwd, expert_query, page, PAGE_SIZE)
+    cmd = ["curl", "-sk", "--max-time", str(TIMEOUT + 20), "-A", UA,
+           "-H", "Content-Type: application/soap+xml; charset=utf-8",
+           "-H", "SOAPAction: \"%s\"" % SOAP_ACTION,
+           "-X", "POST", "--data-binary", body, SOAP_ENDPOINT]
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT + 5)
-        return (p.stdout or "").strip()
+        p = subprocess.run(cmd, capture_output=True, text=True,
+                           errors="replace", timeout=TIMEOUT + 30)
+        return p.stdout or ""
     except (OSError, subprocess.SubprocessError):
-        return "000"
+        return ""
+
+
+def parse_notices(xml_text):
+    """从 doQuery 响应解析 NOTICE 元数据, 返回 (totalhits, [{celex,title,pubdate}])。
+    逐块正则(响应结构由我们自己的查询决定, 形状稳定; etree 的 SOAP 命名空间
+    处理在此是噪声)。"""
+    import html as _h
+    th = re.search(r"<totalhits>(\d+)</totalhits>", xml_text)
+    total = int(th.group(1)) if th else 0
+    out = []
+    for block in xml_text.split("<NOTICE>")[1:]:
+        block = block.split("</NOTICE>")[0]
+        m_c = re.search(r"<ID_CELEX>\s*<VALUE>([^<]+)</VALUE>", block)
+        if not m_c:
+            continue
+        m_t = re.search(r"<EXPRESSION_TITLE>\s*<LANG>en</LANG>\s*<VALUE>([^<]+)</VALUE>", block)
+        m_d = re.search(r"<OFFICIAL-JOURNAL-ACT_DATE_PUBLICATION>\s*<VALUE>([^<]+)</VALUE>", block)
+        title = _h.unescape(m_t.group(1)).strip() if m_t else ""
+        pub = parse_date(m_d.group(1)) if m_d else None
+        out.append({"celex": m_c.group(1).strip(), "title": title,
+                    "pubdate": pub.isoformat() if pub else None})
+    return total, out
+
+
+def discover(creds, start_date):
+    """PD>=start 的分页查询, 返回 (totalhits, [{celex,title,pubdate}])。
+    空响应/故障 fail-open 返回空列表(本轮放弃, 下轮重试)。"""
+    q = "PD&gt;=%s" % start_date.replace("-", "")
+    page, total, items = 1, 0, []
+    while True:
+        resp = soap_query(q, page, creds)
+        if not resp or "searchResults" not in resp:
+            return total, items
+        total, notices = parse_notices(resp)
+        items.extend(notices)
+        if not notices or len(items) >= total:
+            break
+        page += 1
+    return total, items
 
 
 def fetch_doc(celex):
-    """内容协商取全文(eng 渲染)。返回 (html or None)。
-    必须带 -L: celex 资源是 303 重定向到 CELLAR 分发件(实测 2026-11-15,
-    不跟随拿到的是空体, 17/17 全败)。"""
+    """CELLAR 内容协商取全文(eng 渲染)。返回 (html or None)。
+    必须带 -L: celex 资源是 303 重定向到 CELLAR 分发件(实测不跟随拿到空体)。"""
     cmd = ["curl", "-skL", "--max-time", str(TIMEOUT + 10), "-A", UA,
            "-H", "Accept: application/xhtml+xml",
            "-H", "Accept-Language: eng",
@@ -134,41 +210,11 @@ def strip_html(html):
     return re.sub(r"\s+", " ", t)
 
 
-TITLE_RE = re.compile(
-    r"((?:Commission|Council)\s+(?:Implementing|Delegating)?\s*"
-    r"(?:Regulation|Decision|Directive)\s*\(EU\)\s*20\d{2}/\d+\s+of\s+"
-    r"[0-9]{1,2}\s+\w+\s+20\d{2}[^.]{0,240})")
-
-
-OJ_REF_RE = re.compile(r"series\s+20\d{2}/\d+\s+[\d.]+\s+(.{20,400}?)"
-                       r"(?:\(Text with|THE EUROPEAN)")
-
-
-def extract_pub_date(text):
-    """从 OJ 引用行取发布日期(L series 2026/1453 10.7.2026)。"""
-    m = re.search(r"series\s+20\d{2}/\d+\s+(\d{1,2}\.\d{1,2}\.\d{4})", text)
-    return parse_date(m.group(1)) if m else None
-
-
-def extract_title(text, celex, series):
-    """分层取标题: ①OJ 引用行后的大写 act 标题(截到 THE EUROPEAN COMMISSION
-    之前 —— 修订类 act 的前言先引用被修订单, 小写 TITLE_RE 会抓到引用而非
-    自身标题, 2026-11-15 实测); ②旧的小写头部形态; ③兜底。"""
-    m = OJ_REF_RE.search(text[:6000])
-    if m:
-        t = m.group(1).strip()
-        if len(t) >= 20:
-            return t
-    m = TITLE_RE.search(text)
-    if m:
-        return m.group(1).strip()
-    return "EU %s %s" % (series, celex)
-
-
-def classify(text):
+def classify(title):
     """红线过滤: 食品黑名单优先 -> 检疫白名单 -> 其余剔除。
-    返回 (放行?, 命中词, 类别)。"""
-    low = text[:6000].lower()
+    返回 (放行?, 命中词, 类别)。窗口内 act 的主题判据是标题(EU act 标题
+    几乎必含主题词; 正文级主题在下游 LLM 抽取里二次把关)。"""
+    low = title.lower()
     for w in FOOD_BLOCK:
         if w in low:
             return False, w, "食品"
@@ -178,110 +224,23 @@ def classify(text):
     return False, "", "非检疫"
 
 
-def _state_load():
-    if os.path.isfile(STATE_PATH):
-        try:
-            with open(STATE_PATH, encoding="utf-8") as f:
-                return json.load(f)
-        except ValueError:
-            pass
-    return {}
-
-
-def _state_save(state):
-    os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
-    with open(STATE_PATH, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False)
-
-
-def _probe_one(year, letter, n):
-    code = _curl_code(CELLAR + _celex(year, letter, n))
-    return letter if code in ("303", "200") else None
-
-
-def _act_exists(year, n, pool=None):
-    """共享号 N 上是否有 act: 依次探 R/D/L, 返回命中的系列字母或 None。
-    pool ThreadPoolExecutor 时三探并行(单号 3 连发 ~3s -> ~0.5s)。"""
-    if pool is None:
-        from concurrent.futures import ThreadPoolExecutor
-        with ThreadPoolExecutor(max_workers=3) as p:
-            rs = list(p.map(lambda l: _probe_one(year, l, n), SERIES))
-    else:
-        rs = list(pool.map(lambda l: _probe_one(year, l, n), SERIES))
-    for letter, r in zip(SERIES, rs):
-        if r:
-            return letter
-    return None
-
-
-def _frontier(year, state):
-    """定位共享序列的当前最大已发布号: 记录存在且年份一致 -> 返回记录值;
-    否则(首次/跨年) -> 二分探测当前边界。"""
-    if state.get("year") == year and isinstance(state.get("last"), int):
-        return state["last"]
-    lo, hi = 1, 4000
-    while _act_exists(year, hi):
-        lo = hi
-        hi *= 2
-        if hi > 20000:
-            break
-    while lo + 1 < hi:
-        mid = (lo + hi) // 2
-        if _act_exists(year, mid):
-            lo = mid
-        else:
-            hi = mid
-    return lo
-
-
-def discover(year, start, probes=200, miss_stop=120):
-    """从 start+1 向前推进, 返回 ((号, 系列字母) 列表, 最后处理到的号)。
-
-    并行批次探测(8 线程 × 每号 3 探); 空号位容忍 miss_stop=120 —— 未刊发的
-    决定不占 OJ 号位, 共享序列有**大空洞**(实测 1473-1475 之后连空 200+ 号位
-    到 2187, 7-10 月间 ~700 号位只有 ~200 个 OJ 件), 小 miss_stop 会在第一个
-    空洞死掉漏掉全部后续 act。单轮 probes 上限与时长挂钩(200 号 × 3 探 ÷ 8
-    并发 ≈ 75s 上限)。"""
-    from concurrent.futures import ThreadPoolExecutor
-    found, misses, last = [], 0, start
-    pool = ThreadPoolExecutor(max_workers=8)
-    try:
-        i = 1
-        while i <= probes:
-            batch = list(range(start + i, min(start + i + 8, start + probes + 1)))
-            rs = list(pool.map(lambda n: _act_exists(year, n, pool), batch))
-            for n, r in zip(batch, rs):
-                if r:
-                    found.append((n, r))
-                    misses = 0
-                else:
-                    misses += 1
-                    if misses >= miss_stop:
-                        last = n - misses
-                        return found, last
-                last = n
-            i += len(batch)
-    finally:
-        pool.shutdown(wait=False)
-    return found, last
-
-
-def collect_archive(raw_dir, date_str, celex, title, text, series,
+def collect_archive(raw_dir, date_str, celex, title, text,
                     max_archives_per_day, archive_lock):
     """写综合档案正文 -> collect.py 落盘。返回 ok / capped / fail。"""
     human = EURLEX_HUMAN.format(celex=celex)
     body = ("<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>%s</title></head>"
             "<body><h1>%s</h1>"
-            "<p>celex: %s | series: %s</p>"
+            "<p>celex: %s</p>"
             "<p>EUR-Lex 人读链接: %s</p>"
             "<p>CELLAR 溯源: %s%s</p>"
             "<div>%s</div>"
             "<p>(source: Publications Office CELLAR 内容协商 —— 欧盟官方公报全文存档)</p>"
-            "</body></html>") % (title, title, celex, series, human,
+            "</body></html>") % (title, title, celex, human,
                                  CELLAR, celex, text[:16000])
     tmp_dir = tempfile.mkdtemp(prefix="radar-eurlex-")
     try:
-        tmp_path = os.path.join(tmp_dir, "eurlex-%s.html" % celex)
+        tmp_path = os.path.join(tmp_dir, "eurlex-%s.html"
+                                % re.sub(r"[^A-Za-z0-9]", "_", celex))
         with open(tmp_path, "w", encoding="utf-8") as f:
             f.write(body)
         with archive_lock:
@@ -304,14 +263,15 @@ def collect_archive(raw_dir, date_str, celex, title, text, series,
 
 
 def run(date_str, max_archives_per_day=0):
-    """主流程: 推进发现 -> 过滤 -> 存档 -> 追加候选。返回存档数。
-
-    状态语义: state[series] = 最后一个**处理完**(已存档或已正确剔除)的号。
-    触顶/失败时停在本号, 余量下轮由 discover 从 state+1 重新发现 —— 不丢件。"""
+    """主流程: SOAP 日期查询 -> 标题过滤 -> CELLAR 全文存档 -> 追加候选。
+    返回存档数。无状态文件: 日期窗口由业务日期推导, done-URL 去重防重放。"""
     from collect import count_archives
+    creds = _load_ws_creds()
+    if not creds[0] or not creds[1]:
+        print("[fetch_eurlex] 缺 EURLEX_WS_USER/EURLEX_WS_PASSWORD(~/.hermes/.env), 跳过本轮")
+        return 0
     raw_dir = os.path.join(DATA_DIR, "raw", date_str)
     os.makedirs(raw_dir, exist_ok=True)
-    state = _state_load()
     archive_lock = threading.Lock()
     cand_path = os.path.join(raw_dir, "candidates.jsonl")
     done = set()
@@ -323,81 +283,63 @@ def run(date_str, max_archives_per_day=0):
                 except ValueError:
                     pass
 
-    n_arch, n_food, n_nonsp, n_fail = 0, 0, 0, 0
-    year = datetime.date.today().year
-    start = _frontier(year, state)
-    found, _last = discover(year, start)
-    if not found:
-        # 当日无新件: 边界即处理完, 也要落盘 —— 否则每轮都重复二分探测
-        # (实测 2026-11-15 首跑: 周末无新件, 状态空转 40+ 次 CELLAR 探测)
-        state = {"year": year, "last": start}
-        _state_save(state)
-        print("[fetch_eurlex] 共享序列 %d 之后无新件, 边界已落盘" % start)
+    today = datetime.date.fromisoformat(biz_today())
+    start_date = (today - datetime.timedelta(days=WINDOW_DAYS)).isoformat()
+    total, items = discover(creds, start_date)
+    if not items:
+        print("[fetch_eurlex] PD>=%s 无结果(或查询失败), 本轮 0 件" % start_date)
         return 0
-    print("[fetch_eurlex] 共享序列新件 %d 条(%d..%d)"
-          % (len(found), found[0][0], found[-1][0]))
-    processed = start
-    for n, letter in found:
-        celex = _celex(year, letter, n)
-        if CELLAR + celex in done:
-            processed = n               # 已在当日候选里(重跑), 视为处理完
-            continue
-        html = fetch_doc(celex)
-        if not html:
-            n_fail += 1
-            continue                    # 取文失败: 不推进 processed, 下轮重试
-        text = strip_html(html)
-        title = extract_title(text, celex, letter)
-        pub = extract_pub_date(text[:6000])
-        ok, hit, kind = classify(title + " " + text[:12000])
+    print("[fetch_eurlex] PD>=%s 共 %d 条, 过滤后处理" % (start_date, total))
+
+    n_arch, n_food, n_nonsp, n_fail = 0, 0, 0, 0
+    for it in items:
+        url = CELLAR + it["celex"]
+        if url in done:
+            continue                    # 当日已处理(重跑去重)
+        ok, hit, kind = classify(it["title"])
         if not ok:
-            processed = n               # 正确剔除 = 处理完
             if kind == "食品":
                 n_food += 1
-                print("[fetch_eurlex] 食品黑名单剔除 %s (%s)" % (celex, hit))
+                print("[fetch_eurlex] 食品黑名单剔除 %s (%s)" % (it["celex"], hit))
             else:
                 n_nonsp += 1
             continue
         if max_archives_per_day and \
                 count_archives(raw_dir) >= max_archives_per_day:
-            print("[fetch_eurlex] 当日存档触顶, 号位 %d 起余件下轮补" % n)
-            state = {"year": year, "last": processed}
-            _state_save(state)
+            print("[fetch_eurlex] 当日存档触顶, 余件下轮补(done-URL 去重不会丢件)")
             return n_arch
-        r = collect_archive(raw_dir, date_str, celex, title, text, letter,
+        html = fetch_doc(it["celex"])
+        if not html:
+            n_fail += 1
+            print("[fetch_eurlex][WARN] 取文失败 %s(下轮 done-URL 未记, 自动重试)" % it["celex"])
+            continue
+        text = strip_html(html)
+        title = it["title"] or ("EU %s" % it["celex"])
+        r = collect_archive(raw_dir, date_str, it["celex"], title, text,
                             max_archives_per_day, archive_lock)
         if r == "capped":
             print("[fetch_eurlex] 当日存档触顶(collect 拒绝), 余件下轮补")
-            state = {"year": year, "last": processed}
-            _state_save(state)
             return n_arch
         if r == "fail":
-            state = {"year": year, "last": processed}   # 系统性失败: 保断点
-            _state_save(state)
-            return n_arch
+            return n_arch               # 系统性失败: 停本轮保断点
         n_arch += 1
-        processed = n
         with open(cand_path, "a", encoding="utf-8") as f:
             f.write(json.dumps({
                 "title": title[:120],
-                "url": CELLAR + celex,
+                "url": url,
                 "country_en": "European Union",
-                "publish_date": str(biz_today()),
+                "publish_date": it["pubdate"] or str(biz_today()),
                 "source_name": "eu-eurlex",
                 "brief": "",
                 "topics": [],
             }, ensure_ascii=False) + "\n")
-    state = {"year": year, "last": processed}
-    _state_save(state)
-    print("[fetch_eurlex] EU 条例/决定新存档 %d 条(食品剔除 %d, 非检疫剔除 %d, 取文失败 %d)"
+    print("[fetch_eurlex] EU act 新存档 %d 条(食品剔除 %d, 非检疫剔除 %d, 取文失败 %d)"
           % (n_arch, n_food, n_nonsp, n_fail))
     return n_arch
 
 
 def _selftest():
-    """离线自检: 过滤器/标题抽取/日期解析/状态往返/跨年重置/celex 正则。不联网。
-    失败项不打「全部通过」—— 自检的诚实性靠退出码与末行断言。"""
-    global STATE_PATH
+    """离线自检: 过滤器/NOTICE 解析/ENV 模板/窗口日期。不联网。"""
     fails = []
 
     def check(cond, msg):
@@ -406,35 +348,45 @@ def _selftest():
             fails.append(msg)
 
     # 1) 红线过滤: 食品黑名单优先
-    ok, hit, kind = classify("amending Annex I as regards maximum residue levels "
+    ok, hit, kind = classify("Amending Annex I as regards maximum residue levels "
                              "of plant protection products")
     check(not ok and kind == "食品", "MRL 条例被食品黑名单剔除")
     # 2) 检疫白名单放行
-    ok, hit, kind = classify("amending Annex I to Implementing Regulation (EU) 2019/2072 "
-                             "as regards measures concerning the introduction into the Union "
+    ok, hit, kind = classify("Measures concerning the introduction into the Union "
                              "territory of consignments of plants for planting")
     check(ok and kind == "检疫", "植物检疫措施放行")
     # 3) 非检疫剔除
-    ok, _hit, kind = classify("amending Decision on the financing of the common "
+    ok, _hit, kind = classify("Amending Decision on the financing of the common "
                               "agricultural policy")
     check(not ok, "非检疫内容剔除")
-    # 4) 标题抽取
-    t = extract_title("Commission Implementing Regulation (EU) 2026/551 of 5 November 2026 "
-                      "laying down rules for the application of Regulation", "32026R0551", "R")
-    check("2026/551" in t and "5 November 2026" in t, "act 头部标题抽取")
-    # 5) 日期解析复用(EN 日-月名-年形态, 2026-11-15 补入 DATE_PATTERNS)
-    check(parse_date("of 5 November 2026") is not None, "EN 月份日期解析复用")
-    # 6) 状态往返 + 跨年重置(纯字符串断言, 保持自检离线 —— _frontier 的二分
-    #    会真探测 CELLAR, 不放进自检)
-    old = STATE_PATH
-    STATE_PATH = os.path.join(tempfile.mkdtemp(prefix="eurlex-st-"), "state.json")
-    _state_save({"year": 2026, "last": 2600})
-    check(_state_load().get("last") == 2600, "状态文件往返")
-    check(_celex(2026, "R", 551) == "32026R0551", "celex 构造(4 位零填充)")
-    check(_celex(2026, "D", 2130) == "32026D2130", "celex 构造(决定)")
-    STATE_PATH = old
-    # 7) celex 形态
-    check(CELEX_RE.match("32026R0551") is not None, "celex 正则")
+    # 4) 空标题不放行
+    ok, _hit, kind = classify("")
+    check(not ok, "空标题不放行")
+    # 5) 合成 NOTICE 解析(含 en 标题/celex/OJ 日期)
+    sample = ("<?xml version=\"1.0\"?><env:Envelope xmlns:env=\"http://www.w3.org/2003/05/soap-envelope\">"
+              "<env:Body><ns1:searchResults xmlns:ns1=\"http://eur-lex.europa.eu/search\">"
+              "<numhits>1</numhits><totalhits>1</totalhits>"
+              "<result><reference>eng_cellar:abc_en</reference><rank>1</rank><content>"
+              "<DTS_SUBDOM>LEGISLATION</DTS_SUBDOM><NOTICE><EXPRESSION>"
+              "<EXPRESSION_TITLE><LANG>en</LANG><VALUE>Commission Implementing "
+              "Regulation (EU) 2026/551 of 5 November 2026 laying down rules</VALUE>"
+              "</EXPRESSION_TITLE></EXPRESSION><WORK><ID_CELEX><VALUE>32026R0551</VALUE>"
+              "</ID_CELEX><OFFICIAL-JOURNAL-ACT_DATE_PUBLICATION><VALUE>2026-11-05</VALUE>"
+              "</OFFICIAL-JOURNAL-ACT_DATE_PUBLICATION></WORK></NOTICE></content>"
+              "</result></ns1:searchResults></env:Body></env:Envelope>")
+    total, items = parse_notices(sample)
+    check(total == 1 and len(items) == 1 and items[0]["celex"] == "32026R0551"
+          and "2026/551" in items[0]["title"] and items[0]["pubdate"] == "2026-11-05",
+          "合成 NOTICE 解析(celex/标题/日期)")
+    # 6) ENV 模板格式化冒烟
+    body = ENV_TPL % ("u", "p", "PD&gt;=20261108", 1, PAGE_SIZE)
+    check("elx:searchRequest" in body and "PD&gt;=20261108" in body
+          and "elx:pageSize>100" in body, "ENV 模板格式化")
+    # 7) 窗口日期形态
+    today = datetime.date.fromisoformat(biz_today())
+    check(re.match(r"^\d{8}$", (today - datetime.timedelta(days=WINDOW_DAYS)).strftime("%Y%m%d"))
+          is not None, "窗口日期 YYYYMMDD 形态")
+
     if fails:
         print("[selftest] %d 项失败: %s" % (len(fails), "; ".join(fails)))
         return 1
@@ -444,7 +396,7 @@ def _selftest():
 
 def main():
     ap = argparse.ArgumentParser(
-        description="EU EUR-Lex 通报源: CELLAR 内容协商, celex 序号推进发现, 零注册零 key")
+        description="EU EUR-Lex 通报源: Web Services doQuery 发现 + CELLAR 全文存档")
     ap.add_argument("--date", default=biz_today())
     ap.add_argument("--archive", action="store_true",
                     help="过滤后经 collect.py 存档并追加候选")

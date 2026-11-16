@@ -526,15 +526,13 @@ if [ -n "${HERMES_RUN_CMD:-}" ]; then
           || echo "[WARN] ePing 拉取失败(不阻塞主取数, 下轮重试)"
       fi
       # ---- EUR-Lex 通报源(2026-11-15 建源, 暂停挂接) ----
-      # 代码与配置已部署(sources.yaml eu-eurlex + scripts/fetch_eurlex.py):
-      # 获取层(CELLAR 内容协商)与过滤/存档/状态机已验证; 但发现层未通 ——
-      # 共享编号空间有 200+ 连续空号位(未刊发决定不占号), 按号码走路每天
-      # 白烧 600 次探测且穿不过去; 按日期发现需要注册 EUR-Lex Web Services
-      # (用户侧操作, 见 handover-2026-11-03.md §eurlex)。凭据到位后:
-      # 解开本钩子并在 fetch_eurlex.py 的 discover() 前接入 API 查询。
-      # echo "[$(date '+%F %T')] EUR-Lex 通报拉取(CELLAR)..."
-      # "$PY" "$REPO/scripts/fetch_eurlex.py" --date "$SCAN_DATE" --archive \
-      #   || echo "[WARN] EUR-Lex 拉取失败(不阻塞主取数, 下轮重试)"
+      # ---- EUR-Lex 通报源(2026-11-17 Web Services 版, fail-open) ----
+      # 发现层=SOAP doQuery(PD>=日期, 凭据 EURLEX_WS_USER/PASSWORD 在
+      # ~/.hermes/.env); 获取层=CELLAR 内容协商; 过滤=食品黑名单优先。
+      # 凭据缺失或拉取失败都不阻塞主取数, 只留痕下轮重试。
+      echo "[$(date '+%F %T')] EUR-Lex 通报拉取(CELLAR)..."
+      "$PY" "$REPO/scripts/fetch_eurlex.py" --date "$SCAN_DATE" --archive \
+        || echo "[WARN] EUR-Lex 拉取失败(不阻塞主取数, 下轮重试)"
       else
       # ---- 死通道跳过名单(2026-10-23 引入, 确定性) ----
       # 10-22/10-23 实测: 约 20 个通道连续两日一字不差地不可用(403/连接失败/

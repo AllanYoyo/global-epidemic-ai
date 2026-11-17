@@ -513,6 +513,25 @@ def main():
                   "--source manual:运维补发" % args.date)
             print("         python scripts/push_report.py --date %s --broadcast" % args.date)
             return 1
+    # ---- M24 碰撞守卫(2026-11-17): 晨间跑批广播锁生效期间, 渠道消息/审阅
+    # 推送会**覆盖 broadcast 锁** -> cron 稍后的广播推送被自家审阅锁拒绝 ->
+    # 当日钉钉静默漏发(实测: 07:54 微信通知写 review 锁, 07:59 cron 广播被拒,
+    # 钉钉漏发一天, 内容 12 条直到人工补发)。守卫语义: broadcast 锁存在且
+    # 未过期、且当日日报还没推出去(.pushed 不存在) -> 渠道侧推送一律拒绝,
+    # 等 cron 收尾(或锁过期)后再发。若 .pushed 已存在 = cron 已完成推送,
+    # 渠道消息无碰撞风险, 照常放行。
+    if not args.broadcast and lock_scope == "broadcast":
+        _age_min = scope_age_minutes(lock)
+        if not os.path.isfile(flag_path) and \
+                (_age_min is None or _age_min <= SCOPE_MAX_AGE_MINUTES):
+            print("[失败] 晨间跑批的全量声明生效中(声明于 %s, 来源 %s, 距今约 %.0f 分钟)"
+                  % ((lock or {}).get("declared_at") or "-", lock_source,
+                     _age_min if _age_min is not None else -1))
+            print("       此刻发渠道消息会覆盖广播锁 -> cron 的广播推送被拒, "
+                  "当日钉钉静默漏发(2026-11-17 实测)。")
+            print("       请等跑批收尾(约 08:45 后)再发渠道消息; 今日日报由定时任务"
+                  "正常推送, 无需手工补发。确有紧急公告, 用 --broadcast 显式全量。")
+            return 1
     elif lock_scope == "review" and review_channel and lock_label and not args.review_approved:
         # 锁里记着审阅渠道, 命令行却指定了别的渠道 → 拒绝(防"同一轮发到两个渠道")。
         # 阶段 2(--review-approved)不适用: 那时以待审标记为准, 参数只作兜底。

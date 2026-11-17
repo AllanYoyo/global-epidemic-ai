@@ -824,6 +824,53 @@ class PushReportReviewGateTests(unittest.TestCase):
         self.assertEqual(self.calls, [], out)
         self.assertIn("范围锁", out)
 
+    def test_message_refused_while_broadcast_lock_fresh(self):
+        # M24 碰撞(2026-11-17 实测): 晨间跑批的广播锁生效期间, --message 渠道
+        # 消息会覆盖广播锁 -> cron 稍后的广播推送被自家审阅锁拒绝 -> 当日钉钉
+        # 静默漏发(钉钉漏发一天, 内容 12 条直到人工补发)。守卫: broadcast 锁
+        # 新鲜且 .pushed 不存在 -> 渠道侧推送拒绝, 等 cron 收尾后再发。
+        self._declare_broadcast("2026-10-30")
+        self.calls.clear()
+        rc, out = self._run(["--date", "2026-10-30", "--message", "通知"])
+        self.assertNotEqual(rc, 0, out)
+        self.assertEqual(self.calls, [], out)
+        self.assertIn("晨间跑批的全量声明生效中", out)
+
+    def test_review_push_refused_while_broadcast_lock_fresh(self):
+        # 对称面: 审阅推送(--review-channel)在跑批窗口内同样拒绝。
+        self._declare_broadcast("2026-11-01")
+        self.calls.clear()
+        rc, out = self._run(["--date", "2026-11-01", "--review-channel", "wechat"])
+        self.assertNotEqual(rc, 0, out)
+        self.assertEqual(self.calls, [], out)
+        self.assertIn("晨间跑批的全量声明生效中", out)
+
+    def test_message_allowed_after_daily_push_completed(self):
+        # cron 已完成推送(.pushed 存在) -> 渠道消息无碰撞风险, 照常放行。
+        self._declare_broadcast("2026-11-02")
+        os.makedirs(self.flag_dir, exist_ok=True)
+        with open(os.path.join(self.flag_dir, "2026-11-02.flag"), "w",
+                  encoding="utf-8") as f:
+            f.write("2026-11-02T08:00:00 已推送: 钉钉 · 范围=全量")
+        self.calls.clear()
+        rc, out = self._run(["--date", "2026-11-02", "--message", "通知"])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual({c[0] for c in self.calls}, {"wechat", "dingtalk"}, out)
+
+    def test_message_allowed_when_broadcast_lock_stale(self):
+        # 广播锁过期(晨跑失败残锁) -> 渠道消息放行(可能是当日唯一触达通道)。
+        self._declare_broadcast("2026-11-03")
+        import datetime as _dt
+        now = _dt.datetime.utcnow() + _dt.timedelta(hours=8)
+        old = (now - _dt.timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%S")
+        lock_file = os.path.join(self.scope_dir, "2026-11-03.lock")
+        with open(lock_file, "w", encoding="utf-8") as f:
+            f.write("scope=broadcast\nsource=test:cron\ndeclared_at=%s\n" % old)
+        self.calls.clear()
+        rc, out = self._run(["--date", "2026-11-03", "--message", "通知"])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual({c[0] for c in self.calls}, {"wechat", "dingtalk"}, out)
+
     def test_pending_gate_blocks_resend_without_force(self):
         # 待审期间再跑一次(无 --force): 幂等早退, 一条都不发
         self._run(["--date", "2026-10-23"], env_extra={"REVIEW_CHANNEL": "wechat"})

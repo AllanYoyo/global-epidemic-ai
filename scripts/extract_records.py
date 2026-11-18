@@ -93,6 +93,48 @@ EXTRACT_WORKERS = int(os.environ.get("EXTRACT_WORKERS", "6") or 6)
 # 阻止新模型发起工具调用(1/4 仍跑偏), 真正的开关是 --safe-mode。
 EXTRACT_CLI_SAFE = os.environ.get("EXTRACT_CLI_SAFE", "1") not in ("0", "false", "no")
 
+# .env 路径可覆盖(与 fetch_eping.HERMES_ENV_PATH / push_scope.HERMES_ENV_PATH 同纪律):
+# 默认 ~/.hermes/.env, 测试与隔离环境可指向别处 —— 否则断言"无 key 行为"的用例会
+# 在本机与生产 VPS 上**真的读到真 key**, 测的就不是无 key 分支了。
+HERMES_ENV_PATH = os.environ.get("HERMES_ENV_PATH",
+                                  os.path.join(os.path.expanduser("~"), ".hermes", ".env"))
+
+
+def _load_api_key():
+    """从 ~/.hermes/.env 补载抽取通道的 API key(同名变量已存在时**不覆盖**)。
+
+    为什么必须补这一笔(2026-11-18 生产实测, 上线当场发现):
+    run_scan.sh 用**普通 source** 加载 ~/.hermes/.env(第 108 行, 没带 set -a),
+    变量只是 shell 变量, **不会传进 python 子进程**。生产实测:
+      · source 之后, 当前 shell 里 MINIMAX_CN_API_KEY 有值(长度 125);
+      · 但 python3 子进程的 os.environ 里**查不到**它(加 set -a 才看得到)。
+    于是直连通道拿不到 key → call_model_direct 返回 rc=2 → **静默回落 CLI 兜底**,
+    也就是我们刚淘汰的慢路径 —— 改造上了生产却一点没生效, 而且日志上看不出来
+    (回落是设计内行为)。这个坑 fetch_eping._load_env_key 已经踩过一遍
+    (2026-10-31: "挂接点检查到 key, python 却拿不到")。
+
+    只补这一个键, 不把 .env 里其它密钥带进进程。
+    返回 True=已拿到 key。
+    """
+    if os.environ.get(EXTRACT_API_KEY_ENV):
+        return True
+    path = HERMES_ENV_PATH
+    if not os.path.isfile(path):
+        return False
+    try:
+        with open(path, encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                if k.strip() == EXTRACT_API_KEY_ENV and v.strip():
+                    os.environ[EXTRACT_API_KEY_ENV] = v.strip().strip('"').strip("'")
+                    return True
+    except OSError:
+        pass
+    return False
+
 # 字段模板(与 Agent 版 prompt 同一套键, 空值模型会留空 → 存 null)
 FIELD_TEMPLATE = """record_type=policy
 is_policy_change=<yes|no>
@@ -479,6 +521,10 @@ def call_model_direct(prompt, max_tokens=None):
     """
     key = (os.environ.get(EXTRACT_API_KEY_ENV) or "").strip()
     if not key:
+        # 兜底: 从 ~/.hermes/.env 补载(run_scan.sh 的 source 不导出给子进程)
+        _load_api_key()
+        key = (os.environ.get(EXTRACT_API_KEY_ENV) or "").strip()
+    if not key:
         return 2, "未配置 %s(直连通道不可用)" % EXTRACT_API_KEY_ENV, None
     url = EXTRACT_API_BASE + "/v1/messages"
     body = json.dumps({
@@ -566,6 +612,9 @@ def backend_name():
     """本轮实际用的通道: api / cli。auto = 有 key 走 api, 否则回落 cli。"""
     if EXTRACT_BACKEND in ("api", "cli"):
         return EXTRACT_BACKEND
+    # 判定"有没有 key"之前先把 key 补齐 —— 否则 ~/.hermes/.env 里的 key 在
+    # 跑批管线路径下永远读不到, auto 会一直走 CLI 慢路径(见 _load_api_key 说明)。
+    _load_api_key()
     return "api" if (os.environ.get(EXTRACT_API_KEY_ENV) or "").strip() else "cli"
 
 

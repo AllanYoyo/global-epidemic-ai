@@ -132,6 +132,15 @@ export EXTRACT_TIMEOUT="${EXTRACT_TIMEOUT:-90}"
 export EXTRACT_API_BASE_URL="${EXTRACT_API_BASE_URL:-https://api.minimaxi.com/anthropic}"
 export EXTRACT_API_KEY_ENV="${EXTRACT_API_KEY_ENV:-MINIMAX_CN_API_KEY}"
 
+# 抽取通道的 key 必须**显式 export**。上面的 source(第 108 行)没带 set -a,
+# 变量只是 shell 变量, **不会传进 python3 子进程** —— 生产实测(2026-11-18 上线当场):
+# source 之后当前 shell 里 MINIMAX_CN_API_KEY 有值(长度 125), 但子进程
+# os.environ 里查不到, 加 set -a 才看得到。不 export 的话直连通道拿不到 key →
+# 静默回落 CLI 兜底(刚淘汰的慢路径), 改造等于没生效且日志上看不出来。
+# 与 EPING_API_KEY 的处理是同一套纪律(见第 112 行)。
+export "$EXTRACT_API_KEY_ENV" 2>/dev/null || \
+  echo "[警告] EXTRACT_API_KEY_ENV='$EXTRACT_API_KEY_ENV' 不是合法变量名, 直连通道不可用"
+
 # 数据根目录: 与 normalize.py / report.py / push_*.py 保持同一来源。
 # 2026-10-22 审计发现: 产物校验曾把路径写死成 "$REPO/data/reports/...", 而其余脚本
 # 一律读 EPIDEMIC_DATA_DIR。README 教生产设 EPIDEMIC_DATA_DIR=/opt/global-epidemic-ai/data,

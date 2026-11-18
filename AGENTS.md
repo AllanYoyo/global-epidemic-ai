@@ -59,6 +59,19 @@ global-policy-search skill 仍为交互式检索入口（会话补数走 `run_sc
 - **通道**：`extract_records.py` 默认直连 Anthropic 兼容端点
   (`https://api.minimaxi.com/anthropic`，key 读 `MINIMAX_CN_API_KEY`，在 `~/.hermes/.env`，永不入库)。
   直连 = 无工具（结构上不可能跑偏）+ 无仓库上下文注入 + 无 CLI 启动开销。
+- **key 必须真的传进子进程（双保险，2026-11-18 上线当场发现）**：`run_scan.sh` 用**普通
+  `source`** 加载 `~/.hermes/.env`（没带 `set -a`），变量只是 shell 变量，**传不进
+  `python3` 子进程** —— 生产实测：source 之后当前 shell 里 `MINIMAX_CN_API_KEY` 有值
+  （长度 125），子进程 `os.environ` 里查不到（加 `set -a` 才看得到）。不修的话直连通道
+  拿不到 key → **静默回落 CLI 兜底**（刚淘汰的慢路径），改造上了生产却一点没生效，
+  而且日志上看不出来（回落是设计内行为）。故两处都做：`run_scan.sh` 显式
+  `export "$EXTRACT_API_KEY_ENV"`；`extract_records._load_api_key()` 再从 `~/.hermes/.env`
+  补载一次（与 `fetch_eping._load_env_key` 同一套纪律）。
+  **旁证**：`~/.hermes/.env` 当天还有一处 `EURLEX_WS_PASSWORD` 值末尾多了一个反引号，
+  未闭合的命令替换把后面几行一起吞掉 → bash source 后 `EURLEX_WS_USER/PASSWORD` 实际
+  缺失（`fetch_eurlex.py` 自己逐行读 .env，不受影响）。已修（备份见
+  `~/.hermes/.env.bak-fix-backtick-*`）。**改 `~/.hermes/.env` 后一律用
+  `bash -c '. ~/.hermes/.env; echo $?'` 验一遍有没有语法错误**。
 - **模型必须钉死**：`EXTRACT_MODEL`（默认 `MiniMax-M3.1-Flash`，**2026-11-18 用户拍板：
   M2.5 将被淘汰，抽取段必须在 M3.1 上跑通**）。**不吃 `~/.hermes/config.yaml` 的
   全局默认** —— 11-16 那次事故就是全局模型一换、仓库毫无记录、抽取段慢 5 倍。

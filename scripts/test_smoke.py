@@ -61,6 +61,17 @@ _push_scope.HERMES_ENV_PATH = os.path.join(TMP, "no-such-.hermes-env")
 import fetch_eping as _fetch_eping  # noqa: E402
 _fetch_eping.HERMES_ENV_PATH = os.path.join(TMP, "no-such-.hermes-env")
 
+# 抽取通道的 .env 路径同样要隔离(2026-11-18): extract_records._load_api_key()
+# 会去读 ~/.hermes/.env 补载 API key, 而本机与生产 VPS 都配了 MINIMAX_CN_API_KEY
+# —— 于是 backend_name() 会返回 "api", 用例**真的去调直连端点**(耗额度 + 留网络请求),
+# 而"断言无 key 时回落 CLI"的用例会失效。同 fetch_eping / push_scope 的纪律。
+import extract_records as _extract_records  # noqa: E402
+# 环境变量也要指过去: test_default_model_is_m31_flash 会 importlib.reload(extract_records),
+# reload 后模块级 HERMES_ENV_PATH 会重新按环境变量取值 —— 只改模块属性的话,
+# reload 完就又指回真的 ~/.hermes/.env 了。
+os.environ["HERMES_ENV_PATH"] = os.path.join(TMP, "no-such-.hermes-env")
+_extract_records.HERMES_ENV_PATH = os.environ["HERMES_ENV_PATH"]
+
 
 def _source_event(**overrides):
     """构造一条合法政策记录的最小集,单测可在它基础上改字段。"""
@@ -5062,6 +5073,66 @@ class ExtractionChannelTests(unittest.TestCase):
         # 推送前必须刷新广播锁(跑得慢的日子不能被 75 分钟窗口判过期)
         self.assertIn("push_scope.py", text)
         self.assertIn("--refresh", text)
+
+    # ---- key 传递(2026-11-18 上线当场发现的坑) ----
+    #
+    # 形状: run_scan.sh 用**普通 source** 加载 ~/.hermes/.env(没带 set -a),
+    # 变量只是 shell 变量, **传不进 python 子进程**。生产实测: source 之后当前
+    # shell 里 MINIMAX_CN_API_KEY 有值(长度 125), 子进程 os.environ 里查不到,
+    # 加 set -a 才看得到。不修的话直连通道拿不到 key → **静默回落 CLI 慢路径**
+    # (刚淘汰的那条), 改造上了生产却一点没生效, 而且日志上看不出来。
+
+    def _write_probe_env(self, name):
+        path = os.path.join(TMP, name)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("# 注释行\nMINIMAX_CN_API_KEY='probe-key-123'\nOTHER=1\n")
+        return path
+
+    def test_api_key_loaded_from_hermes_env(self):
+        """直连通道的 key 必须能从 ~/.hermes/.env 补载。"""
+        er = self._er()
+        env_file = self._write_probe_env("hermes_env_probe.env")
+        clean = {k: v for k, v in os.environ.items() if k != "MINIMAX_CN_API_KEY"}
+        try:
+            with mock.patch.dict(os.environ, clean, clear=True), \
+                    mock.patch.object(er, "HERMES_ENV_PATH", env_file):
+                self.assertFalse(bool(os.environ.get("MINIMAX_CN_API_KEY")))
+                self.assertTrue(er._load_api_key())
+                self.assertEqual(os.environ.get("MINIMAX_CN_API_KEY"), "probe-key-123")
+        finally:
+            os.environ.pop("MINIMAX_CN_API_KEY", None)
+
+    def test_api_key_does_not_override_existing_env(self):
+        """已有同名变量时**不覆盖**(外部显式传入优先于 .env)。"""
+        er = self._er()
+        env_file = self._write_probe_env("hermes_env_probe2.env")
+        try:
+            with mock.patch.dict(os.environ, {"MINIMAX_CN_API_KEY": "from-env-var"},
+                                 clear=False), \
+                    mock.patch.object(er, "HERMES_ENV_PATH", env_file):
+                self.assertTrue(er._load_api_key())
+                self.assertEqual(os.environ.get("MINIMAX_CN_API_KEY"), "from-env-var")
+        finally:
+            os.environ.pop("MINIMAX_CN_API_KEY", None)
+
+    def test_backend_auto_prefers_api_when_key_only_in_env_file(self):
+        """auto 模式下, key 只在 .env 文件里也必须走直连(否则回落 CLI 慢路径)。"""
+        er = self._er()
+        env_file = self._write_probe_env("hermes_env_probe3.env")
+        clean = {k: v for k, v in os.environ.items() if k != "MINIMAX_CN_API_KEY"}
+        try:
+            with mock.patch.dict(os.environ, clean, clear=True), \
+                    mock.patch.object(er, "EXTRACT_BACKEND", "auto"), \
+                    mock.patch.object(er, "HERMES_ENV_PATH", env_file):
+                self.assertEqual(er.backend_name(), "api")
+        finally:
+            os.environ.pop("MINIMAX_CN_API_KEY", None)
+
+    def test_run_scan_exports_extract_api_key(self):
+        """run_scan.sh 必须显式 export 抽取通道的 key(source 不带 set -a 传不进子进程)。"""
+        with open(os.path.join(REPO, "scripts", "run_scan.sh"), encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn('export "$EXTRACT_API_KEY_ENV"', text)
 
 
 if __name__ == "__main__":

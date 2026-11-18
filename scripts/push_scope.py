@@ -280,6 +280,40 @@ def clear_scope(date):
     return False
 
 
+def report_path(date):
+    """当日 Markdown 日报路径(存在且非空 = 本轮真的出报了)。"""
+    return os.path.join(DATA_DIR, "reports", "%s-policy-report.md" % date)
+
+
+def refresh_scope(date):
+    """刷新已存在范围锁的 declared_at(声明时刻), 用于"这一轮还在跑"的情况。
+
+    为什么需要(2026-11-18): 广播锁有效期 75 分钟, 设计预算是"取数 ≤1410s +
+    加工 1800s + 网关等待 ≤360s"。但 11-18 那天加工段实际跑了 2205s, 整轮 45
+    分钟吃掉窗口的 60% —— 再重一点的日子就会在推送**之前**被判过期,
+    `push_report.py --broadcast` 直接拒绝(退出码 1), 当天日报静默推不出去。
+
+    刷新不是放行残锁: **只有当日日报已生成且非空**才允许刷新 —— 那说明这一轮
+    真的跑到了出报这一步, 锁是活的而不是残留的。日报没出来 = 那一轮没跑完
+    = 锁必须继续按过期处理(10-20/10-22 事故的防线不能因为"跑得慢"被拆掉)。
+
+    返回 (rc, 消息); rc=0 成功。
+    """
+    scope = read_scope(date)
+    if not scope:
+        return 1, "本轮没有范围锁, 无需刷新"
+    rp = report_path(date)
+    if not (os.path.isfile(rp) and os.path.getsize(rp) > 0):
+        return 1, ("当日日报未生成(%s) —— 拒绝刷新: 这说明那一轮没跑完, "
+                   "锁必须继续按过期处理" % os.path.basename(rp))
+    kind = scope.get("scope") or ""
+    note = (scope.get("note") or "")
+    note = (note + " | " if note else "") + "锁已刷新(日报已生成, 本轮仍在进行)"
+    path = write_scope(date, kind, channel=scope.get("channel"),
+                        source=scope.get("source") or "-", note=note)
+    return 0, "[OK] 已刷新范围锁声明时刻: %s · %s\n     %s" % (date, describe_scope(scope), path)
+
+
 def resolve_channel(raw):
     """把用户写的渠道名解析成规范键(wechat/dingtalk/mail); 认不出返回 None。"""
     if not raw:
@@ -315,6 +349,9 @@ def main(argv=None):
     ap.add_argument("--note", default="", help="备注(写进锁里)")
     ap.add_argument("--show", action="store_true", help="只打印当前范围锁, 不改写")
     ap.add_argument("--clear", action="store_true", help="清掉当前范围锁")
+    ap.add_argument("--refresh", action="store_true",
+                    help="刷新已存在范围锁的声明时刻(仅当日日报已生成时允许; "
+                         "日报没出来 = 那一轮没跑完, 锁必须继续按过期处理)")
     ap.add_argument("--print-label", action="store_true",
                     help="只打印 --review-channel 的显示名(供 shell 取中文渠道名)")
     args = ap.parse_args(argv)
@@ -353,6 +390,15 @@ def main(argv=None):
     if args.review_channel and args.broadcast:
         print("[错误] --review-channel 与 --broadcast 互斥")
         return 1
+
+    if args.refresh:
+        if args.review_channel or args.broadcast:
+            print("[错误] --refresh 与 --review-channel/--broadcast 互斥"
+                  "(刷新只改已有锁的声明时刻, 不改推送范围)")
+            return 1
+        rc, msg = refresh_scope(args.date)
+        print(msg)
+        return rc
 
     if args.review_channel:
         key = resolve_channel(args.review_channel)

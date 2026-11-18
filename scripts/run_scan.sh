@@ -118,6 +118,20 @@ _caller_process_to="${STAGE_PROCESS_TIMEOUT-__unset__}"
 [ "$_caller_fetch_to" = "__unset__" ] || export STAGE_FETCH_TIMEOUT="$_caller_fetch_to"
 [ "$_caller_process_to" = "__unset__" ] || export STAGE_PROCESS_TIMEOUT="$_caller_process_to"
 
+# 抽取通道(2026-11-18 性能事故后引入)。抽取段不再走 hermes CLI:
+#   · 直连 Anthropic 兼容端点 → 无工具、无仓库上下文注入、无 CLI 启动开销;
+#   · 模型显式钉死 → 不吃 ~/.hermes/config.yaml 的全局默认(11-16 全局模型一换,
+#     64 份抽取的耗时从 7 分钟涨到 36 分 45 秒, 仓库里毫无记录);
+#   · 6 路并发 → 64 份推算约 1~2 分钟。
+# 回滚开关(不需要改代码): EXTRACT_BACKEND=cli + EXTRACT_WORKERS=1。
+export EXTRACT_BACKEND="${EXTRACT_BACKEND:-auto}"
+export EXTRACT_MODEL="${EXTRACT_MODEL:-MiniMax-M3.1-Flash}"
+export EXTRACT_WORKERS="${EXTRACT_WORKERS:-6}"
+export EXTRACT_MAX_TOKENS="${EXTRACT_MAX_TOKENS:-8000}"
+export EXTRACT_TIMEOUT="${EXTRACT_TIMEOUT:-90}"
+export EXTRACT_API_BASE_URL="${EXTRACT_API_BASE_URL:-https://api.minimaxi.com/anthropic}"
+export EXTRACT_API_KEY_ENV="${EXTRACT_API_KEY_ENV:-MINIMAX_CN_API_KEY}"
+
 # 数据根目录: 与 normalize.py / report.py / push_*.py 保持同一来源。
 # 2026-10-22 审计发现: 产物校验曾把路径写死成 "$REPO/data/reports/...", 而其余脚本
 # 一律读 EPIDEMIC_DATA_DIR。README 教生产设 EPIDEMIC_DATA_DIR=/opt/global-epidemic-ai/data,
@@ -729,6 +743,11 @@ $HEALTH_BLOCK"
       "$PY" "$REPO/scripts/report.py" --date "$SCAN_DATE"
       RC=$?
       PR_RC=0
+      # 广播锁有效期 75 分钟(SCOPE_MAX_AGE_MINUTES): 跑得慢的日子可能在推送**之前**
+      # 就被判过期 → --broadcast 被拒 → 当天日报静默推不出去(11-18 实测: 整轮 45 分钟
+      # 已吃掉窗口的 60%)。日报已生成 = 这一轮还活着 → 刷新声明时刻;
+      # 日报没生成 = 那一轮没跑完 → 不刷新, 锁继续按过期处理(10-20/10-22 的防线不拆)。
+      "$PY" "$REPO/scripts/push_scope.py" --date "$SCAN_DATE" --refresh || true
       case "$SCOPE" in
         broadcast) "$PY" "$REPO/scripts/push_report.py" --date "$SCAN_DATE" --broadcast; PR_RC=$? ;;
         review)    "$PY" "$REPO/scripts/push_report.py" --date "$SCAN_DATE" --review-channel "$SCOPE_CHANNEL"; PR_RC=$? ;;
@@ -762,6 +781,11 @@ $HEALTH_BLOCK"
         "$PY" "$REPO/scripts/report.py" --date "$SCAN_DATE" || RC=$?
       fi
       PR_RC=0
+      # 广播锁有效期 75 分钟(SCOPE_MAX_AGE_MINUTES): 跑得慢的日子可能在推送**之前**
+      # 就被判过期 → --broadcast 被拒 → 当天日报静默推不出去(11-18 实测: 整轮 45 分钟
+      # 已吃掉窗口的 60%)。日报已生成 = 这一轮还活着 → 刷新声明时刻;
+      # 日报没生成 = 那一轮没跑完 → 不刷新, 锁继续按过期处理(10-20/10-22 的防线不拆)。
+      "$PY" "$REPO/scripts/push_scope.py" --date "$SCAN_DATE" --refresh || true
       case "$SCOPE" in
         broadcast) "$PY" "$REPO/scripts/push_report.py" --date "$SCAN_DATE" --broadcast; PR_RC=$? ;;
         review)    "$PY" "$REPO/scripts/push_report.py" --date "$SCAN_DATE" --review-channel "$SCOPE_CHANNEL"; PR_RC=$? ;;

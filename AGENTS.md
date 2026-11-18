@@ -35,8 +35,8 @@ run_scan.sh policy (定时入口, 默认确定性管线)
                                     + 条件请求(ETag/304) + 关注面指纹判定 + collect.py 存档
                                     (单源 ≤2, 当日默认不限); 旧取数器 fetch_pages.py
                                     保留为 POLICY_FETCH_ENGINE=legacy 对照开关)
-  → scripts/extract_records.py    (每份存档一次 hermes -z 单轮微调用: 抽取+研判字段,
-                                    key=value 输出, 429/坏输出只废单份)
+  → scripts/extract_records.py    (每份存档一次**直连 API** 单轮补全: 抽取+研判字段,
+                                    key=value 输出, 429/坏输出只废单份; 6 路并发)
   → scripts/normalize.py          (入库) → extract_records --stage risk (研判写回)
   → scripts/report.py (Markdown 日报)  → scripts/push_report.py (推送)
                                     [Excel/Word 不在跑批产出, 按需人工生成:
@@ -49,6 +49,40 @@ global-policy-search skill 仍为交互式检索入口（会话补数走 `run_sc
 
 - 检索词库/源清单/国家优先级全部在 `config/sources.yaml`。
 - 政策影响写回用 `scripts/risk.py`(支持 `--list-pending` 列出待研判记录)。
+
+## 抽取通道（2026-11-18 起：直连 API + 6 路并发 + 模型钉死）
+
+抽取段只需要"一次确定性文本补全"，**不再用 Agent CLI 跑**。事故形状与实测数据见
+`docs/known-issues.md` M26（45 分钟那轮的真因：11-16 全局模型 M2.5→M3.1-Flash
+后，22% 的调用跑成 Agent 工具循环，加工段 7 分钟→36 分 45 秒）。
+
+- **通道**：`extract_records.py` 默认直连 Anthropic 兼容端点
+  (`https://api.minimaxi.com/anthropic`，key 读 `MINIMAX_CN_API_KEY`，在 `~/.hermes/.env`，永不入库)。
+  直连 = 无工具（结构上不可能跑偏）+ 无仓库上下文注入 + 无 CLI 启动开销。
+- **模型必须钉死**：`EXTRACT_MODEL`（默认 `MiniMax-M3.1-Flash`，**2026-11-18 用户拍板：
+  M2.5 将被淘汰，抽取段必须在 M3.1 上跑通**）。**不吃 `~/.hermes/config.yaml` 的
+  全局默认** —— 11-16 那次事故就是全局模型一换、仓库毫无记录、抽取段慢 5 倍。
+- **M3.1-Flash 的三个特性必须一起对付**（它比 M2.5 冗长）：
+  ① **输出冗长**：同一份 prompt，M2.5 的 out≈1026、M3.1 的 out≈2856；
+  ② **思考 token 也吃输出预算**（实测 `thinking_tokens≈800~1100`）→ 正文可用预算 =
+     `max_tokens − 思考 token`，故 `EXTRACT_MAX_TOKENS` 默认 **8000**（上限不是目标，
+     用不到不额外耗额度）；实测该端点**不支持** Anthropic 风格的 `thinking` 参数
+     （400 invalid_request），"关思考"这条路走不通；
+  ③ **截断后果重**：模型若在写正文前把预算烧光 → 一个 key=value 都没吐出来
+     （实测 kv=0）→ validate 判"缺标题" → 重试 → 再截断。三道防线：
+     prompt 末尾的**输出格式硬约束**（第一行必须就是 `record_type=policy`）、
+     `max_tokens` 给足、**失败重试时加预算重问**（`max_tokens × 2`，原样重问只会再截断）。
+- **并发**：`EXTRACT_WORKERS` 默认 6。worker 只做"调用+解析+校验"，主线程按完成
+  顺序做闸门与落盘（崩了不丢已完成的部分）。429 → 该份记失败、剩余留待下轮。
+- **额度上限是 MiniMax 的 Token Plan**（与 CLI 通道同一个 key、同一份额度）：
+  直连不新增额度风险，但**跑批当天若套餐打满，抽取段会拿到 429**（已按"快速失败、
+  剩余留待下轮"处理）。
+- **CLI 兜底**：`EXTRACT_BACKEND=cli` 时走 `HERMES_RUN_CMD`，但强制 `--safe-mode` +
+  显式 `-m`（**去掉 `--yolo` 并不能阻止模型调工具**，实测 1/4 仍跑偏）。
+- **回滚**：`EXTRACT_BACKEND=cli` + `EXTRACT_WORKERS=1`，只改环境变量、秒级退回。
+- **账目**：直连调用不写 hermes 的 `state.db`，抽取自记
+  `data/raw/<日期>/extract-usage.json`，`token_budget.py` 合并进当日合计 ——
+  **不做这一步预算闸门就瞎了**（抽取占当日用量 95%）。
 
 ## 取数内核(2026-10-29 起: urlwatch 移植版)
 

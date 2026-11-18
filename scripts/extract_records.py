@@ -6,8 +6,12 @@
 都是整轮全损(10-25 三连败实证)。本脚本把抽取切成**每份存档一次单轮调用**:
 
   对每个已存档但未抽取的 meta.json → 剥 head 后取正文摘录(≤8KB) + 字段模板拼 prompt
-  → 经 HERMES_RUN_CMD 模板发起 hermes -z(单轮, 无工具循环)
+  → **直连 Anthropic 兼容端点**发起单轮调用(无工具、无仓库上下文注入;
+    端点不可用时才回落 HERMES_RUN_CMD 的 CLI 通道)
   → 模型输出 key=value 行 → 本地解析校验 → 追加 extracted-policy.jsonl
+
+  2026-11-18 起默认走直连通道 + 6 路并发: 加工段 36 分 45 秒 → 约 1~2 分钟。
+  复盘与选型依据见文件头 EXTRACT_* 配置块。
 
 - 单份失败(429/超时/输出不合规格)只废那一份: 重试 1 次, 再失败记 search-log
   跳过; 剩余文档继续 —— 429 打不断管线, 只降级当轮覆盖;
@@ -29,16 +33,65 @@ import os
 import re
 import subprocess
 import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from normalize import biz_today, DATA_DIR
+from normalize import biz_today, biz_now, DATA_DIR
 import scope_guard  # 收录口径红线(动植物检疫 vs 食品安全)的单一判定来源
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CALL_TIMEOUT = 150          # 单次微调用上限(秒)
 SNIP_BYTES = 4096           # 每份文档进 prompt 的摘录上限(实际窗口 = SNIP_BYTES*2 字符)
 FILE_READ_BYTES = 1 << 20   # 单份存档最大读取字节(生产实测最大 ~340KB, 1MB 兜极端页)
+
+# ---- 抽取通道配置(2026-11-18 性能事故后引入, 全部可用环境变量覆盖)----
+#
+# 为什么要换通道(2026-11-18 生产复盘, 45 分钟那轮):
+#   抽取段只需要"一次确定性文本补全", 却用 Agent CLI(hermes --yolo -z)去跑,
+#   每份存档白付四笔成本:
+#     ① CLI 每次注入整个仓库上下文(AGENTS.md + skills + hermes-cli 工具集 schema)
+#        —— 实测 74 次抽取 in=1,043,779 token, 我们自己发的 prompt 只占 89,600,
+#        **91% 是注入的上下文**;
+#     ② CLI 进程启动 ~5s/份;
+#     ③ 拿到了全套工具(terminal/read_file/web_extract/execute_code) + max_turns=50
+#        —— 2026-11-16 全局模型换成 MiniMax-M3.1-Flash 后, 22% 的调用脱离
+#        "单轮"契约跑成 Agent 工具循环(均 70.7s, 最长 257.6s), 把加工段从
+#        7 分钟拖到 36 分 45 秒; 模型还真的去读 scope_guard.py、查生产库
+#        epidemic.db、web_extract 抓外网 —— 数据面拿到了执行面;
+#     ④ 折合 171 万 token/日, 而直连只要约 13 万(8%)。
+#   直连 Anthropic 兼容端点 = 无工具(结构上不可能跑偏) + 输入只有我们自己的
+#   prompt + 无启动开销 + 可并发。
+#
+# max_tokens 为什么给到 8000: 该端点把**思考 token 也算进输出预算**
+# (实测 output_tokens_details.thinking_tokens≈1100), 模型可用正文只剩
+# 剩下的部分 —— 给 1600/3000 都会在长记录上被截断(截断 = 字段缺失 =
+# validate 失败 = 重试 = 更慢)。这是 M3.1-Flash 2/6 截断的直接成因。
+#
+# 模型钉死: MiniMax-M3.1-Flash(2026-11-18 用户拍板 —— M2.5 将被淘汰, 抽取段
+# 必须在 M3.1 上跑通)。M3.1 的两个特性必须一起对付:
+#   ① **输出冗长**: 实测 M2.5 的 out≈1026, M3.1 的 out≈2856(同一份 prompt);
+#   ② **思考 token 也吃输出预算**: 实测 output_tokens_details.thinking_tokens
+#      ≈800~1100, 即"正文可用预算 = max_tokens − 思考 token"。
+#   截断的后果很重: 模型若在写正文前就把预算烧光 → 输出里一个 key=value 都没有
+#   (实测 kv=0) → validate 判"缺标题" → 重试 → 整份报废还多烧一次。
+#   对付手段(按实测效果定档): max_tokens 给足 + prompt 硬约束"第一行就是
+#   record_type=policy"+ 失败重试时加预算重问(见 call_model 的 max_tokens 覆盖)。
+EXTRACT_BACKEND = os.environ.get("EXTRACT_BACKEND", "auto").strip().lower()  # auto|api|cli
+EXTRACT_MODEL = os.environ.get("EXTRACT_MODEL", "MiniMax-M3.1-Flash").strip()
+EXTRACT_API_BASE = os.environ.get("EXTRACT_API_BASE_URL",
+                                  "https://api.minimaxi.com/anthropic").rstrip("/")
+EXTRACT_API_KEY_ENV = os.environ.get("EXTRACT_API_KEY_ENV", "MINIMAX_CN_API_KEY")
+EXTRACT_MAX_TOKENS = int(os.environ.get("EXTRACT_MAX_TOKENS", "8000") or 8000)
+EXTRACT_TIMEOUT = int(os.environ.get("EXTRACT_TIMEOUT", "90") or 90)
+EXTRACT_WORKERS = int(os.environ.get("EXTRACT_WORKERS", "6") or 6)
+# CLI 兜底通道是否强制 --safe-mode(数据面不该有工具)。实测: 去掉 --yolo 并不能
+# 阻止新模型发起工具调用(1/4 仍跑偏), 真正的开关是 --safe-mode。
+EXTRACT_CLI_SAFE = os.environ.get("EXTRACT_CLI_SAFE", "1") not in ("0", "false", "no")
 
 # 字段模板(与 Agent 版 prompt 同一套键, 空值模型会留空 → 存 null)
 FIELD_TEMPLATE = """record_type=policy
@@ -118,7 +171,9 @@ url=%s
 title=%s
 【原文摘录(逐字, 已截断)】
 %s
-现在只输出 key=value 行。"""
+现在只输出 key=value 行。
+【输出格式硬约束】第一行必须直接是 record_type=policy, 不得写任何前言、解释、标题、
+思考过程或代码块; 按上方字段清单顺序每行一个 key=value, 写满 27 行即止。"""
 
 
 # ---- 非政策内容筛查(确定性闸门)----
@@ -410,20 +465,126 @@ def _write_rejected(raw_dir, rec, url, reason):
         pass
 
 
-def call_model(prompt):
-    """经 HERMES_RUN_CMD 模板发起单轮调用, 返回 (rc, 输出文本)。"""
+def call_model_direct(prompt, max_tokens=None):
+    """直连 Anthropic 兼容端点(默认通道), 返回 (rc, 输出文本, usage)。
+
+    为什么这是默认(2026-11-18 生产复盘): 见文件头 EXTRACT_* 配置块的复盘。
+    一句话: 抽取是**数据面**, 不该是 Agent 面 —— 直连没有工具、没有 CLI 启动、
+    没有仓库上下文注入, 也就没有"跑偏成子 Agent"这件事。
+
+    max_tokens: 调用方可覆盖(M3.1-Flash 输出冗长 + 思考 token 吃预算, 截断的
+    补救手段之一就是"失败重试时加预算重问")。
+
+    rc: 0=成功 / 1=调用或网络失败 / 2=通道未配置(缺 key) / 124=超时。
+    """
+    key = (os.environ.get(EXTRACT_API_KEY_ENV) or "").strip()
+    if not key:
+        return 2, "未配置 %s(直连通道不可用)" % EXTRACT_API_KEY_ENV, None
+    url = EXTRACT_API_BASE + "/v1/messages"
+    body = json.dumps({
+        "model": EXTRACT_MODEL,
+        "max_tokens": int(max_tokens or EXTRACT_MAX_TOKENS),
+        "messages": [{"role": "user", "content": prompt}],
+    }).encode("utf-8")
+    req = urllib.request.Request(url, data=body, method="POST", headers={
+        "x-api-key": key,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=EXTRACT_TIMEOUT) as resp:
+            raw = resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", "replace")[:200]
+        except Exception:
+            pass
+        # 429 会走到这里, 调用方按 "429" 字样识别 → 提前收尾(与旧语义一致)
+        return 1, "HTTP %s: %s" % (exc.code, detail), None
+    except Exception as exc:
+        return 1, "%s: %s" % (type(exc).__name__, str(exc)[:180]), None
+    try:
+        d = json.loads(raw)
+    except ValueError:
+        return 1, "响应不是 JSON: %s" % raw[:160], None
+    text = "".join(b.get("text") or "" for b in (d.get("content") or [])
+                   if isinstance(b, dict) and b.get("type") == "text")
+    usage = d.get("usage") or {}
+    if not text.strip():
+        # 空输出几乎总是"输出被 max_tokens 截断"(M3.1-Flash 实测 2/6 如此)
+        return 1, "空输出(可能被 max_tokens=%d 截断)" % EXTRACT_MAX_TOKENS, usage
+    return 0, text, usage
+
+
+def _cli_command(prompt):
+    """拼 CLI 兜底通道的命令行: 钉死模型 + 默认 --safe-mode。"""
     tpl = os.environ.get("HERMES_RUN_CMD") or 'hermes --yolo -z "{PROMPT}"'
     if "{PROMPT}" not in tpl:
-        return 2, "HERMES_RUN_CMD 缺 {PROMPT} 占位符"
-    cmd = tpl.replace("{PROMPT}", prompt.replace('"', "」"))
+        return None, "HERMES_RUN_CMD 缺 {PROMPT} 占位符"
+    # 模型钉死: 抽取不吃 ~/.hermes/config.yaml 的全局默认 —— 2026-11-16 全局模型
+    # 一换, 64 份抽取的耗时立刻从 7 分钟涨到 36 分 45 秒, 而仓库里毫无记录。
+    if " -m " not in tpl:
+        parts = tpl.split(None, 1)
+        tpl = parts[0] + " -m " + EXTRACT_MODEL + ((" " + parts[1]) if len(parts) > 1 else "")
+    if EXTRACT_CLI_SAFE and "--safe-mode" not in tpl:
+        parts = tpl.split(None, 1)
+        tpl = parts[0] + " --safe-mode" + ((" " + parts[1]) if len(parts) > 1 else "")
+    return tpl.replace("{PROMPT}", prompt.replace('"', "」")), None
+
+
+def call_model_cli(prompt):
+    """CLI 兜底通道, 返回 (rc, 输出文本, usage)。"""
+    cmd, err = _cli_command(prompt)
+    if cmd is None:
+        return 2, err, None
     try:
         p = subprocess.run(cmd, shell=True, capture_output=True, text=True,
                            errors="replace", timeout=CALL_TIMEOUT)
     except subprocess.TimeoutExpired:
-        return 124, "超时"
+        return 124, "超时", None
     except OSError as exc:
-        return 1, str(exc)
-    return p.returncode, (p.stdout or "") + (p.stderr or "")
+        return 1, str(exc), None
+    return p.returncode, (p.stdout or "") + (p.stderr or ""), None
+
+
+_USAGE = {"calls": 0, "input_tokens": 0, "output_tokens": 0}
+_USAGE_LOCK = threading.Lock()
+
+
+def _record_usage(usage):
+    """把本次调用的 usage 累加进模块级计数(直连通道才有)。"""
+    if not usage:
+        return
+    with _USAGE_LOCK:
+        _USAGE["calls"] += 1
+        _USAGE["input_tokens"] += int(usage.get("input_tokens") or 0)
+        _USAGE["output_tokens"] += int(usage.get("output_tokens") or 0)
+
+
+def backend_name():
+    """本轮实际用的通道: api / cli。auto = 有 key 走 api, 否则回落 cli。"""
+    if EXTRACT_BACKEND in ("api", "cli"):
+        return EXTRACT_BACKEND
+    return "api" if (os.environ.get(EXTRACT_API_KEY_ENV) or "").strip() else "cli"
+
+
+def call_model(prompt, max_tokens=None):
+    """派发到具体通道, 返回 (rc, 输出文本) —— 两元组契约保持不变(旧测试/旧调用方依赖)。
+
+    2026-11-18: 内部换成"直连 API 优先, CLI 兜底", 但**对外仍是 (rc, out)**,
+    usage 走模块级计数落台账, 不塞进返回值里。
+    max_tokens: 仅直连通道支持覆盖(CLI 兜底忽略, 模板里已无该参数)。
+    """
+    if backend_name() == "api":
+        rc, out, usage = call_model_direct(prompt, max_tokens=max_tokens)
+        if rc == 2:
+            # 直连没配 key → 回落 CLI(宁可慢, 不能断链)
+            rc2, out2, _ = call_model_cli(prompt)
+            return rc2, out2
+        _record_usage(usage)
+        return rc, out
+    return call_model_cli(prompt)[:2]
 
 
 def parse_kv_output(text):
@@ -507,6 +668,55 @@ def validate(rec, url):
     return None
 
 
+def _pct(values, q):
+    """百分位(就地排序副本)。values 为空返回 0.0。"""
+    if not values:
+        return 0.0
+    s = sorted(values)
+    idx = min(len(s) - 1, int(len(s) * q))
+    return s[idx]
+
+
+def _write_usage(raw_dir, date_str, backend, model, st, times):
+    """把抽取用量落到 extract-usage.json(累加, 多次跑批不丢账)。
+
+    为什么必须自己记(2026-11-18): 直连通道不写 hermes 的 state.db, 而
+    token_budget.py 是从 state.db 汇总当日用量的 —— 不记这一笔, 预算闸门
+    会对抽取段完全失明(而抽取正是当日用量的 95%)。
+    """
+    path = os.path.join(raw_dir, "extract-usage.json")
+    prev = {"calls": 0, "input_tokens": 0, "output_tokens": 0}
+    try:
+        if os.path.isfile(path):
+            with open(path, encoding="utf-8") as f:
+                old = json.load(f)
+            for k in prev:
+                prev[k] = int(old.get(k) or 0)
+    except (OSError, ValueError):
+        pass
+    row = {
+        "date": date_str,
+        "backend": backend,
+        "model": model,
+        "calls": prev["calls"] + int(st.get("calls") or 0),
+        "input_tokens": prev["input_tokens"] + int(st.get("input_tokens") or 0),
+        "output_tokens": prev["output_tokens"] + int(st.get("output_tokens") or 0),
+        "p50_sec": round(_pct(times, 0.5), 2),
+        "p90_sec": round(_pct(times, 0.9), 2),
+        "max_sec": round(max(times) if times else 0.0, 2),
+        "updated_at": biz_now(),
+    }
+    try:
+        os.makedirs(raw_dir, exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(row, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+    return row
+
+
 def extract(date_str, log=print):
     today = biz_today()
     raw_dir = os.path.join(DATA_DIR, "raw", date_str)
@@ -517,49 +727,110 @@ def extract(date_str, log=print):
         log("[extract_records] %s: 无待抽取存档(共 %d 份, 已抽 %d)"
             % (date_str, len(load_archives(date_str)), len(skip)))
         return 0, 0
-    n_ok = n_fail = n_reject = 0
-    log("[extract_records] %s: 待抽取 %d 份" % (date_str, len(archives)))
-    for mp, meta, url, body in archives:
+    backend = backend_name()
+    workers = max(1, EXTRACT_WORKERS)
+    n_ok = n_fail = n_reject = n_skip = 0
+    # 模块级 usage 计数归零: 它只反映**本轮**调用(跨轮累计由台账文件负责)
+    with _USAGE_LOCK:
+        for k in _USAGE:
+            _USAGE[k] = 0
+    log("[extract_records] %s: 待抽取 %d 份 (通道=%s 模型=%s 并发=%d)"
+        % (date_str, len(archives), backend, EXTRACT_MODEL, workers))
+
+    stop = threading.Event()
+    times = []
+
+    def worker(idx, mp, meta, url, body):
+        """worker 只做"调用 + 解析 + 校验"; 闸门与落盘留给主线程(单线程写文件)。
+
+        返回 (idx, url, rec, status, err, elapsed); status ∈ ok/skip/quota/fail。
+        """
+        if stop.is_set():
+            return idx, url, None, "skip", "前序遇 429, 本份留待下轮", 0.0
         prompt = build_prompt(meta, url, body, today)
-        rec = None
+        last = "未知"
+        t0 = time.time()
         for attempt in (1, 2):
-            rc, out = call_model(prompt)
+            # M3.1-Flash 的头号失败模式是"输出被截断"(思考 token + 冗长输出把预算烧光,
+            # 极端情况一个 key=value 都没吐出来)。失败重试时**加预算重问**, 而不是
+            # 原样再问一遍 —— 后者只会再截断一次。
+            # 第一次保持原调用签名(老测试的 mock 只接受一个参数), 第二次才带预算覆盖。
+            if attempt == 1:
+                rc, out = call_model(prompt)
+            else:
+                rc, out = call_model(prompt, max_tokens=EXTRACT_MAX_TOKENS * 2)
             if rc == 0:
                 cand = parse_kv_output(out)
                 err = validate(cand, url)
                 if err is None:
-                    rec = cand
-                    break
+                    return idx, url, cand, "ok", None, time.time() - t0
                 last = "输出不合规格: %s" % err
             else:
                 last = "调用失败 rc=%s: %s" % (rc, _clean(out)[:120])
                 if "429" in out or "Token Plan" in out:
-                    # 预算耗尽: 快速失败, 剩余文档不烧重试
-                    log("[extract_records][WARN] Token Plan 耗尽, 剩余 %d 份留待下轮"
-                        % (len(archives) - n_ok - n_fail - 1))
-                    _log_line(raw_dir, "| 抽取 | 中断 | Token Plan 耗尽(429) |")
-                    return n_ok, n_fail + 1
-        if rec is None:
-            n_fail += 1
-            _log_line(raw_dir, "| 抽取 | 失败 | %s %s |" % (url[:70], _clean(last)[:60]))
-            log("[extract_records][WARN] 失败: %s (%s)" % (url[:70], _clean(last)[:80]))
-            continue
-        # 非政策内容闸门(2026-10-27): 会议/表彰/装运/栏目页等不入库
-        reject, why = screen_non_policy(rec)
-        if reject:
-            n_reject += 1
-            _write_rejected(raw_dir, rec, url, why)
-            _log_line(raw_dir, "| 抽取 | 拒收 | 非政策内容 %s %s |"
-                      % (why[:40], url[:60]))
-            log("[extract_records] 拒收(非政策内容): %s (%s)"
-                % ((rec.get("title_cn") or url)[:60], why))
-            continue
-        with open(out_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-        n_ok += 1
-        log("[extract_records] ok: %s" % (rec.get("title_cn") or url)[:70])
+                    stop.set()
+                    return idx, url, None, "quota", "Token Plan 耗尽(429)", time.time() - t0
+        return idx, url, None, "fail", last, time.time() - t0
+
+    # 并发跑: 64 份互相独立, 串行是纯浪费(实测 6 并发 4.8× 加速)。
+    # 结果按**完成顺序**处理(不是存档顺序) —— 换来的是"崩了也不丢已完成的部分":
+    # 每份一完成就落盘, 中途被杀不会把整轮成果带走。落盘顺序不影响台账语义
+    # (同一 event_id 的记录按"空值不覆盖"合并, 与顺序无关)。
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = [ex.submit(worker, i, *a) for i, a in enumerate(archives)]
+        for fut in as_completed(futs):
+            try:
+                idx, url, rec, status, err, el = fut.result()
+            except Exception as exc:  # worker 崩了不许带走整轮
+                idx, url, rec, status, err, el = -1, "?", None, "fail", "worker 异常: %s" % exc, 0.0
+            times.append(el)
+            if status == "ok":
+                # 非政策内容闸门(2026-10-27): 会议/表彰/装运/栏目页等不入库
+                reject, why = screen_non_policy(rec)
+                if reject:
+                    n_reject += 1
+                    _write_rejected(raw_dir, rec, url, why)
+                    _log_line(raw_dir, "| 抽取 | 拒收 | 非政策内容 %s %s |"
+                              % (why[:40], url[:60]))
+                    log("[extract_records] 拒收(非政策内容): %s (%s)"
+                        % ((rec.get("title_cn") or url)[:60], why))
+                    continue
+                try:
+                    with open(out_path, "a", encoding="utf-8") as f:
+                        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                except OSError as exc:
+                    n_fail += 1
+                    log("[extract_records][WARN] 落盘失败 %s: %s" % (url[:60], exc))
+                    continue
+                n_ok += 1
+                log("[extract_records] ok: %s" % (rec.get("title_cn") or url)[:70])
+            elif status == "skip":
+                n_skip += 1
+                log("[extract_records][WARN] 跳过: %s (%s)" % (url[:60], err))
+            elif status == "quota":
+                # Token Plan 耗尽: 本份记失败, 剩余文档不烧重试(留待下轮)
+                # 注意: 这里的 429 是 **MiniMax 账号的 Token Plan 套餐上限**
+                # (报错原文: "已达到 Token Plan 用量上限: 请升级 Token Plan 套餐或购买
+                # 积分补充用量 (2056)"), 不是我们的内部预算闸门 —— token_budget.py
+                # 此刻可能还显示"预算内"。两码事, 别混。
+                n_fail += 1
+                _log_line(raw_dir, "| 抽取 | 中断 | Token Plan 耗尽(429) |")
+                log("[extract_records][WARN] Token Plan 耗尽(账号套餐上限, 非内部预算), "
+                    "剩余 %d 份留待下轮"
+                    % (len(archives) - n_ok - n_fail - n_skip))
+            else:
+                n_fail += 1
+                _log_line(raw_dir, "| 抽取 | 失败 | %s %s |" % (url[:70], _clean(err or "")[:60]))
+                log("[extract_records][WARN] 失败: %s (%s)" % (url[:70], _clean(err or "")[:80]))
+
     if n_reject:
         log("[extract_records] 本轮拒收非政策内容 %d 份(已写 rejected-policy.jsonl)" % n_reject)
+    if n_skip:
+        log("[extract_records][WARN] %d 份因 429 留待下轮" % n_skip)
+    row = _write_usage(raw_dir, date_str, backend, EXTRACT_MODEL, _USAGE, times)
+    log("[extract_records] 用量: 调用 %d 次 输入 %d / 输出 %d token | 单份 p50=%.1fs p90=%.1fs max=%.1fs"
+        % (row["calls"], row["input_tokens"], row["output_tokens"],
+           row["p50_sec"], row["p90_sec"], row["max_sec"]))
     return n_ok, n_fail
 
 

@@ -27,12 +27,13 @@
 
 import argparse
 import datetime
+import json
 import os
 import sqlite3
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from normalize import biz_today  # 同级导入, 业务时区口径与 channel_health 一致
+from normalize import biz_today, DATA_DIR  # 同级导入, 业务时区口径与 channel_health 一致
 
 BIZ_TZ = datetime.timezone(datetime.timedelta(hours=8))
 DEFAULT_BUDGET = 4000000        # 折合 token/日; 基线健康日 ~70 万, 留重试余量
@@ -79,6 +80,26 @@ def summarize(db_path, start, end):
         con.close()
 
 
+def _extract_usage(date_str):
+    """抽取段的用量台账(直连通道自记, 不进 state.db)。
+
+    2026-11-18 起抽取改直连 Anthropic 兼容端点, 那批调用**不再写 hermes 的
+    state.db** —— 而 state.db 是本脚本的唯一数据源。不补这一笔, 预算闸门
+    对当日用量的主体(抽取段, 实测占 95%)完全失明。
+    返回 (输入, 输出, 调用次数, 后端, 模型); 读不到返回全零。
+    """
+    path = os.path.join(DATA_DIR, "raw", date_str, "extract-usage.json")
+    if not os.path.isfile(path):
+        return 0, 0, 0, "", ""
+    try:
+        with open(path, encoding="utf-8") as f:
+            row = json.load(f)
+    except (OSError, ValueError):
+        return 0, 0, 0, "", ""
+    return (int(row.get("input_tokens") or 0), int(row.get("output_tokens") or 0),
+            int(row.get("calls") or 0), row.get("backend") or "", row.get("model") or "")
+
+
 def main():
     ap = argparse.ArgumentParser(description="东八区当日 Hermes token 用量/预算检查(只读)")
     ap.add_argument("--date", default=biz_today(), help="业务日期 YYYY-MM-DD(默认东八区今天)")
@@ -97,8 +118,18 @@ def main():
         print("[token_budget] 日期格式应为 YYYY-MM-DD: %s" % args.date)
         return 2
 
+    ex_in, ex_out, ex_n, ex_backend, ex_model = _extract_usage(args.date)
     if not os.path.isfile(args.db):
         # fail-open: 测不到就不拦(本机开发机没有 state.db 是常态)
+        # —— 但抽取台账仍要显示, 否则直连通道的用量就彻底没人看见了。
+        if ex_n:
+            units = ex_in + ex_out
+            print("[token_budget] %s(东八区) 找不到 state.db(%s), 仅有抽取台账: "
+                  "调用 %d 次 输入 %d / 输出 %d" % (args.date, args.db, ex_n, ex_in, ex_out))
+            verdict = "已达预算上限" if units >= args.budget else "预算内"
+            print("[token_budget] 折合消耗 %d / 预算 %d —— %s"
+                  % (round(units), round(args.budget), verdict))
+            return 3 if units >= args.budget else 0
         print("[token_budget][WARN] 找不到 state.db(%s), 无法统计, 放行(不拦跑批)" % args.db)
         return 0
     try:
@@ -107,9 +138,20 @@ def main():
         print("[token_budget][WARN] state.db 读取失败(%s), 放行(不拦跑批)" % exc)
         return 0
 
+    if ex_n:
+        # 抽取段用量并入当日总量(直连通道不写 state.db, 只能从台账补)
+        in_t += ex_in
+        out_t += ex_out
+        n += ex_n
+        top = list(top) + [("[抽取段·直连 %s/%s]" % (ex_backend or "api", ex_model or "-"),
+                            ex_in, ex_out, 0)]
+
     units = in_t + out_t + cr * args.cache_weight
     print("[token_budget] %s(东八区) Hermes 会话 %d 个: 输入 %d / 输出 %d / cache读 %d(权重%.2f)" % (
         args.date, n, in_t, out_t, cr, args.cache_weight))
+    if ex_n:
+        print("[token_budget]   · 抽取段直连: 调用 %d 次 输入 %d / 输出 %d(已并入上列合计)"
+              % (ex_n, ex_in, ex_out))
     for t, i2, o2, c2 in top:
         print("[token_budget]   · %s(输入 %d / 输出 %d / cache读 %d)" % (
             (t or "(无标题)")[:40].replace("|", " "), i2, o2, c2))

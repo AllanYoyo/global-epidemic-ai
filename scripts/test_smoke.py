@@ -4898,5 +4898,171 @@ class FoodScopeTests(unittest.TestCase):
         self.assertIn("残留限量", extract_records.SCOPE_RULES)
 
 
+class ExtractionChannelTests(unittest.TestCase):
+    """抽取通道回归防线(2026-11-18 性能事故 M26)。
+
+    那天的形状: 抽取段用 Agent CLI 跑"文本补全", 全局模型一换(M2.5 →
+    M3.1-Flash), 22% 的调用跑成 Agent 工具循环, 加工段从 7 分钟涨到 36 分
+    45 秒。这几条把新契约钉死, 全离线, 不联网。
+    """
+
+    def _er(self):
+        import extract_records
+        return extract_records
+
+    def test_cli_command_pins_model_and_safe_mode(self):
+        """CLI 兜底通道必须钉死模型 + safe-mode(数据面不该有工具)。"""
+        er = self._er()
+        with mock.patch.dict(os.environ, {"HERMES_RUN_CMD": 'hermes --yolo -z "{PROMPT}"'},
+                             clear=False):
+            cmd, err = er._cli_command("测试提示词")
+        self.assertIsNone(err)
+        self.assertIn("-m %s" % er.EXTRACT_MODEL, cmd)
+        self.assertIn("--safe-mode", cmd)
+
+    def test_cli_command_keeps_existing_model_flag(self):
+        """模板里已有 -m 时不重复注入。"""
+        er = self._er()
+        with mock.patch.dict(os.environ, {"HERMES_RUN_CMD": 'hermes -m Foo -z "{PROMPT}"'},
+                             clear=False):
+            cmd, _ = er._cli_command("x")
+        self.assertEqual(cmd.count("-m "), 1)
+        self.assertIn("-m Foo", cmd)
+
+    def test_backend_switch_respects_env(self):
+        """EXTRACT_BACKEND=cli/api 显式指定时不被 key 有无覆盖。"""
+        er = self._er()
+        with mock.patch.object(er, "EXTRACT_BACKEND", "cli"):
+            self.assertEqual(er.backend_name(), "cli")
+        with mock.patch.object(er, "EXTRACT_BACKEND", "api"):
+            self.assertEqual(er.backend_name(), "api")
+
+    def test_default_model_is_m31_flash(self):
+        """默认模型必须是 M3.1-Flash。
+
+        2026-11-18 用户拍板: M2.5 将被淘汰, 抽取段必须在 M3.1-Flash 上跑通。
+        """
+        import importlib
+        env = {k: v for k, v in os.environ.items() if k != "EXTRACT_MODEL"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            import extract_records
+            importlib.reload(extract_records)
+            self.assertEqual(extract_records.EXTRACT_MODEL, "MiniMax-M3.1-Flash")
+
+    def test_retry_raises_token_budget(self):
+        """第一次输出不合规格 → 重试必须**加预算**再问(M3.1-Flash 截断对策)。
+
+        原样重问只会再截断一次(白烧一次调用还可能整份报废)。
+        """
+        import extract_records as er
+        raw_dir = os.path.join(TMP, "raw", "2026-11-18")
+        os.makedirs(raw_dir, exist_ok=True)
+        with open(os.path.join(raw_dir, "01-y.meta.json"), "w", encoding="utf-8") as f:
+            json.dump({"title": "乙", "url": "https://official.example/b"}, f)
+        with open(os.path.join(raw_dir, "01-y.txt"), "w", encoding="utf-8") as f:
+            f.write("原文内容 乙政策 2026-11-18")
+        seen = []
+
+        def fake_call(prompt, max_tokens=None):
+            seen.append(max_tokens)
+            if len(seen) == 1:
+                return 0, "record_type=policy\ntitle_cn=甲"   # 缺 url/quote → 不合规
+            return 0, "record_type=policy\ntitle_cn=乙\n" \
+                      "source_url=https://official.example/b\nsource_quote=乙政策原文摘录\n" \
+                      "country_cn=甲国\ncountry_en=Alfa\npolicy_domain=plant\n" \
+                      "action_type=收紧\nevent_date=2026-11-18\nsummary_cn=乙政策摘要\n" \
+                      "source_tier=1\nsource_name=官方\nimpact_type=约束\n" \
+                      "china_relevance=暂无明显关联\ndim_trade=1\ndim_biosecurity=1\n" \
+                      "dim_response=1\ndim_alignment=1\nimpact_rationale=理由\n"
+        try:
+            with mock.patch.object(er, "call_model", side_effect=fake_call), \
+                    mock.patch.object(er, "DATA_DIR", TMP):
+                n_ok, n_fail = er.extract("2026-11-18")
+            self.assertEqual((n_ok, n_fail), (1, 0))
+            self.assertEqual(len(seen), 2)
+            self.assertIsNone(seen[0], "第一次不该带预算覆盖")
+            self.assertEqual(seen[1], er.EXTRACT_MAX_TOKENS * 2,
+                             "重试必须加预算")
+        finally:
+            shutil.rmtree(raw_dir, ignore_errors=True)
+
+    def test_max_tokens_leaves_room_for_thinking(self):
+        """该端点把思考 token 也算进输出预算(实测 thinking≈800~1100), max_tokens 太小会截断。
+
+        截断 = 字段缺失 = validate 失败 = 重试 = 更慢(M3.1-Flash 2/6 如此)。
+        M2.5 退场后 M3.1 是唯一可选模型, 这条从"建议"变成"必须"。
+        """
+        er = self._er()
+        self.assertGreaterEqual(er.EXTRACT_MAX_TOKENS, 8000)
+
+    def test_usage_ledger_accumulates(self):
+        """抽取用量台账: 跨跑批累加(直连不写 state.db, 预算闸门靠它)。"""
+        er = self._er()
+        raw_dir = os.path.join(TMP, "raw", "2026-11-18")
+        os.makedirs(raw_dir, exist_ok=True)
+        try:
+            row = er._write_usage(raw_dir, "2026-11-18", "api", "MiniMax-M3.1-Flash",
+                                  {"calls": 64, "input_tokens": 90000, "output_tokens": 66000},
+                                  [6.0, 7.0, 8.0, 9.0])
+            self.assertEqual(row["calls"], 64)
+            self.assertEqual(row["input_tokens"], 90000)
+            self.assertEqual(row["p50_sec"], 8.0)
+            row2 = er._write_usage(raw_dir, "2026-11-18", "api", "MiniMax-M3.1-Flash",
+                                   {"calls": 1, "input_tokens": 100, "output_tokens": 100},
+                                   [1.0])
+            self.assertEqual(row2["calls"], 65)
+            self.assertEqual(row2["input_tokens"], 90100)
+        finally:
+            shutil.rmtree(raw_dir, ignore_errors=True)
+
+    def test_budget_reads_extraction_ledger(self):
+        """预算侧必须能把抽取台账并进当日合计(否则闸门对 95% 的用量失明)。"""
+        import token_budget
+        raw_dir = os.path.join(TMP, "raw", "2026-11-18")
+        os.makedirs(raw_dir, exist_ok=True)
+        try:
+            with open(os.path.join(raw_dir, "extract-usage.json"), "w", encoding="utf-8") as f:
+                json.dump({"calls": 7, "input_tokens": 1000, "output_tokens": 500,
+                           "backend": "api", "model": "MiniMax-M3.1-Flash"}, f)
+            with mock.patch.object(token_budget, "DATA_DIR", TMP):
+                in_t, out_t, n, backend, model = token_budget._extract_usage("2026-11-18")
+            self.assertEqual((n, in_t, out_t), (7, 1000, 500))
+            self.assertEqual(backend, "api")
+        finally:
+            shutil.rmtree(raw_dir, ignore_errors=True)
+
+    def test_scope_refresh_requires_report(self):
+        """锁刷新只在当日日报已生成时允许(残锁防线不拆)。"""
+        import push_scope
+        date = "2099-12-31"
+        with mock.patch.object(push_scope, "SCOPE_DIR", os.path.join(TMP, "scope")):
+            push_scope.write_scope(date, "broadcast", source="run_scan.sh:policy:显式参数")
+            rc, msg = push_scope.refresh_scope(date)
+            self.assertEqual(rc, 1)
+            self.assertIn("日报未生成", msg)
+            # 造一份日报 → 允许刷新, 且 scope/source 不变
+            os.makedirs(os.path.join(TMP, "reports"), exist_ok=True)
+            with open(push_scope.report_path(date), "w", encoding="utf-8") as f:
+                f.write("# 测试日报\n")
+            rc2, _ = push_scope.refresh_scope(date)
+            self.assertEqual(rc2, 0)
+            scope = push_scope.read_scope(date)
+            self.assertEqual(scope.get("scope"), "broadcast")
+            self.assertEqual(scope.get("source"), "run_scan.sh:policy:显式参数")
+            self.assertIn("锁已刷新", scope.get("note") or "")
+            push_scope.clear_scope(date)
+
+    def test_run_scan_exports_extract_env(self):
+        """run_scan.sh 必须导出抽取通道变量(否则生产吃不到新默认值)。"""
+        with open(os.path.join(REPO, "scripts", "run_scan.sh"), encoding="utf-8") as f:
+            text = f.read()
+        for key in ("EXTRACT_BACKEND", "EXTRACT_MODEL", "EXTRACT_WORKERS",
+                    "EXTRACT_MAX_TOKENS", "EXTRACT_API_BASE_URL"):
+            self.assertIn(key, text)
+        # 推送前必须刷新广播锁(跑得慢的日子不能被 75 分钟窗口判过期)
+        self.assertIn("push_scope.py", text)
+        self.assertIn("--refresh", text)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

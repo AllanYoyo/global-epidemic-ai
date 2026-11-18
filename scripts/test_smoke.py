@@ -5134,6 +5134,149 @@ class ExtractionChannelTests(unittest.TestCase):
             text = f.read()
         self.assertIn('export "$EXTRACT_API_KEY_ENV"', text)
 
+    # ---- 跨天补抽(2026-11-18, 用户"别把刚检索的新内容给丢了") ----
+    #
+    # 洞: 抽取失败(429 / 输出不合规格)的存档只在**当天**的 search-log.md 留痕,
+    # 而 done_urls 只认两个 jsonl —— 跨天后没有任何机制会再抽它。
+    # 实测 11-11~11-18 八天共 36 份抽取失败, 其中 35 份被重抓自愈,
+    # **真正从未入账 1 份**(只被一个源抓到过的那种)。
+
+    def _mk_archive(self, raw_dir, name, url, title="测试政策"):
+        os.makedirs(raw_dir, exist_ok=True)
+        with open(os.path.join(raw_dir, name + ".meta.json"), "w", encoding="utf-8") as f:
+            json.dump({"title": title, "url": url}, f)
+        with open(os.path.join(raw_dir, name + ".txt"), "w", encoding="utf-8") as f:
+            f.write("原文内容 %s 植物检疫证书要求 2026-11-17" % title)
+
+    def _carry_root(self, tag):
+        """每个补抽用例用**自己的**数据根目录。
+
+        必须隔离: TMP 是整个测试进程共享的, 补抽用例会写 search-log.md /
+        extracted-policy.jsonl —— 共用目录会让先跑的用例把后跑的用例的存档
+        标成"已处理"或"已失败 N 次", 互相污染(2026-11-18 实测踩到)。
+        """
+        d = os.path.join(TMP, "carry-" + tag)
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    def _carry_rec(self, url, title="补抽政策"):
+        return ("record_type=policy\ntitle_cn=%s\nsource_url=%s\n"
+                "source_quote=植物检疫证书原文摘录\ncountry_cn=甲国\ncountry_en=Alfa\n"
+                "policy_domain=plant\naction_type=收紧\nevent_date=2026-11-17\n"
+                "summary_cn=补抽到的摘要\nsource_tier=1\nsource_name=官方\n"
+                "impact_type=约束\nchina_relevance=暂无明显关联\ndim_trade=1\n"
+                "dim_biosecurity=1\ndim_response=1\ndim_alignment=1\n"
+                "impact_rationale=理由\n" % (title, url))
+
+    def test_carry_finds_pending_from_previous_day(self):
+        """前几天抽失败(没进 done_urls)的存档必须被带出来补抽。"""
+        er = self._er()
+        root = self._carry_root("find")
+        y = os.path.join(root, "raw", "2026-11-17")
+        t = os.path.join(root, "raw", "2026-11-18")
+        self._mk_archive(y, "01-a", "https://official.example/lost")
+        self._mk_archive(t, "01-b", "https://official.example/today")
+        with mock.patch.object(er, "DATA_DIR", root):
+            pend = er.pending_carry("2026-11-18", days=2, skip_keys=set())
+        self.assertEqual(len(pend), 1)
+        self.assertEqual(pend[0][0], "2026-11-17")
+        self.assertEqual(pend[0][3], "https://official.example/lost")
+
+    def test_carry_skips_content_already_in_ledger(self):
+        """内容已在台账里的**不补**(否则台账会多出近重复记录)。"""
+        er = self._er()
+        root = self._carry_root("skip")
+        y = os.path.join(root, "raw", "2026-11-17")
+        self._mk_archive(y, "01-a", "https://official.example/lost")
+        with mock.patch.object(er, "DATA_DIR", root):
+            pend = er.pending_carry("2026-11-18", days=2,
+                                     skip_keys={"https://official.example/lost"})
+        self.assertEqual(pend, [])
+
+    def test_carry_respects_max_attempts(self):
+        """失败次数达上限的不再补 —— 防无限重试(也防烧 token)。"""
+        er = self._er()
+        root = self._carry_root("attempts")
+        y = os.path.join(root, "raw", "2026-11-17")
+        self._mk_archive(y, "01-a", "https://official.example/lost")
+        with open(os.path.join(y, "search-log.md"), "w", encoding="utf-8") as f:
+            for _ in range(3):
+                f.write("| 抽取 | 失败 | https://official.example/lost 输出不合规格 |\n")
+        with mock.patch.object(er, "DATA_DIR", root), \
+                mock.patch.object(er, "EXTRACT_CARRY_MAX_ATTEMPTS", 3):
+            pend = er.pending_carry("2026-11-18", days=2, skip_keys=set())
+        self.assertEqual(pend, [])
+
+    def test_doc_key_groups_wto_attachments(self):
+        """同一份 WTO 通报的 _s/_e/_x 附件算同一件事(只比 URL 会漏判)。"""
+        er = self._er()
+        k = "https://members.wto.org/crnattachments/2026/SPS/NIC/26_05892_00"
+        self.assertEqual(er._doc_key(k + "_s.pdf"), er._doc_key(k + "_e.pdf"))
+        self.assertNotEqual(er._doc_key(k + "_s.pdf"),
+                            er._doc_key("https://members.wto.org/crnattachments/"
+                                        "2026/SPS/NIC/26_05902_00_s.pdf"))
+
+    def test_carry_writes_done_marker_to_source_day(self):
+        """补抽成功: 当天 jsonl(入库) + 源日期 jsonl(已处理标记, 明天不再补)。"""
+        er = self._er()
+        root = self._carry_root("marker")
+        y = os.path.join(root, "raw", "2026-11-17")
+        t = os.path.join(root, "raw", "2026-11-18")
+        self._mk_archive(y, "01-a", "https://official.example/lost")
+
+        def fake_call(prompt, max_tokens=None):
+            return 0, self._carry_rec("https://official.example/lost")
+
+        with mock.patch.object(er, "DATA_DIR", root), \
+                mock.patch.object(er, "call_model", side_effect=fake_call), \
+                mock.patch.object(er, "ledger_doc_keys", return_value=set()):
+            n_ok, n_fail = er.run_carry("2026-11-18")
+        self.assertEqual((n_ok, n_fail), (1, 0))
+        tp = os.path.join(t, "extracted-policy.jsonl")
+        yp = os.path.join(y, "extracted-policy.jsonl")
+        self.assertTrue(os.path.isfile(tp))
+        self.assertTrue(os.path.isfile(yp))
+        self.assertEqual(sum(1 for l in open(tp, encoding="utf-8") if l.strip()), 1)
+        self.assertEqual(sum(1 for l in open(yp, encoding="utf-8") if l.strip()), 1)
+        # 再跑一次: 已处理标记生效, 不该再补
+        with mock.patch.object(er, "DATA_DIR", root), \
+                mock.patch.object(er, "call_model", side_effect=fake_call), \
+                mock.patch.object(er, "ledger_doc_keys", return_value=set()):
+            n_ok2, n_fail2 = er.run_carry("2026-11-18")
+        self.assertEqual((n_ok2, n_fail2), (0, 0))
+
+    def test_carry_fails_safe_when_ledger_unreadable(self):
+        """读不到台账就放弃补抽 —— 宁可不补, 也不往台账塞近重复记录。"""
+        er = self._er()
+        root = self._carry_root("failsafe")
+        self._mk_archive(os.path.join(root, "raw", "2026-11-17"), "01-a",
+                         "https://official.example/lost")
+        with mock.patch.object(er, "DATA_DIR", root), \
+                mock.patch.object(er, "ledger_doc_keys", return_value=None):
+            n_ok, n_fail = er.run_carry("2026-11-18")
+        self.assertEqual((n_ok, n_fail), (0, 0))
+
+    def test_carry_can_be_disabled(self):
+        """EXTRACT_CARRY_DAYS=0 一键关闭补抽。"""
+        er = self._er()
+        root = self._carry_root("off")
+        self._mk_archive(os.path.join(root, "raw", "2026-11-17"), "01-a",
+                         "https://official.example/lost")
+        with mock.patch.object(er, "DATA_DIR", root), \
+                mock.patch.object(er, "EXTRACT_CARRY_DAYS", 0):
+            n_ok, n_fail = er.run_carry("2026-11-18")
+        self.assertEqual((n_ok, n_fail), (0, 0))
+
+    def test_run_scan_wires_carry_stage(self):
+        """run_scan.sh 必须在 normalize 之前跑补抽(补到的当天就入库)。"""
+        with open(os.path.join(REPO, "scripts", "run_scan.sh"), encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn("--stage carry", text)
+        self.assertIn("EXTRACT_CARRY_DAYS", text)
+        i_carry = text.index("--stage carry")
+        i_norm = text.index("normalize.py", i_carry)
+        self.assertLess(i_carry, i_norm, "补抽必须在 normalize 之前")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

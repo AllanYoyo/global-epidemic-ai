@@ -131,6 +131,10 @@ export EXTRACT_MAX_TOKENS="${EXTRACT_MAX_TOKENS:-8000}"
 export EXTRACT_TIMEOUT="${EXTRACT_TIMEOUT:-90}"
 export EXTRACT_API_BASE_URL="${EXTRACT_API_BASE_URL:-https://api.minimaxi.com/anthropic}"
 export EXTRACT_API_KEY_ENV="${EXTRACT_API_KEY_ENV:-MINIMAX_CN_API_KEY}"
+# 跨天补抽(2026-11-18): EXTRACT_CARRY_DAYS=0 可一键关闭。
+export EXTRACT_CARRY_DAYS="${EXTRACT_CARRY_DAYS:-3}"
+export EXTRACT_CARRY_MAX="${EXTRACT_CARRY_MAX:-20}"
+export EXTRACT_CARRY_MAX_ATTEMPTS="${EXTRACT_CARRY_MAX_ATTEMPTS:-3}"
 
 # 抽取通道的 key 必须**显式 export**。上面的 source(第 108 行)没带 set -a,
 # 变量只是 shell 变量, **不会传进 python3 子进程** —— 生产实测(2026-11-18 上线当场):
@@ -775,6 +779,12 @@ $HEALTH_BLOCK"
       echo "[$(date '+%F %T')] 阶段 2/2 确定性加工(单轮微调用抽取)"
       RC=0
       "$PY" "$REPO/scripts/extract_records.py" --date "$SCAN_DATE" || RC=$?
+      # 跨天补抽(2026-11-18): 把前几天「已存档但抽失败、内容又不在台账里」的存档补一遍。
+      # 洞: 抽取失败只在当天 search-log.md 留痕, done_urls 只认两个 jsonl —— 跨天后
+      # 没有任何机制会再抽它(实测 11-11~11-18 真正从未入账的 1 份)。
+      # 独立一步, 放在主抽取之后、入库之前: 补到的记录今天就入库; 失败也不影响主链路。
+      "$PY" "$REPO/scripts/extract_records.py" --date "$SCAN_DATE" --stage carry || \
+        echo "[WARN] 跨天补抽失败(不阻塞主链路)"
       if [ "$RC" -eq 0 ] && [ -f "$FETCH_DIR/extracted-policy.jsonl" ]; then
         "$PY" "$REPO/scripts/normalize.py" --input "$FETCH_DIR/extracted-policy.jsonl" \
           --out "$DATA_DIR/events/$SCAN_DATE/" --db --max-age-days 7 || RC=$?

@@ -96,6 +96,17 @@ global-policy-search skill 仍为交互式检索入口（会话补数走 `run_sc
 - **账目**：直连调用不写 hermes 的 `state.db`，抽取自记
   `data/raw/<日期>/extract-usage.json`，`token_budget.py` 合并进当日合计 ——
   **不做这一步预算闸门就瞎了**（抽取占当日用量 95%）。
+- **跨天补抽（2026-11-18，用户"别把刚检索的新内容给丢了"）**：抽取失败（429／输出不合
+  规格）的存档只在**当天**的 `search-log.md` 留痕，而 `done_urls` 只认两个 jsonl ——
+  跨天后**没有任何机制会再抽它**（实测八天共 36 份抽取失败，35 份被重抓自愈，
+  剩下 1 份补抽后判为会议拒收 —— **实测窗口内真正丢失的政策 0 条**，但洞在结构上
+  真实存在，该补）。修法是 `extract_records.py --stage carry`（独立一步，
+  **不改主抽取路径**）：扫最近 `EXTRACT_CARRY_DAYS` 天（默认 3），只补**内容确实不在
+  台账里**的（判据用**文档键** —— 同一份 WTO 通报的 `_s/_e/_x.pdf` 附件共用编号），
+  失败次数达 `EXTRACT_CARRY_MAX_ATTEMPTS`（默认 3）不再补，份数上限
+  `EXTRACT_CARRY_MAX`（默认 20）；读不到台账则**放弃补抽**（fail-safe）。产出写两处：
+  当天 jsonl（当天入库）+ 源日期 jsonl（"已处理"标记，否则明天再补一遍）。
+  `run_scan.sh` 编排位置：主抽取之后、normalize 之前。关闭开关 `EXTRACT_CARRY_DAYS=0`。
 
 ## 取数内核(2026-10-29 起: urlwatch 移植版)
 

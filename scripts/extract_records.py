@@ -93,6 +93,22 @@ EXTRACT_WORKERS = int(os.environ.get("EXTRACT_WORKERS", "6") or 6)
 # 阻止新模型发起工具调用(1/4 仍跑偏), 真正的开关是 --safe-mode。
 EXTRACT_CLI_SAFE = os.environ.get("EXTRACT_CLI_SAFE", "1") not in ("0", "false", "no")
 
+# ---- 跨天补抽(2026-11-18 新增, 用户指示"别把刚检索的新内容给丢了")----
+#
+# 洞在哪(生产实测): 抽取失败(429 / 输出不合规格)的存档只在**当天**的
+# search-log.md 留一行痕, 而 done_urls 只认 extracted-policy.jsonl /
+# rejected-policy.jsonl 两个文件 —— 跨天之后, 昨天的存档根本不在
+# `extract_records.py --date <今天>` 的扫描范围里, **没有任何机制会再抽它**。
+#
+# 实测口径(11-11~11-18 八天): 抽取失败 36 份; 其中 35 份因为同一政策被别的日期
+# 重抓并抽成功而"自愈"(WTO 通报每天重发, 同一政策会反复归档); **真正从未入账
+# 的 1 份** —— 那种"只被一个源抓到过一次 + 当次抽取失败"才是不可自愈的丢。
+#
+# 补抽只补"内容确实不在台账里"的, 已在台账的一律不补(否则台账会多出近重复记录)。
+EXTRACT_CARRY_DAYS = int(os.environ.get("EXTRACT_CARRY_DAYS", "3") or 0)
+EXTRACT_CARRY_MAX = int(os.environ.get("EXTRACT_CARRY_MAX", "20") or 20)
+EXTRACT_CARRY_MAX_ATTEMPTS = int(os.environ.get("EXTRACT_CARRY_MAX_ATTEMPTS", "3") or 3)
+
 # .env 路径可覆盖(与 fetch_eping.HERMES_ENV_PATH / push_scope.HERMES_ENV_PATH 同纪律):
 # 默认 ~/.hermes/.env, 测试与隔离环境可指向别处 —— 否则断言"无 key 行为"的用例会
 # 在本机与生产 VPS 上**真的读到真 key**, 测的就不是无 key 分支了。
@@ -734,25 +750,36 @@ def _write_usage(raw_dir, date_str, backend, model, st, times):
     会对抽取段完全失明(而抽取正是当日用量的 95%)。
     """
     path = os.path.join(raw_dir, "extract-usage.json")
-    prev = {"calls": 0, "input_tokens": 0, "output_tokens": 0}
+    prev = {"calls": 0, "input_tokens": 0, "output_tokens": 0,
+            "p50_sec": 0.0, "p90_sec": 0.0, "max_sec": 0.0}
     try:
         if os.path.isfile(path):
             with open(path, encoding="utf-8") as f:
                 old = json.load(f)
             for k in prev:
-                prev[k] = int(old.get(k) or 0)
+                prev[k] = (int(old.get(k) or 0) if k in ("calls", "input_tokens",
+                                                       "output_tokens")
+                           else float(old.get(k) or 0))
     except (OSError, ValueError):
         pass
+    # 耗时分布: 保留**当日调用次数最多的那一轮**的分布。跨天补抽通常比主轮小,
+    # 不能让它把主轮的 p50/p90 冲掉(否则"下次变慢一眼可见"这个信号就废了)。
+    cur_calls = int(st.get("calls") or 0)
+    if cur_calls >= prev["calls"]:
+        p50, p90, mx = (round(_pct(times, 0.5), 2), round(_pct(times, 0.9), 2),
+                        round(max(times) if times else 0.0, 2))
+    else:
+        p50, p90, mx = prev["p50_sec"], prev["p90_sec"], prev["max_sec"]
     row = {
         "date": date_str,
         "backend": backend,
         "model": model,
-        "calls": prev["calls"] + int(st.get("calls") or 0),
+        "calls": prev["calls"] + cur_calls,
         "input_tokens": prev["input_tokens"] + int(st.get("input_tokens") or 0),
         "output_tokens": prev["output_tokens"] + int(st.get("output_tokens") or 0),
-        "p50_sec": round(_pct(times, 0.5), 2),
-        "p90_sec": round(_pct(times, 0.9), 2),
-        "max_sec": round(max(times) if times else 0.0, 2),
+        "p50_sec": p50,
+        "p90_sec": p90,
+        "max_sec": mx,
         "updated_at": biz_now(),
     }
     try:
@@ -764,6 +791,37 @@ def _write_usage(raw_dir, date_str, backend, model, st, times):
     except OSError:
         pass
     return row
+
+
+def _extract_one(prompt, url):
+    """跑一份抽取(最多两次)。返回 (rec|None, err|None, elapsed秒, quota_hit)。
+
+    抽出来给主流程和跨天补抽共用 —— 两边的失败语义必须完全一致, 否则补抽会
+    把主流程已经判失败的东西当成成功。
+
+    重试策略(2026-11-18, M3.1-Flash 截断对策): 第一次原样问, 第二次**加预算**
+    再问(max_tokens × 2)—— 原样重问只会再截断一次。
+    429(Token Plan 耗尽)不重试, 立刻返回 quota_hit=True, 由调用方决定停不停。
+    """
+    last = "未知"
+    t0 = time.time()
+    for attempt in (1, 2):
+        # 第一次保持原调用签名(老测试的 mock 只接受一个参数), 第二次才带预算覆盖。
+        if attempt == 1:
+            rc, out = call_model(prompt)
+        else:
+            rc, out = call_model(prompt, max_tokens=EXTRACT_MAX_TOKENS * 2)
+        if rc == 0:
+            cand = parse_kv_output(out)
+            err = validate(cand, url)
+            if err is None:
+                return cand, None, time.time() - t0, False
+            last = "输出不合规格: %s" % err
+        else:
+            last = "调用失败 rc=%s: %s" % (rc, _clean(out)[:120])
+            if "429" in out or "Token Plan" in out:
+                return None, last, time.time() - t0, True
+    return None, last, time.time() - t0, False
 
 
 def extract(date_str, log=print):
@@ -797,29 +855,13 @@ def extract(date_str, log=print):
         if stop.is_set():
             return idx, url, None, "skip", "前序遇 429, 本份留待下轮", 0.0
         prompt = build_prompt(meta, url, body, today)
-        last = "未知"
-        t0 = time.time()
-        for attempt in (1, 2):
-            # M3.1-Flash 的头号失败模式是"输出被截断"(思考 token + 冗长输出把预算烧光,
-            # 极端情况一个 key=value 都没吐出来)。失败重试时**加预算重问**, 而不是
-            # 原样再问一遍 —— 后者只会再截断一次。
-            # 第一次保持原调用签名(老测试的 mock 只接受一个参数), 第二次才带预算覆盖。
-            if attempt == 1:
-                rc, out = call_model(prompt)
-            else:
-                rc, out = call_model(prompt, max_tokens=EXTRACT_MAX_TOKENS * 2)
-            if rc == 0:
-                cand = parse_kv_output(out)
-                err = validate(cand, url)
-                if err is None:
-                    return idx, url, cand, "ok", None, time.time() - t0
-                last = "输出不合规格: %s" % err
-            else:
-                last = "调用失败 rc=%s: %s" % (rc, _clean(out)[:120])
-                if "429" in out or "Token Plan" in out:
-                    stop.set()
-                    return idx, url, None, "quota", "Token Plan 耗尽(429)", time.time() - t0
-        return idx, url, None, "fail", last, time.time() - t0
+        rec, err, el, quota = _extract_one(prompt, url)
+        if rec is not None:
+            return idx, url, rec, "ok", None, el
+        if quota:
+            stop.set()
+            return idx, url, None, "quota", err, el
+        return idx, url, None, "fail", err, el
 
     # 并发跑: 64 份互相独立, 串行是纯浪费(实测 6 并发 4.8× 加速)。
     # 结果按**完成顺序**处理(不是存档顺序) —— 换来的是"崩了也不丢已完成的部分":
@@ -891,6 +933,238 @@ def _log_line(raw_dir, line):
         pass
 
 
+# ---- 跨天补抽(2026-11-18) ------------------------------------------------------
+#
+# 洞(生产实测): 抽取失败(429 / 输出不合规格)的存档只在**当天**的 search-log.md
+# 留一行痕, 而 done_urls 只认 extracted-policy.jsonl / rejected-policy.jsonl
+# —— 跨天之后, 昨天的存档根本不在 `extract_records.py --date <今天>` 的扫描范围里,
+# **没有任何机制会再抽它**。
+#
+# 实测口径(11-11~11-18 八天): 抽取失败 36 份; 其中 35 份因为同一政策被别的日期
+# 重抓并抽成功而"自愈"(WTO 通报每天重发, 同一政策会反复归档); **真正从未入账的
+# 1 份** —— 那种"只被一个源抓到过一次 + 当次抽取失败"才是不可自愈的丢。
+# 用户 2026-11-18 指示: "明天检索时别把刚检索的新内容给丢了" —— 这里补的就是它。
+
+
+def _doc_key(url):
+    """文档键: 同一份 WTO 通报的多个附件(_s/_e/_x.pdf)共用编号(26_xxxxx)。
+
+    只比完整 URL 会漏判 —— 同一则政策的 SPS 附件与解释文件是两个 URL, 但内容
+    是同一件事。台账里只要有其中一个, 这条就不该再补。
+    """
+    m = re.search(r"/(26_\d{4,6})", url or "")
+    if m:
+        return m.group(1)
+    # 非 WTO: 去掉查询串与末尾斜杠 —— 容忍 ?/# 与尾斜杠的写法差异, 否则同一条
+    # 政策因为 URL 写法微差会被当成"没进过台账"而重复补抽。
+    u = (url or "").strip().split("?")[0].split("#")[0].rstrip("/")
+    return u
+
+
+def ledger_doc_keys():
+    """台账里已出现过的文档键集合(只读)。读不到台账时返回 None(= fail-safe)。
+
+    跨天补抽不能把"已经在台账里的政策"再塞一遍: 同一件事, 模型两次写的生效日 /
+    领域 / 动作可能略有不同 → event_id 不同 → 去重键也不同 → 台账里会多出一条
+    近重复记录。
+
+    读不到台账时返回 None, 调用方据此**放弃补抽** —— 宁可不补, 也不污染台账。
+    """
+    import sqlite3
+    try:
+        from normalize import DB_PATH
+        con = sqlite3.connect("file:%s?mode=ro" % DB_PATH, uri=True)
+    except Exception:
+        return None
+    keys = set()
+    try:
+        for su, payload in con.execute("SELECT source_url, payload FROM events"):
+            urls = []
+            if su:
+                urls.extend(u.strip() for u in str(su).split(","))
+            try:
+                p = json.loads(payload)
+            except (ValueError, TypeError):
+                p = {}
+            if isinstance(p, dict):
+                su2 = (p.get("source") or {}).get("url")
+                if su2:
+                    urls.extend(u.strip() for u in str(su2).split(","))
+            for u in urls:
+                if u:
+                    keys.add(_doc_key(u))
+    except Exception:
+        return None
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+    return keys
+
+
+def failed_attempts(date_str):
+    """该日 search-log.md 里各 URL 的抽取失败次数(给补抽设上限, 防无限重试)。"""
+    path = os.path.join(DATA_DIR, "raw", date_str, "search-log.md")
+    counts = {}
+    if not os.path.isfile(path):
+        return counts
+    try:
+        with open(path, encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                if "| 抽取 | 失败 |" not in line and "| 补抽 | 失败 |" not in line:
+                    continue
+                m = re.search(r"(https?://\S+)", line)
+                if m:
+                    u = m.group(1).rstrip("|").strip()
+                    counts[u] = counts.get(u, 0) + 1
+    except OSError:
+        pass
+    return counts
+
+
+def pending_carry(date_str, days=None, limit=None, skip_keys=None):
+    """最近 N 天里「已存档但从未抽成功、且内容不在台账里」的存档。
+
+    返回 [(carry_from, meta_path, meta, url, body), ...], 从最近的一天往前排。
+    """
+    days = EXTRACT_CARRY_DAYS if days is None else days
+    limit = EXTRACT_CARRY_MAX if limit is None else limit
+    if days <= 0 or limit <= 0:
+        return []
+    try:
+        base = datetime.date.fromisoformat(date_str)
+    except ValueError:
+        return []
+    out = []
+    for back in range(1, days + 1):
+        d = (base - datetime.timedelta(days=back)).isoformat()
+        if not os.path.isdir(os.path.join(DATA_DIR, "raw", d)):
+            continue
+        done = done_urls(d)
+        fails = failed_attempts(d)
+        for mp, meta, url, body in load_archives(d):
+            if not url or url in done:
+                continue
+            if fails.get(url, 0) >= EXTRACT_CARRY_MAX_ATTEMPTS:
+                continue
+            if skip_keys and _doc_key(url) in skip_keys:
+                continue
+            out.append((d, mp, meta, url, body))
+            if len(out) >= limit:
+                return out
+    return out
+
+
+def run_carry(date_str, log=print):
+    """跨天补抽 —— 独立一步, **不改主抽取路径**(明早首跑的主链路零回归风险)。
+
+    产出写两处:
+      · 当天的 extracted-policy.jsonl —— 让 normalize 今��就入库;
+      · 源日期的同一个文件 —— 当"已处理"标记, 否则明天还会再补一遍。
+    返回 (补抽成功条数, 失败条数)。
+    """
+    days = EXTRACT_CARRY_DAYS
+    if days <= 0:
+        log("[extract_records] 跨天补抽: 已关闭(EXTRACT_CARRY_DAYS=0)")
+        return 0, 0
+    skip = ledger_doc_keys()
+    if skip is None:
+        log("[extract_records][WARN] 跨天补抽: 读不到台账, 本轮放弃补抽"
+            "(fail-safe: 宁可不补, 也不往台账塞近重复记录)")
+        return 0, 0
+    pend = pending_carry(date_str, days=days, skip_keys=skip)
+    if not pend:
+        log("[extract_records] 跨天补抽: 无待补(最近 %d 天, 内容均已在台账或已处理)" % days)
+        return 0, 0
+
+    today = biz_today()
+    raw_dir = os.path.join(DATA_DIR, "raw", date_str)
+    # 当天的 raw 目录在生产里一定存在(取数段建的), 但补抽不该依赖这一点 ——
+    # 目录不存在就自己建, 否则"落盘失败"会把补到的内容白扔(那正好是本机制要防的丢)。
+    try:
+        os.makedirs(raw_dir, exist_ok=True)
+    except OSError as exc:
+        log("[extract_records][WARN] 跨天补抽: 无法创建 %s (%s) —— 本轮放弃"
+            % (raw_dir, exc))
+        return 0, 0
+    out_path = os.path.join(raw_dir, "extracted-policy.jsonl")
+    backend = backend_name()
+    workers = max(1, EXTRACT_WORKERS)
+    n_ok = n_fail = n_reject = 0
+    with _USAGE_LOCK:
+        for k in _USAGE:
+            _USAGE[k] = 0
+    stop = threading.Event()
+    times = []
+    log("[extract_records] 跨天补抽: 待补 %d 份 (来源 %s / 通道=%s 模型=%s)"
+        % (len(pend), ",".join(sorted(set(p[0] for p in pend))), backend, EXTRACT_MODEL))
+
+    def worker(item):
+        carry_from, mp, meta, url, body = item
+        if stop.is_set():
+            return item, None, "skip", "前序遇 429", 0.0
+        prompt = build_prompt(meta, url, body, today)
+        rec, err, el, quota = _extract_one(prompt, url)
+        if rec is not None:
+            return item, rec, "ok", None, el
+        if quota:
+            stop.set()
+            return item, None, "quota", err, el
+        return item, None, "fail", err, el
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = [ex.submit(worker, it) for it in pend]
+        for fut in as_completed(futs):
+            try:
+                (carry_from, mp, meta, url, body), rec, status, err, el = fut.result()
+            except Exception as exc:  # worker 崩了不许带走这一轮
+                log("[extract_records][WARN] 补抽 worker 异常: %s" % exc)
+                continue
+            times.append(el)
+            if status == "ok":
+                reject, why = screen_non_policy(rec)
+                if reject:
+                    n_reject += 1
+                    _write_rejected(raw_dir, rec, url, why)
+                    _write_rejected(os.path.join(DATA_DIR, "raw", carry_from), rec, url, why)
+                    _log_line(raw_dir, "| 补抽 | 拒收 | 非政策内容 %s %s |"
+                              % (why[:40], url[:60]))
+                    continue
+                try:
+                    with open(out_path, "a", encoding="utf-8") as f:
+                        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                    # 源日期也写一份 —— 当"已处理"标记, 否则明天还会再补一遍
+                    with open(os.path.join(DATA_DIR, "raw", carry_from,
+                                           "extracted-policy.jsonl"), "a",
+                              encoding="utf-8") as f:
+                        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                except OSError as exc:
+                    n_fail += 1
+                    log("[extract_records][WARN] 补抽落盘失败 %s: %s" % (url[:60], exc))
+                    continue
+                n_ok += 1
+                log("[extract_records] 补抽 ok(源自 %s): %s"
+                    % (carry_from, (rec.get("title_cn") or url)[:60]))
+            elif status == "quota":
+                n_fail += 1
+                _log_line(raw_dir, "| 补抽 | 中断 | Token Plan 耗尽(429) |")
+            elif status == "skip":
+                pass
+            else:
+                n_fail += 1
+                _log_line(raw_dir, "| 补抽 | 失败 | %s %s |"
+                          % (url[:70], _clean(err or "")[:60]))
+                log("[extract_records][WARN] 补抽失败: %s (%s)"
+                    % (url[:70], _clean(err or "")[:70]))
+
+    row = _write_usage(raw_dir, date_str, backend, EXTRACT_MODEL, _USAGE, times)
+    log("[extract_records] 跨天补抽: 补成 %d / 拒收 %d / 失败 %d"
+        "(用量: 调用 %d 次 输入 %d 输出 %d)"
+        % (n_ok, n_reject, n_fail, row["calls"], row["input_tokens"], row["output_tokens"]))
+    return n_ok, n_fail
+
+
 def writeback_risk(date_str, log=print):
     """normalize 之后: 对当日新入库且带研判字段的记录, 确定性写回 risk.py。
 
@@ -955,11 +1229,17 @@ def writeback_risk(date_str, log=print):
 def main():
     ap = argparse.ArgumentParser(description="单轮微调用抽取(每份存档一次 LLM 调用)")
     ap.add_argument("--date", default=biz_today(), help="业务日期 YYYY-MM-DD")
-    ap.add_argument("--stage", choices=["extract", "risk"], default="extract",
-                    help="extract=抽取(默认); risk=normalize 之后的研判写回(由 run_scan.sh 编排先后)")
+    ap.add_argument("--stage", choices=["extract", "risk", "carry"], default="extract",
+                    help="extract=抽取(默认); risk=normalize 之后的研判写回(由 run_scan.sh "
+                         "编排先后); carry=跨天补抽(把前几天抽失败、内容又不在台账里的存档"
+                         "补抽一遍; 独立一步, 不影响主抽取路径)")
     args = ap.parse_args()
     if args.stage == "risk":
         writeback_risk(args.date)
+        return 0
+    if args.stage == "carry":
+        n_ok, n_fail = run_carry(args.date)
+        print("[extract_records] 跨天补抽完成: 补成 %d / 失败 %d" % (n_ok, n_fail))
         return 0
     n_ok, n_fail = extract(args.date)
     print("[extract_records] 完成: 成功 %d / 失败 %d" % (n_ok, n_fail))

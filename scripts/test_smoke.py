@@ -5207,6 +5207,85 @@ class ExtractionChannelTests(unittest.TestCase):
             pend = er.pending_carry("2026-11-18", days=2, skip_keys=set())
         self.assertEqual(pend, [])
 
+    # ---- 失败记账契约(2026-11-19 修, known-issues M28) ----
+    #
+    # 审计实证的两个洞: ①补抽失败写在**执行日**的 search-log, 而
+    # failed_attempts 只读**源日期** → 补抽失败永远不计次数, 上限拦不住,
+    # "每抽必败"的存档每天无限重试; ②失败行把 URL 截到 70 字符落痕, 而计数
+    # 查找用完整 URL → 长 URL(WTO docs 直链等)失败几次都拦不住。两者叠加 =
+    # 纯无限重试烧 token。以下三例钉死修后契约。
+
+    def test_carry_failure_counts_to_source_day(self):
+        """补抽失败必须计入**源日期**的失败次数(写执行日 = 永远不计次)。"""
+        er = self._er()
+        root = self._carry_root("count")
+        y = os.path.join(root, "raw", "2026-11-17")
+        url = "https://official.example/lost"
+        self._mk_archive(y, "01-a", url)
+        with open(os.path.join(y, "search-log.md"), "w", encoding="utf-8") as f:
+            f.write("| 抽取 | 失败 | %s 输出不合规格 |\n" % url)
+
+        def fake_call(prompt, max_tokens=None):
+            return 1, "调用失败 boom"
+
+        with mock.patch.object(er, "DATA_DIR", root), \
+                mock.patch.object(er, "call_model", side_effect=fake_call), \
+                mock.patch.object(er, "ledger_doc_keys", return_value=set()):
+            n_ok, n_fail = er.run_carry("2026-11-18")
+        self.assertEqual((n_ok, n_fail), (0, 1))
+        with mock.patch.object(er, "DATA_DIR", root):
+            counts = er.failed_attempts("2026-11-17")
+        self.assertEqual(counts.get(url), 2,
+                         "主抽取 1 次 + 补抽 1 次, 必须都计入源日期")
+        # 执行日的 search-log 仍留一份审计痕(本轮干了什么)
+        with open(os.path.join(root, "raw", "2026-11-18", "search-log.md"),
+                  encoding="utf-8") as f:
+            self.assertIn("| 补抽 | 失败 |", f.read())
+
+    def test_carry_attempts_accumulate_across_days(self):
+        """跨天累计闭环: 主抽取失败 + 两天补抽失败 = 3 次, 达上限后不再带出。"""
+        er = self._er()
+        root = self._carry_root("accum")
+        y = os.path.join(root, "raw", "2026-11-17")
+        url = "https://official.example/lost"
+        self._mk_archive(y, "01-a", url)
+        with open(os.path.join(y, "search-log.md"), "w", encoding="utf-8") as f:
+            f.write("| 抽取 | 失败 | %s 输出不合规格 |\n" % url)
+
+        def fake_call(prompt, max_tokens=None):
+            return 1, "调用失败 boom"
+
+        with mock.patch.object(er, "DATA_DIR", root), \
+                mock.patch.object(er, "EXTRACT_CARRY_DAYS", 3), \
+                mock.patch.object(er, "EXTRACT_CARRY_MAX_ATTEMPTS", 3), \
+                mock.patch.object(er, "call_model", side_effect=fake_call), \
+                mock.patch.object(er, "ledger_doc_keys", return_value=set()):
+            er.run_carry("2026-11-18")
+            er.run_carry("2026-11-19")
+        with mock.patch.object(er, "DATA_DIR", root):
+            counts = er.failed_attempts("2026-11-17")
+            self.assertEqual(counts.get(url), 3,
+                             "主抽取 + 两天补抽, 全部计入源日期")
+            pend = er.pending_carry("2026-11-20", days=3, skip_keys=set())
+        self.assertNotIn(url, [p[3] for p in pend],
+                         "失败次数达上限(EXTRACT_CARRY_MAX_ATTEMPTS=3)后不再补")
+
+    def test_extract_failure_log_keeps_full_url(self):
+        """主抽取失败行必须写**完整** URL(计数键是完整 URL, 截断落痕对不上)。"""
+        er = self._er()
+        root = self._carry_root("urlfull")
+        t = os.path.join(root, "raw", "2026-11-18")
+        url = ("https://docs.wto.org/dol2fe/DailyReportSearch/Download"
+               "?documentfolderpath=/Quarantine/2026/S/PER/26_05892_00_s.pdf")
+        self._mk_archive(t, "01-a", url)
+        with mock.patch.object(er, "DATA_DIR", root), \
+                mock.patch.object(er, "call_model", return_value=(1, "boom")):
+            er.extract("2026-11-18")
+        with open(os.path.join(t, "search-log.md"), encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn("| 抽取 | 失败 |", content)
+        self.assertIn(url, content, "失败行必须包含完整 URL")
+
     def test_doc_key_groups_wto_attachments(self):
         """同一份 WTO 通报的 _s/_e/_x 附件算同一件事(只比 URL 会漏判)。"""
         er = self._er()

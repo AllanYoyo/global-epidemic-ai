@@ -911,7 +911,11 @@ def extract(date_str, log=print):
                     % (len(archives) - n_ok - n_fail - n_skip))
             else:
                 n_fail += 1
-                _log_line(raw_dir, "| 抽取 | 失败 | %s %s |" % (url[:70], _clean(err or "")[:60]))
+                # 失败行必须写**完整** URL: failed_attempts 以整行抓 URL 作计数键,
+                # pending_carry 用完整 URL 查 —— 截断落痕(旧版 [:70])会让长 URL
+                # (WTO docs 直链等 >70 字符)的失败次数永远对不上, 补抽上限拦不住
+                # (2026-11-19 代码审计实证, known-issues M28)。
+                _log_line(raw_dir, "| 抽取 | 失败 | %s %s |" % (url, _clean(err or "")[:60]))
                 log("[extract_records][WARN] 失败: %s (%s)" % (url[:70], _clean(err or "")[:80]))
 
     if n_reject:
@@ -1004,7 +1008,14 @@ def ledger_doc_keys():
 
 
 def failed_attempts(date_str):
-    """该日 search-log.md 里各 URL 的抽取失败次数(给补抽设上限, 防无限重试)。"""
+    """该日 search-log.md 里各 URL 的抽取失败次数(给补抽设上限, 防无限重试)。
+
+    计数契约(2026-11-19 修, known-issues M28): 主抽取与补抽的失败行都必须落
+    **这份**(源日期)search-log、且写**完整** URL —— pending_carry 拿完整 URL
+    到这里查次数。补抽失败落在执行日、或 URL 截断落痕, 次数就永远对不上,
+    EXTRACT_CARRY_MAX_ATTEMPTS 形同虚设(实测: 补抽失败写执行日 → 源日期计数
+    恒为 1, 上限 3 永远够不着 → 无限重试)。
+    """
     path = os.path.join(DATA_DIR, "raw", date_str, "search-log.md")
     counts = {}
     if not os.path.isfile(path):
@@ -1060,8 +1071,11 @@ def run_carry(date_str, log=print):
     """跨天补抽 —— 独立一步, **不改主抽取路径**(明早首跑的主链路零回归风险)。
 
     产出写两处:
-      · 当天的 extracted-policy.jsonl —— 让 normalize 今��就入库;
+      · 当天的 extracted-policy.jsonl —— 让 normalize 今天就入库;
       · 源日期的同一个文件 —— 当"已处理"标记, 否则明天还会再补一遍。
+    失败记账(2026-11-19 修, known-issues M28): 补抽失败行必须写进**源日期**的
+    search-log —— failed_attempts 只读源日期, 写在执行日永远不计次数,
+    EXTRACT_CARRY_MAX_ATTEMPTS 拦不住无限重试。
     返回 (补抽成功条数, 失败条数)。
     """
     days = EXTRACT_CARRY_DAYS
@@ -1153,8 +1167,14 @@ def run_carry(date_str, log=print):
                 pass
             else:
                 n_fail += 1
+                # 失败必须落进**源日期**的 search-log(执行日那份只当本轮审计留痕):
+                # failed_attempts 只读源日期, 补抽失败写在执行日的话永远不计次数,
+                # EXTRACT_CARRY_MAX_ATTEMPTS 拦不住 → 每天无限重试(2026-11-19 代码
+                # 审计实证, known-issues M28)。URL 必须完整 —— 计数键是完整 URL。
+                _log_line(os.path.join(DATA_DIR, "raw", carry_from),
+                          "| 补抽 | 失败 | %s %s |" % (url, _clean(err or "")[:60]))
                 _log_line(raw_dir, "| 补抽 | 失败 | %s %s |"
-                          % (url[:70], _clean(err or "")[:60]))
+                          % (url, _clean(err or "")[:60]))
                 log("[extract_records][WARN] 补抽失败: %s (%s)"
                     % (url[:70], _clean(err or "")[:70]))
 

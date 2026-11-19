@@ -107,6 +107,11 @@ global-policy-search skill 仍为交互式检索入口（会话补数走 `run_sc
   `EXTRACT_CARRY_MAX`（默认 20）；读不到台账则**放弃补抽**（fail-safe）。产出写两处：
   当天 jsonl（当天入库）+ 源日期 jsonl（"已处理"标记，否则明天再补一遍）。
   `run_scan.sh` 编排位置：主抽取之后、normalize 之前。关闭开关 `EXTRACT_CARRY_DAYS=0`。
+  **失败记账契约（2026-11-19 修，M28）**：主抽取与补抽的失败行都必须落**源日期**
+  `search-log.md` 且写**完整** URL（计数按"源日期 + 完整 URL"对齐，`failed_attempts`
+  只读源日期）—— 此前补抽失败写在执行日、URL 截 70 字符落痕，两个洞叠加使上限
+  永远够不着 → "每抽必败"的存档每天无限重试烧 token。429 中断行不带 URL 不计数
+  是刻意的（配额中断的存档从未真正尝试过，该被补抽带出来）。
 
 ## 取数内核(2026-10-29 起: urlwatch 移植版)
 

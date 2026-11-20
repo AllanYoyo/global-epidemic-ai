@@ -24,7 +24,8 @@ description: 生成每日动植物检疫政策监测日报(Markdown + Word 简�
    产出 `data/reports/<日期>-policy-report.md` + `.xlsx`(无 openpyxl 时降级 CSV) + `.docx` 政策监测 Word 简报(无 python-docx 时跳过)。
 
    **Word 附件别丢**: `--docx` 漏了就只剩正文, 而 Word 日报是用户下载/转发的正式件。
-   万一漏了, 推送前 `push_report.py` 会自动补生成一次; 也可以手动兜底:
+   **推送前不会自动补生成**(2026-10-25 起 `push_report.py` 不再调 `report.ensure_docx`,
+   只会如实标注"本次不带附件"); 漏了要手工兜底:
 
    ```bash
    python scripts/report.py --date <YYYY-MM-DD> --ensure-docx   # 缺失才补(幂等)

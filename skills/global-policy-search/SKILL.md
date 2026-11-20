@@ -241,8 +241,9 @@ description: 监测各国政府动植物检疫与进出口管控政策变化。�
 - `data/events/` + SQLite:外国政府动植物检疫政策变化记录;
 - 日报:`python scripts/report.py --date <YYYY-MM-DD> --excel --docx`。
   **两个开关都要带** —— 漏了 `--docx` 就不会产出 Word 日报, 推送出去会只剩正文
-  (2026-10-20 实测: 检索环节只写 `--excel`, 跑批产物就没有 `.docx`)。即便漏了,
-  `push_report.py` 推送前也会自动补生成一次并告警, 但别指望兜底。
+  (2026-10-20 实测: 检索环节只写 `--excel`, 跑批产物就没有 `.docx`)。**推送前不会
+  自动补生成**(2026-10-25 起 `push_report.py` 不再调 `report.ensure_docx`, 只如实
+  标注"本次不带附件"); 漏了要手工兜底: `python scripts/report.py --date <日期> --ensure-docx`。
 
 > **日期口径**:`--date` 必须传运行当天的**东八区日期**。`scripts/run_scan.sh` 会把
 > `$SCAN_DATE` 写进 prompt 并显式传给 `report.py` / `push_report.py`;手工调用时用

@@ -2,7 +2,7 @@
 
 > 体检沉淀与工单跟踪。本文件登记代码库**已识别但未修复**的问题,按"高/中/低"分档。
 > 修复后从"未修复"移入"已修复"区,保留作为历史与回归参考。
-> 上次体检: **2026-11-03**(e112315 口径收紧部署后生产验证: 存量清理 46 条实测误标 1 条已挽回, scope_guard 误杀模式与判定缺口入册 M22/M23/C13), 此前 **2026-10-29**(urlwatch 取数内核代码走查: 条件请求/关注面指纹/并发存档/取数闸门四组问题; P0 取数闸门与 P1 存档并发串扰当日修复, P2 陈旧状态文件同批修复, M20 及五项低危项入册), 此前 **2026-10-27**(P4 管线代码走查: 存档配额口径 / 空输入语义 / 研判写回 / 抽取契约四组问题; H19 当日闭环, H20 与 M14-M16 入册), 再此前 **2026-10-24**(全量代码审查: 推送链路 / 扫描编排 / 数据合同与展示层三线并行, 高危 H1/H2/H4/H5 当日修复, 见文末 2026-10-24 小节)。
+> 上次体检: **2026-11-20**(升级后全仓复审: 四线并行代码审计(取数编排/抽取/入库合同/投递展示与安全)共报 42 条实证发现, 去重后 **23 条当场闭环(13 高危 / 6 中危 / 4 低危)**、12 条留册; 详见文末「2026-11-20 巡检」小节), 此前 **2026-11-03**(e112315 口径收紧部署后生产验证: 存量清理 46 条实测误标 1 条已挽回, scope_guard 误杀模式与判定缺口入册 M22/M23/C13), 此前 **2026-10-29**(urlwatch 取数内核代码走查: 条件请求/关注面指纹/并发存档/取数闸门四组问题; P0 取数闸门与 P1 存档并发串扰当日修复, P2 陈旧状态文件同批修复, M20 及五项低危项入册), 此前 **2026-10-27**(P4 管线代码走查: 存档配额口径 / 空输入语义 / 研判写回 / 抽取契约四组问题; H19 当日闭环, H20 与 M14-M16 入册), 再此前 **2026-10-24**(全量代码审查: 推送链路 / 扫描编排 / 数据合同与展示层三线并行, 高危 H1/H2/H4/H5 当日修复, 见文末 2026-10-24 小节)。
 
 ---
 
@@ -455,9 +455,329 @@
 - 建议处理: 一行修复; 顺手给 `flag_food_scope` 补最小测试(目前 `FoodScopeTests` 覆盖了
   其余全部接入点, 唯此脚本零覆盖)。
 
+### 2026-11-20 巡检新增(升级后全仓复审)· 12 条留册
+
+> 背景: 模型升级(MiniMax-M3 + thinking)后重新做了一轮全仓代码走查 —— 四线并行
+> (取数编排 / 抽取 / 入库合同 / 投递展示与安全) 共报 42 条实证发现, 另加自查补充,
+> 去重后当日闭环 23 条(13 高危 / 6 中危 / 4 低危), 下面 12 条留册。
+> 留册的判断依据: 要么改动会动到**已明确的产品决策**(红线), 要么收益不抵风险。
+
+#### U1 · 抽取段没有整体截止时间 —— P4 分支三步裸跑, 最坏 ~42 分钟 (中)
+- 位置: `scripts/run_scan.sh:415`(`PROCESS_TIMEOUT` 只包住 agent 路径)、`:774-790`(P4 分支)
+- 现象: 单份最坏 = 90s(API 超时)× 2 次(重试)=180s; 64 份主抽取 + 20 份补抽、6 路并发
+  → 最坏约 (64+20)/6×180 ≈ 42 分钟, 逼近广播锁 75 分钟有效期, 与下一轮 cron 重叠。
+- 影响: 单轮跑批可能顶到下一轮; 且进程被杀时当日 token 用量账一起丢(见 U2)。
+- 建议处理: 抽取段加独立预算(如 `EXTRACT_ROUND_TIMEOUT`, 默认 1200s), 到点提前收手
+  (剩余留待下轮, 语义与 429 一致); `run_scan.sh` 对 P4 三步也加 `timeout`。
+
+#### U2 · token 记账仍有两处缺口: CLI 通道全程无 usage; 执行器跑完才落账 (中)
+- 位置: `scripts/extract_records.py`(`call_model_cli` 无 usage、`_write_usage` 在执行器之后)
+- 现象: ①直连失败已修(调用次数照计), 但 **CLI 兜底通道**全程不记 usage; ②`_write_usage`
+  只在 `with ThreadPoolExecutor` 正常退出后执行, 进程被 kill/超时 → 当日用量全丢。
+- 影响: `token_budget.py` 的预算闸门对抽取段仍有盲区(而抽取占当日用量 95%)。
+- 建议处理: `_write_usage` 加 `atexit`/信号兜底; CLI 通道至少记调用次数。
+
+#### U3 · "当日入库 0 条"终检在推送**之后**执行, 且把"全是重复存档"误判成整轮失败 (中)
+- 位置: `scripts/run_scan.sh` 推送段 vs 终检段(`NEW_N` 判定)
+- 现象: 推送先发出, 终检再查当日入库条数; 而 `first_seen` 只在首次插入时写, 重复政策
+  走合并更新不改 `first_seen` → "当日全是已入库政策的重复存档"会被判成整轮失败
+  (日报已发出去, 批次却记红), 反向的"取到了东西却没入库"也已经推发出去了。
+- 影响: 两种形态都是"假成功/假失败"在最后一刻才暴露。
+- 建议处理: 把该判定挪到推送**之前**; 并把"新增 0 条"与"合并 0 条"分开计数 ——
+  只有"新增=0 且合并=0"才判失败。
+
+#### U4 · 预探超时比取数段严格得多 —— "慢而活"的源被整日判死 (中)
+- 位置: `scripts/probe_channels.py:42`(`TIMEOUT_SECS = 6`, 降级上限 18s)、
+  `scripts/policy_fetch.py:65`(`FETCH_TIMEOUT = 15`, 降级上限 45s)
+- 现象: 入口页响应在 19~45s 之间(政府站常见)时, 预探超时判 dead, 取数段本可以拿到。
+- 影响: 该源当天整轮被跳过, 且在死源分诊表里被归到"死源", 掩盖了"入口只是慢"。
+- 建议处理: 预探与取数共用同一超时口径; 或对"超时(非明确 4xx/5xx)"的源降级为"慢源",
+  在取数段放宽超时重试一次, 而不是直接判死。
+
+#### U5 · `--max-filesize 400000` 让超大页面源"探活活、抓取死", 且死因不留痕 (中)
+- 位置: `scripts/probe_channels.py:174-175`、`scripts/policy_fetch.py:66`
+- 现象: 取数段才加 `--max-filesize`, curl 超过上限以退出码 63 终止 → 该源每轮判 error;
+  预探不加该参数 → 同一页 200 判活。
+- 影响: 该源每日静默失明(活但零产出), 且 `fetch-status.json` 里它的 `probe_code=200`、
+  状态是 error —— 死因分诊从表面看不出是体积上限导致的。
+- 建议处理: 对 rc=63 单独降级(去掉上限重试一次, 或按前缀正文处理); 把"体积超限"写进
+  `probe_note`/死因分类。
+
+#### U6 · `html_to_text` 的正则兜底把导航/页脚/脚本全文灌进指纹 (中)
+- 位置: `scripts/fetchlib/filters.py:247-259`(兜底分支)、`:147-148`(`NOISE_TAGS`)
+- 现象: 正常路径会剔掉 nav/header/footer/script/style; 但 `<script>`/`<style>` 未终结时
+  走的兜底只做 `re.sub(r'<[^>]+>', ' ', html)` —— 标签被剥了, **标签里的文字全留下**。
+- 影响: 这类页面的指纹每轮都变(页脚/日期戳)→ 该源每轮判 changed → 挤占单源 ≤2 的配额。
+- 建议处理: 兜底路径也走一次去噪声再取指纹; 在 `fetch-status.json` 标记该源走了兜底。
+
+#### U7 · 检疫豁免由"任意检疫词"授予, 含否定语境 (中)
+- 位置: `scripts/scope_guard.py:186-197`(`quarantine` 对全文裸子串匹配)、`:73-77`(检疫词表)
+- 现象: 判定顺序是"散文强信号命中 → 若 `quarantine` 在场则放行", 而 `quarantine` 不看语境:
+  食安类记录只要正文里出现任何检疫词(含"**不涉及检疫**"这种否定)就整条放行。
+- 影响: 食安类记录绕过抽取端与入库端两道闸门入台账。
+  注: 跨层分叉(TBT 面判死/记录面判活)已按 M23 登记为"有意设计, 别统一掉", 本条是
+  M23 未覆盖的触发面 —— 豁免由**任何**检疫词、**任何**语境授予。
+- 建议处理: 豁免条件收紧为"检疫词出现在检疫动作上下文"(与 `_has_normative_action` 同思路),
+  并显式排除否定语境; 按 M22/M23 的纪律先跑 300 例冒烟 + 生产预览对照。
+
+#### U8 · `--message` 路径不受推送范围锁约束(产品决策, 待定) (中)
+- 位置: `scripts/push_report.py` 的 `if args.message:` 分支(范围锁读在前, 但该分支只读不判)
+- 现象: `--message` 不检查锁、不要求 `--broadcast`, `review_label` 为空时直接发全部已配渠道,
+  且不落锁、不写 `.pushed`。
+- 现状: **AGENTS.md 明确把它写成有意为之**(cron fallback 的"待执行提醒"不能被卡)。
+- 影响: 日报路径被锁得死死的, `--message` 这条路却能无声明群发 —— 与 10-20 钉钉误推
+  事故同形。
+- 建议处理: 需要用户拍板。若收紧: `--message` 也要求"锁或显式 --broadcast", 且 cron
+  fallback 改为先声明范围再发提醒。
+
+#### U9 · 补抽的"已在台账就不补"判据取的是 normalize 之前的台账快照 (中)
+- 位置: `scripts/extract_records.py` `run_carry()` 的 `skip = ledger_doc_keys()`;
+  `scripts/run_scan.sh` 里 carry 在 normalize **之前**
+- 现象: carry 读到的台账不含**当天**主抽取的结果, 而 carry 的目标是源日期的存档 → 同一
+  URL(WTO 通报每天重发)会被主抽取和补抽各抽一次。
+- 影响: 白烧一次 LLM 调用; 两次措辞不一致时语义键不同 → 台账出现近重复行。
+- 建议处理: carry 的跳过判据补上"当天 extracted-policy.jsonl 已成功的 URL"(按文档键归组),
+  与台账快照取并集。
+
+#### U10 · 面板 `POST /api/generate` 无鉴权 (中)
+- 位置: `webapp/app.py`(`/api/generate`), 面板默认监听 `0.0.0.0:8000`
+- 现象: 任何能访问该端口的人/任何网页(表单跨站 POST 无需预检)都能触发全量出报
+  (含 Excel/Word 生成与磁盘写入), 子进程 stdout/stderr 回显在响应里。
+- 建议处理: 加共享密钥(`DASHBOARD_TOKEN`, 缺失即禁用该接口)或至少 CSRF + 同源校验;
+  `shell=True` 改列表参数。
+
+#### U11 · 范围锁"缺 declared_at 即永不过期"的尾巴仍在 (低)
+- 位置: `scripts/push_scope.py` `scope_is_stale()`
+- 现象: 本轮已修"声明时间在未来 → 判过期"; 但 declared_at 缺失/非法仍按旧格式锁放行
+  (既有明确决定 + 回归用例 `test_scope_age_and_stale` 固化)。
+- 影响: 手改的锁可以永久放行全量推送。
+- 建议处理: 与 U8 一并拍板 —— 锁的 fail-closed 边界。
+
+#### U12 · 文档与实现漂移(低, 多处)
+- `docs/event-schema.md`: `source.official` 写成"归一化为 1; 缺省 0"(代码只读不归一)、
+  缺 `date_precision` 行、`false_positive` 两种语义(非政策内容 / 食品类非检疫口径)未区分。
+- `AGENTS.md`「常用命令」写"无测试套件" —— 实际有 `scripts/test_smoke.py`(350+ 例)与
+  `scripts/test_fetchlib.py`(42 例)。
+- 三处 CLI 错误/usage 文案只列 `wechat | dingtalk | mail`, 遗漏 `weixin`/`feishu` ——
+  正是红线里点名的"微信 vs 企业微信"混; 渠道白名单应以 `REVIEW_CHANNEL_ALIASES` 生成。
+- `skills/daily-report/SKILL.md`、`skills/global-policy-search/SKILL.md` 声称"推送前
+  `push_report.py` 会自动补生成一次 Word" —— 自 2026-10-25 起**不再调用**
+  `report.ensure_docx`, Agent 据此会省掉 `--docx`, 用户收到的日报只剩正文。
+- `webapp/app.py` docstring 提 `RADAR_GENERATE_CMD`, 代码实际读 `RADAR_POLICY_GENERATE_CMD`。
+- 建议处理: 逐条对齐(纯文本, 低风险)。
+
 ---
 
 ## 已修复 (历史)
+
+### 2026-11-20 巡检 · 升级后全仓复审: 13 高危 + 6 中危 + 4 低危当场闭环(23 条)
+
+> 触发: 用户"又升了级, 代码可以重新分析啦"。方法: 四线并行代码审计(取数编排 /
+> 抽取 / 入库合同 / 投递展示与安全), 每条发现都要可复现或给出可核对的静态推理链;
+> 再由主线程逐条复核(剔掉 1 条误报), 只保留证据充分的。
+> 规模: 四线共报 42 条实证发现, 当日闭环 23 条, 留册 12 条(见上)。
+
+#### H6-① Excel/CSV 公式注入 —— 台账里的标题以 `=` 开头会在打开时执行 (高, 已修)
+- 位置: `scripts/report.py` `export_table()`
+- 现象: 台账的标题/摘要/来源名来自外部网页(LLM 抽取), 以 `=`/`+`/`-`/`@` 开头时,
+  openpyxl 把它当公式存进 xlsx, CSV 被 Excel 打开时同样当公式 → 打开台账即触发
+  (=cmd|' / DDE 外链)。
+- 修法: xlsx 侧把危险前缀的单元格强制成字符串类型(`data_type='s'`, 值保持原样,
+  打开台账看不出异样); CSV 侧加前导单引号(CSV 没有"字符串类型"可用)。
+- 回归防线: `InjectionSurfaceGuardTests.test_xlsx_dangerous_cell_stays_string` /
+  `..._csv_dangerous_cell_gets_apostrophe`。
+
+#### H6-② 面板 stored XSS —— 日报里的标题能带 `<img onerror=...>` (高, 已修)
+- 位置: `webapp/app.py`(日报 Markdown 渲染 + 台账表格 + 地图气泡)
+- 现象: `marked.parse(t)` 直接赋 innerHTML, marked 默认放行内联 HTML; markdown 链接
+  不查 scheme; `source.url` 入库端只查域名后缀**不查 scheme** → `javascript://官方域名/...`
+  能入库, 面板渲染成可点脚本链接。
+- 修法(三处同时上): ①面板覆盖 marked 的 `html`/`link`/`image` 渲染器(原始 HTML 转义,
+  链接只放行 http/https/mailto/相对路径); ②`safeUrl()` 白名单同时用于台账表格与**地图气泡**
+  (两处渲染点口径必须一致); ③**入库端**加 scheme 白名单(`urlsplit` 真解析, 要求
+  http/https + 有主机) —— 源头的闸门。
+- 验证: 用仓库自带的 `webapp/static/marked.min.js`(v4.3.0)实跑, 7/7 项通过
+  (`<img`/`onerror`/`<script>`/`javascript:`/远程图片全挡, 正常 https 链接保留)。
+- 回归防线: `InjectionSurfaceGuardTests.test_panel_markdown_renderer_hardened` +
+  `SourceDomainTests.test_non_http_scheme_rejected`。
+
+#### H6-③ MEDIA 附件注入 —— 标题里的换行能把本机文件发进你的微信 (高, 已修)
+- 位置: `scripts/push_report.py`(`_title`/`_summary`/`send_hermes`)
+- 现象: 台账标题/摘要来自外部网页, 带换行就会在推送正文里**伪造出新的一行**;
+  `hermes send` 按行解析 `MEDIA:<path>` → 标题里藏一行 `MEDIA:/opt/.../.env` 就能把
+  本机任意文件发进用户的微信会话(凭据外发)。
+- 修法: ①台账文本进正文前压成单行(`_safe_text`); ②`_hermes_body` 剔掉正文里任何
+  `MEDIA:` 开头的行(附件行只能由它自己追加); ③附件路径白名单(只认数据目录下的
+  `reports/`); ④正文口径 `docx_ok` 改用**同一个**判据 —— 否则正文宣称"见 Word 报告"
+  而实际没带附件, 与 10-20"用户以为有附件却没有"同形。
+- 回归防线: `InjectionSurfaceGuardTests.test_entry_block_cannot_forge_media_line` /
+  `..._hermes_body_drops_media_lines` / `..._hermes_attachment_path_restricted`。
+
+#### H6-④ 邮件正文是 HTML part —— 注入三连的第四个入口(此前未登记) (高, 已修)
+- 位置: `scripts/push_report.py` `send_mail()`
+- 现象: `MIMEText(text.replace("\n","<br>"), "html", "utf-8")` 把推送正文当 HTML 发信,
+  而标题/摘要来自台账且**只做了换行压平、没有 HTML 转义** → 收件人客户端执行脚本/
+  渲染钓鱼链接/回传追踪像素。面板与 Excel 两路本轮已加固, 邮件这路没跟上。
+- 修法: 先 `html.escape` 再换行换 `<br>`。
+
+#### M29 · 取数闸门与完成标记被跨子系统存档污染 —— 国别源当日静默失明 (高, 已修)
+- 位置: `scripts/run_scan.sh`(取数段前后计数、`.fetch-done` 写/读、失败闸门)
+- 现象: 闸门里的「0 存档」数的是整个 `data/raw/<日期>/` 目录的 `*.meta.json`, 而
+  **ePing / EUR-Lex 的存档落在同一个目录**。于是国别取数崩溃(rc≠0)时, 只要 ePing 存了
+  ≥1 条, 计数就 >0 → 失败闸门不触发 → 照常出报并推送一份**只有 ePing 通报的残缺日报**;
+  同一时刻还会写下"已完成"标记(标记里的 `fetch_rc` **全仓库无人读**)→ 当天后续轮次
+  全部跳过取数 → **47 个国别源当天静默失明**。
+- 修法: ①取数前后各数一次, 差值 = 国别取数**本轮自己**的产出(ePing/EUR-Lex 在其后运行,
+  不计入); ②`.fetch-done` 标记里的 `fetch_rc` 改为**被读**: 非 0 时不按"已完成"跳过,
+  当场清标记让本轮重取。
+- 回归防线: `ScanFailureGuardTests` 里补两条(见本次巡检新增用例)。
+
+#### M30 · EUR-Lex 明文密码出现在 curl 命令行里 —— 同机 `ps` 可见 (高, 已修)
+- 位置: `scripts/fetch_eurlex.py` `soap_query()`
+- 现象: 整段 SOAP 信封(含 `<wsse:Password>`)作为 `--data-binary` 的**参数值**交给 curl
+  → 口令出现在 argv → `ps auxww` / `/proc/<pid>/cmdline` 任何同机用户都能读到
+  EUR-Lex 账号口令。对照: `EPING_API_KEY` 走 HTTP 头, 不入 argv, 那条是对的。
+- 修法: 改用 `--data-binary @-` + `subprocess.run(input=...)` 从 stdin 送请求体,
+  argv 里只剩 URL。
+
+#### M31 · 输出被 max_tokens 截断的"半条记录"被判成功 —— 政策永久消失且全程无痕 (高, 已修)
+- 位置: `scripts/extract_records.py` `call_model_direct()` / `validate()`
+- 现象: 只取 `content[].text`、**从不检查 `stop_reason`**; 校验只看标题/url/quote 三硬项。
+  于是一份截断在 `source_quote` 之后的输出(国家/日期/领域/动作全缺)被当成功 → 写进
+  `extracted-policy.jsonl` → URL 标记"已处理" → 入库端拒收 → **补抽永不重试** →
+  该政策从台账消失且 search-log 一行不留。生产实测形态"kv=12"(部分输出)证明它真实发生过,
+  而原有三道防线只覆盖 kv=0 与"缺标题"。
+- 修法: ①`stop_reason == "max_tokens"` 一律判失败并走 max_tokens×2 的加预算重问;
+  ②抽取端校验与入库端对齐(国家/日期齐备才放行), 让截断产物回到重试分支而不是落盘。
+- 回归防线: `PipelineP4Tests.test_truncated_response_is_failure` /
+  `..._test_extract_validate_requires_ingest_fields`。
+
+#### M32 · 抽取端零枚举校验 —— 一次大小写差异就让整条政策被入库端拒收并永久丢失 (高, 已修)
+- 位置: `scripts/extract_records.py` `validate()`
+- 现象: `FIELD_TEMPLATE` 要求英文枚举(`policy_domain=animal|plant|both|trade|measures`),
+  但抽取端**不校验任何枚举**(docstring 还写着"宽松校验"), 而入库端严格且不做 lower()。
+  模型写 `Animal`、写 `收紧(加严)`、写 `Tighten` → 整条在入库端被拒; 而抽取端已把它写进
+  jsonl(URL 已标记已处理)→ 补抽不重试 → **整条政策丢失**。
+- 修法: 抽取端加枚举归一(大小写/括注/英文写法都能归一; 归不了判"输出不合规格"走重试),
+  脏值不再进台账。
+- 回归防线: `PipelineP4Tests.test_extract_validate_normalizes_enums`。
+
+#### M33 · 抽取段"全挂"与"安静日"不可区分 —— 坏端点/过期 key 会推出"今日无新增 0 条" (高, 已修)
+- 位置: `scripts/extract_records.py` `main()`、`scripts/run_scan.sh` 加工段
+- 现象: `extract()` 返回 `(n_ok, n_fail)` 但 `main()` **恒 return 0** → run_scan 的 RC 恒 0;
+  H20 等价闸门只覆盖**取数段**。端点 500 / key 过期 / 套餐打满时每一份都失败, 流程照常
+  normalize→report→push, 推出去的是"今日无新增 0 条" —— H20 的事故形态在抽取段原样复现。
+- 修法: ①`main()` 在"失败 >0 且成功 =0"时返回 1; ②run_scan 的加工段把抽取 rc=1 视为
+  整轮失败 → **中止本轮、不推「今日无新增」**, EXIT trap 撤销全量声明, 不留残锁。
+  (部分失败不算: 单份失败只废那一份。)
+
+#### M34 · 同 event_id 的合并更新逐字段覆盖已核验/已研判结论 (高, 已修)
+- 位置: `scripts/normalize.py` `upsert()`
+- 现象: 合并 patch 只剔除 `event_id/first_seen`, **不剔除研判四维、不按强弱取核验状态**;
+  `DEFAULT_SENTINELS` 只护住 `verification_status="unverified"` 精确值。后果: ①抽取端给的
+  `impact_type/china_relevance/impact_rationale` 覆盖人工研判, 而 score/level 因新记录为
+  None 被保留 → **混搭**, 台账里出现"score=3.4 / level=中影响 / 四维却是新的"这种自相矛盾
+  的行(`risk.py` 对同一行会判"score 与四维不一致"而拒写); ②`verified` 被 `single_source`
+  降级 → 该记录从 `risk.py --list-pending`(查列)与人工核验队列里静默消失。
+- 修法: ①核验状态**不降级**(verified 不被重抽打成 single_source; 升级与显式误报标记
+  照旧生效); ②研判四维**整块**取用 —— 新记录只有半块而旧记录是完整四维时, 保留旧整块,
+  不混搭(risk.py 的整块写回照旧生效)。
+
+#### M35 · 旧闻窗口闸门排在语义查重之前 —— 窗口外的同一政策无法进入查重合并 (高, 已修)
+- 位置: `scripts/normalize.py` `main()` 的入库循环
+- 现象: `stale_reason` 用**新算出的** event_id 判存在性, 而措辞漂移会让 event_id 变 →
+  窗口外的记录在进入 `find_duplicate` **之前**就被拒收 → M19 的语义查重与"更丰富者胜"
+  对所有超过 7 天的政策完全失效(台账冻结在首次抽取的贫瘠版本), 与合同"只拦新增
+  event_id, 合并更新不受影响"冲突。
+- 修法: 先查语义重复, 命中即视为合并更新, 不受旧闻窗口限制。
+
+#### M36 · 存量归并不做涉台国名规范化 —— 台账留下 `Chinese Taipei` 半规范化行 (高, 已修)
+- 位置: `scripts/normalize.py` `merge_duplicate()`
+- 现象: 归并按"信息量更大者胜"取字符串, `Chinese Taipei`(14) 比 `Taiwan, China`(13)
+  长 → 规范化之前入库的存量行归并后**保留 WTO 成员名**, 而 `country_cn` 又被规范化 →
+  同一行"中规范化", 违反 2026-11-04 用户拍板的表述统一。
+- 修法: 归并落库前统一调 `normalize_country_names()`(幂等)。
+
+#### M37 · `--unmark` 不可逆丢失原核验状态 (高, 已修)
+- 位置: `scripts/flag_food_scope.py`(同构问题在 `flag_non_policy.py`)
+- 现象: 标记前不记录原状态, 撤回时一律恢复 `unverified` → 一条**人工核验为 verified**
+  的记录被判错后撤回, 核验结论被静默降级且不可逆, 记录同时从待研判队列里永久消失。
+- 修法: 标记时把原状态记进 `verification_notes` 的 `prev_status=`, 撤回时据此还原;
+  没有 prev 记录的老记录才回落 `unverified`。
+
+#### M38 · 残留待审标记静默挡掉当日 cron 广播 —— "没推成"与"推成了"退出码不可分 (中, 已修)
+- 位置: `scripts/push_report.py` 待审早退分支
+- 现象: 早退 `return 0` → run_scan 的 PR_RC 判成功 → 当日全量推送静默丢失
+  (M24 记的"钉钉漏发一天"形态)。
+- 修法: **广播路径**被挡时返回非 0(批次红, 人看得见); 渠道会话路径仍返回 0
+  ("待审中等确认"是那条路的正常状态)。标记**不**自动清理 —— "先在原渠道完成再扩散"
+  是红线, 标记时效怎么定由人决定(见 U8 决策)。
+
+#### M39 · `--broadcast --force` 会把调度方的 broadcast 锁覆盖成 review 锁 (中, 已修)
+- 位置: `scripts/push_report.py` 阶段 1 写锁处
+- 现象: 覆盖之后调度路径再跑 `--broadcast` 会被自己的 review 锁拒绝 → 当天钉钉/邮箱
+  再也收不到日报, 且现场看不出是"锁被覆盖"造成的。
+- 修法: 广播锁不被 review 锁覆盖(只提示); review 锁只在该轮确实没有广播声明时写。
+
+#### M40 · 部分渠道失败仍返回 0 且不写 `.pushed` → 重跑对已成功渠道重复推送 (中, 已修)
+- 位置: `scripts/push_report.py` 发送循环与终态标记
+- 现象: 3 个渠道里 1 个失败 → 退出码 0("2/3 成功")、`.pushed` 不写 → 下一轮把**全部
+  渠道**再推一遍, 已成功的渠道收到重复日报。
+- 修法: 已成功的渠道记进 `.pushed/<日期>.partial`, 重跑只补失败的; 部分失败返回非 0。
+
+#### M41 · 范围锁的有效期可被绕过 —— `declared_at` 在未来即永不过期 (中, 已修)
+- 位置: `scripts/push_scope.py` `scope_is_stale()`
+- 现象: `age > limit` 判定, 负数(未来时间戳)不满足 → `declared_at=2099-01-01` 的锁
+  **永不过期**, 持续放行全量推送 —— 10-20/10-22 残锁事故的复发路径, 且这次不需要
+  跑批失败来制造残锁。
+- 修法: 声明时间在未来也判过期。("缺 declared_at 即永不过期"这条尾巴仍在, 见 U11。)
+
+#### M42 · CLI 兜底通道保留 `--yolo` 与 `--safe-mode` 并存 (中, 已修)
+- 位置: `scripts/extract_records.py` `_cli_command()`
+- 现象: 产出是 `hermes --safe-mode -m MiniMax-M3.1-Flash --yolo -z ...`; 两者同时在场
+  时哪个优先, 仓库里没有断言。若 CLI 以 `--yolo` 为准, 兜底路径会重新拿到工具集 ——
+  正是 M26 事故的原始形状。
+- 修法: 注入 `--safe-mode` 时**主动移除** `--yolo`, 不赌旗标优先级。
+- 回归防线: `PipelineP4Tests.test_cli_fallback_drops_yolo_flag`。
+
+#### M43 · token 记账: HTTP 级失败调用完全不计 (中, 已修)
+- 位置: `scripts/extract_records.py` `_record_usage()`
+- 现象: usage 为 None 时直接 return → 端点报错/套餐打满这类**最该被看见**的失败调用
+  在账上完全不存在, 预算闸门对抽取段失明。
+- 修法: usage 为 None 也计调用次数, token 按可得值计。(其余两处缺口见 U2。)
+
+#### M44 · 中文冒号输出整行被静默丢弃 (低, 已修)
+- 位置: `scripts/extract_records.py` `parse_kv_output()`
+- 现象: 模型偶尔输出 `title_cn：某公告`, 该行因不含 `=` 被**整行跳过** —— 字段静默消失,
+  不报错、不重试、不留痕。
+- 修法: 按第一个 `=` / `：` / `:` 切分。
+- 回归防线: `PipelineP4Tests.test_extract_parse_accepts_chinese_colon`。
+
+#### M45 · 降权放行的原因在抽取端被丢弃 —— "留待人工核验"在抽取面不成立 (低, 已修)
+- 位置: `scripts/extract_records.py` `screen_food_scope()` / `screen_non_policy()`
+- 现象: `scope_guard` 对"只在商品字段命中强信号"的记录返回降权放行 + 原因, 但抽取端
+  在"不是定罪"时把原因直接扔掉 → 静默放行, 既不拒收也不留痕。
+- 修法: 原因原样透传, 抽取/补抽各写一行「降权」(不是「失败」, 不影响失败计数)。
+
+#### M46 · 烟测里的 Windows 编码假失败 —— 挂在"历史遗留项"名下很久了 (低, 已修)
+- 位置: `scripts/test_smoke.py` 的 `subprocess.run(..., text=True)`
+- 现象: 子进程吐 UTF-8, 父进程按 locale(cp936/GBK)解码 → 中文报错解成乱码 → 断言
+  "打开数据库失败"必然失败。生产 Linux 两边都是 UTF-8, 所以这是**开发机专属**的假失败,
+  此前一直挂在"Windows 路径历史遗留项"名下。
+- 修法: `subprocess.run` 显式 `encoding="utf-8", errors="replace"`。
+
+#### M47 · `normalize.py` 缺 `--input` 时返回 2 —— 参数错误混进"部分成功"退出码 (低, 已修)
+- 位置: `scripts/normalize.py` `main()`
+- 现象: 2 的合同含义是"有拒收但流程完成, 调度继续出报"; 参数错误返回 2 会让调度继续往下
+  跑, 把空输入报成当日"零新增"。
+- 修法: 参数错误返回 1(真失败)。
+
+#### 复核剔除的误报(留档, 免得下次再查一遍)
+- 「`fetch-status.json` 陈旧文件在跳过取数的轮次仍参与基础设施判定」—— 不成立:
+  `run_scan.sh` 的取数段是 `if [ -n "$FETCH_SKIP" ] … elif [ "$AGENT_MODE" != "1" ]` 结构,
+  跳过取数时整块都不执行, `:540` 的 `--status-only` 判定根本不会跑。
+- 「扫描指纹把导航页脚灌进指纹」—— 成立但已由 U6 记录(兜底路径), 正常路径无此问题。
+
 
 ### 2026-11-06 · B6 退出码三分: 部分拒收不再炸掉当日日报
 

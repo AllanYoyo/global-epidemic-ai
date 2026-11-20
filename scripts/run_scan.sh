@@ -482,9 +482,18 @@ if [ -n "${HERMES_RUN_CMD:-}" ]; then
         echo "[$(date '+%F %T')] --refetch: 已清除当日取数标记, 本轮强制重取"
       fi
       if [ -z "$FETCH_SKIP" ] && [ -f "$FETCH_DONE" ]; then
-        FETCH_SKIP="fetched"
-        echo "[INFO] 当日取数已完成, 标记内容:"
-        sed 's/^/       /' "$FETCH_DONE" 2>/dev/null || true
+        # 标记里带 fetch_rc: 上一轮取数**失败**时不能按「已完成」跳过 ——
+        # 否则当天后续轮次全部只加工旧存档, 国别源静默失明一整天(2026-11-20
+        # 巡检实证: 标记只被写、从不被读, 失败轮照样留下"已完成"标记)。
+        DONE_RC="$(sed -n 's/^fetch_rc=//p' "$FETCH_DONE" 2>/dev/null | head -1 | tr -d '[:space:]')"
+        if [ -n "$DONE_RC" ] && [ "$DONE_RC" != "0" ]; then
+          echo "[严重] 当日取数标记显示上一轮取数失败(fetch_rc=$DONE_RC) —— 不按「已完成」跳过, 本轮重取"
+          rm -f "$FETCH_DONE" 2>/dev/null || true
+        else
+          FETCH_SKIP="fetched"
+          echo "[INFO] 当日取数已完成, 标记内容:"
+          sed 's/^/       /' "$FETCH_DONE" 2>/dev/null || true
+        fi
       fi
       if [ -n "$FETCH_SKIP" ]; then
         echo "[WARN] 跳过取数段(原因: $FETCH_SKIP), 直接用 data/raw/$SCAN_DATE/ 已有存档加工。"
@@ -517,13 +526,27 @@ if [ -n "${HERMES_RUN_CMD:-}" ]; then
       #   ① legacy 回退取基线时读到上一轮的「全挂」结论 → 本轮被误伤中止;
       #   ② 本轮取数崩了(没写状态文件)时沿用上一轮结论 → 闸门放行。
       rm -f "$FETCH_DIR/fetch-status.json" 2>/dev/null || true
+      # ---- 国别取数**本轮自己的**存档数(2026-11-20 巡检闭环, 高危) ----
+      # 闸门里的「0 存档」原先数的是整个 data/raw/<日期>/ 目录里的 *.meta.json ——
+      # 而 ePing / EUR-Lex 的存档落在**同一个目录**。于是国别取数崩溃(rc≠0)时,
+      # 只要 ePing 存了 ≥1 条, 计数就 >0 → 失败闸门不触发 → 照常出报并推送一份
+      # 只有 ePing 通报的残缺日报; 同一时刻还会写下"已完成"标记(标记里的 fetch_rc
+      # 无人读)→ 当天后续轮次全部跳过取数 → **47 个国别源当天静默失明**。
+      # 修法: 取数前后各数一次, 差值 = 国别取数自己这一轮的产出(与 ePing/EUR-Lex
+      # 无关); ePing/EUR-Lex 在其后运行, 它们的存档不计入这个差值。
+      FETCH_ARCH_BEFORE="$(find "$FETCH_DIR" -maxdepth 1 -type f -name '*.meta.json' 2>/dev/null | wc -l | tr -d ' ')"
+      case "$FETCH_ARCH_BEFORE" in ''|*[!0-9]*) FETCH_ARCH_BEFORE=0 ;; esac
       if [ "$FETCH_ENGINE" = "legacy" ]; then
         "$PY" "$REPO/scripts/fetch_pages.py" --date "$SCAN_DATE"
       else
         "$PY" "$REPO/scripts/policy_fetch.py" --date "$SCAN_DATE"
       fi
       FRC=$?
-      echo "[$(date '+%F %T')] 确定性取数结束 rc=$FRC"
+      FETCH_ARCH_AFTER="$(find "$FETCH_DIR" -maxdepth 1 -type f -name '*.meta.json' 2>/dev/null | wc -l | tr -d ' ')"
+      case "$FETCH_ARCH_AFTER" in ''|*[!0-9]*) FETCH_ARCH_AFTER=0 ;; esac
+      FETCH_ARCHIVES_N=$((FETCH_ARCH_AFTER - FETCH_ARCH_BEFORE))
+      [ "$FETCH_ARCHIVES_N" -lt 0 ] && FETCH_ARCHIVES_N=0
+      echo "[$(date '+%F %T')] 确定性取数结束 rc=$FRC 国别本轮存档=$FETCH_ARCHIVES_N"
       # 取数状态终检输入: 区分「全挂」与「安静日」(known-issues H20)。
       # 判定依据是**本轮**取数的成败, 不是状态文件存不存在(2026-10-29 修复 P0):
       #   ① 取数段非零退出 → 取数失败(崩了/被 kill/参数错), 0 存档不是安静日;
@@ -690,11 +713,14 @@ $HEALTH_BLOCK"
     # rc=0(正常收尾, 哪怕 0 条的安静日)或已有存档(取到了东西, 值得保留断点)才写;
     # 超时且 0 存档 → 不写, 下一轮允许重取。--only-group 是测试/补单块语义, 不写。
     if [ "$FETCH_RAN" = "1" ] && [ -z "$ONLY_GROUP" ]; then
-      if [ "$FRC" -eq 0 ] || [ "${RAW_N_NOW:-0}" -gt 0 ]; then
+      # 用**国别取数本轮自己**的存档数(不是目录总数): 目录总数含 ePing/EUR-Lex 的
+      # 存档, 拿它当"取到了东西"会在国别取数崩掉时仍写下"已完成"标记 → 当天
+      # 后续轮次全部跳过取数 → 国别源静默失明(2026-11-20 巡检实证)。
+      if [ "$FRC" -eq 0 ] || [ "${FETCH_ARCHIVES_N:-0}" -gt 0 ]; then
         mkdir -p "$FETCH_DIR" 2>/dev/null || true
         { echo "done_at=$(date '+%F %T')"; echo "fetch_rc=$FRC";
-          echo "archives=$RAW_N_NOW"; echo "candidates=$CAND_N"; } > "$FETCH_DONE"
-        echo "[$(date '+%F %T')] 取数标记已写($FETCH_DONE): rc=$FRC 存档=$RAW_N_NOW 候选=$CAND_N"
+          echo "archives=${FETCH_ARCHIVES_N:-0}"; echo "candidates=$CAND_N"; } > "$FETCH_DONE"
+        echo "[$(date '+%F %T')] 取数标记已写($FETCH_DONE): rc=$FRC 国别存档=${FETCH_ARCHIVES_N:-0} 候选=$CAND_N"
       else
         echo "[WARN] 本轮取数 rc=$FRC 且 0 存档, 不写完成标记(下一轮可重取)"
       fi
@@ -735,7 +761,10 @@ $HEALTH_BLOCK"
     if [ "${FETCH_INFRA:-0}" = "1" ]; then
       FETCH_ABORT=1
     fi
-    if [ "${FETCH_FAILED:-0}" = "1" ] && [ "${RAW_N_NOW:-0}" -eq 0 ]; then
+    if [ "${FETCH_FAILED:-0}" = "1" ] && [ "${FETCH_ARCHIVES_N:-0}" -eq 0 ]; then
+      # 用国别取数本轮自己的存档数(2026-11-20 巡检闭环): 原来用目录总数, 而
+      # ePing/EUR-Lex 的存档在同一个目录 → 国别取数崩了(ePing 存了东西)时闸门
+      # 不触发 → 照常推送一份只有 ePing 通报的残缺日报。
       FETCH_ABORT=1
     fi
     if [ "$FETCH_ABORT" = "1" ]; then
@@ -779,6 +808,16 @@ $HEALTH_BLOCK"
       echo "[$(date '+%F %T')] 阶段 2/2 确定性加工(单轮微调用抽取)"
       RC=0
       "$PY" "$REPO/scripts/extract_records.py" --date "$SCAN_DATE" || RC=$?
+      # ---- 抽取段全挂判失败(2026-11-20 巡检闭环, 抽取线高危) ----
+      # extract_records.py 现在在"成功 0 且有失败"时返回 1(端点 500 / key 过期 /
+      # 套餐打满 → 每一份都失败)。原来它恒返回 0 → RC 恒为 0 → 照常
+      # normalize→report→push → 推出去的是"今日无新增 0 条" —— H20 的事故形态
+      # 在抽取段原样复现。这里中止本轮: 不是安静日, 不推「今日无新增」;
+      # EXIT trap 会撤销本轮的全量声明, 不留残锁。
+      if [ "$RC" -eq 1 ]; then
+        echo "[失败] 抽取段全挂(成功 0 / 失败 >0) —— 不是安静日, 本轮不推送「今日无新增」"
+        exit 1
+      fi
       # 跨天补抽(2026-11-18): 把前几天「已存档但抽失败、内容又不在台账里」的存档补一遍。
       # 洞: 抽取失败只在当天 search-log.md 留痕, done_urls 只认两个 jsonl —— 跨天后
       # 没有任何机制会再抽它(实测 11-11~11-18 真正从未入账的 1 份)。

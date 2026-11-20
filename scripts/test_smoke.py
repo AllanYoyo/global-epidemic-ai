@@ -183,6 +183,28 @@ class SourceDomainTests(unittest.TestCase):
             self.assertTrue(errs, "缺 scheme 的 URL 竟被放行: %s" % url)
             self.assertTrue(any("scheme" in m for m in errs), errs)
 
+    def test_non_http_scheme_rejected(self):
+        """2026-11-20 巡检闭环(H6-② 的源头): 原来只查**主机后缀**、不查 scheme ——
+        `javascript://官方域名/...` 的 host 解析出来仍是官方域, 能以 tier=1 入库,
+        面板再把它渲染成 <a href="javascript:...">, 点一下就在管理员浏览器里执行。
+        入库端是最后一道关口, scheme 只认 http/https。"""
+        for url in ("javascript://www.aphis.usda.gov/alert/1",
+                    "data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==",
+                    "vbscript:msgbox(1)",
+                    "file:///etc/passwd"):
+            e = _source_event(
+                source={"tier": 1, "name": "n", "url": url, "quote": "q"},
+                verification_status="unverified")
+            errs = self.n.validate(dict(e))
+            self.assertTrue(errs, "非 http(s) 的 scheme 竟被放行: %s" % url)
+            self.assertTrue(any("scheme" in m for m in errs), errs)
+        # 正常 https 仍放行(别把闸门修死了)
+        e = _source_event(
+            source={"tier": 1, "name": "n",
+                    "url": "https://www.aphis.usda.gov/rule/123", "quote": "q"},
+            verification_status="unverified")
+        self.assertEqual(self.n.validate(dict(e)), [])
+
     def test_official_flag_only_accepts_true_values(self):
         """2026-10-22 审计: 逃生口原先是真值判断, official:"0"/"false"/"no"
         这类字符串全是真值, 等于随手写一个就能打开 official:1 逃生口。"""
@@ -2615,10 +2637,14 @@ class PipelineP4Tests(unittest.TestCase):
 
     def test_extract_records_parse_and_validate(self):
         # key=value 输出 → 嵌套 source.*; quote >120 截断; 缺标题拒收
+        # 2026-11-20 巡检收紧: 抽取端校验与入库端对齐(国家/日期/枚举), 这些字段
+        # 缺了入库端一定拒收 —— 在抽取端就拒, 才能走"加预算重问"而不是把脏记录
+        # 写进 jsonl(URL 随即被标记已处理, 补抽永不重试 → 政策永久丢失)。
         import extract_records as er
         rec = er.parse_kv_output(
             "title_cn=泰国暂停进口\nsource_url=https://a.b/c\nsource_quote=" + "长" * 200 +
-            "\ndim_trade=4\n这行没有等号\nimpact_type=约束")
+            "\ndim_trade=4\n这行没有等号\nimpact_type=约束"
+            "\ncountry_cn=泰国\ncountry_en=Thailand\nevent_date=2026-11-20")
         self.assertEqual(rec["title_cn"], "泰国暂停进口")
         self.assertEqual(rec["source"]["url"], "https://a.b/c")
         self.assertIsNone(er.validate(rec, "https://a.b/c"))
@@ -2628,6 +2654,64 @@ class PipelineP4Tests(unittest.TestCase):
         wrong = {"title_cn": "x", "source": {"url": "https://evil/x", "quote": "x"}}
         self.assertIn("url 与存档不符", er.validate(wrong, "https://a.b/c"))
 
+    def test_extract_validate_requires_ingest_fields(self):
+        """抽取端与入库端对齐: 缺国家/日期的记录在抽取端就被拒(可重试), 不进台账。"""
+        import extract_records as er
+        base = {"title_cn": "泰国暂停进口", "source": {"url": "https://a.b/c", "quote": "x"}}
+        self.assertIn("输出不完整", er.validate(dict(base), "https://a.b/c"))
+        full = dict(base)
+        full.update({"country_cn": "泰国", "country_en": "Thailand",
+                     "event_date": "2026-11-20", "action_type": "收紧",
+                     "policy_domain": "animal"})
+        self.assertIsNone(er.validate(full, "https://a.b/c"))
+
+    def test_extract_validate_normalizes_enums(self):
+        """枚举归一: 大小写/括注/英文写法不许把记录送到入库端才被拒(那会永久丢失)。"""
+        import extract_records as er
+        rec = {"title_cn": "x", "country_cn": "泰国", "country_en": "Thailand",
+               "event_date": "2026-11-20", "policy_domain": "Animal",
+               "action_type": "收紧(加严)", "impact_type": "Constraint",
+               "source": {"url": "https://a.b/c", "quote": "x"}}
+        self.assertIsNone(er.validate(rec, "https://a.b/c"))
+        self.assertEqual(rec["policy_domain"], "animal")
+        self.assertEqual(rec["action_type"], "收紧")
+        self.assertEqual(rec["impact_type"], "约束")
+        # 归一不了的枚举 → 判不合规格(走重试), 不放脏值进台账
+        bad = {"title_cn": "x", "country_cn": "泰国", "country_en": "Thailand",
+               "event_date": "2026-11-20", "policy_domain": "banana",
+               "source": {"url": "https://a.b/c", "quote": "x"}}
+        self.assertIn("policy_domain", er.validate(bad, "https://a.b/c"))
+
+    def test_extract_parse_accepts_chinese_colon(self):
+        """模型偶尔用中文冒号: 原来整行被跳过(字段静默消失)。"""
+        import extract_records as er
+        rec = er.parse_kv_output("title_cn：泰国暂停进口\ncountry_cn：泰国")
+        self.assertEqual(rec["title_cn"], "泰国暂停进口")
+        self.assertEqual(rec["country_cn"], "泰国")
+
+    def test_cli_fallback_drops_yolo_flag(self):
+        """CLI 兜底通道不得同时带 --yolo 与 --safe-mode(工具集来源, M26 同形)。"""
+        import extract_records as er
+        with mock.patch.dict(os.environ, {"HERMES_RUN_CMD": 'hermes --yolo -z "{PROMPT}"'}):
+            cmd, err = er._cli_command("BODY")
+        self.assertIsNone(err)
+        self.assertNotIn("--yolo", cmd)
+        self.assertIn("--safe-mode", cmd)
+
+    def test_truncated_response_is_failure(self):
+        """stop_reason=max_tokens → 判失败(半条记录不许当成功落盘)。"""
+        import extract_records as er
+        body = json.dumps({
+            "stop_reason": "max_tokens",
+            "content": [{"type": "text", "text": "record_type=policy\ntitle_cn=泰国"}],
+            "usage": {"input_tokens": 10, "output_tokens": 5}})
+        with mock.patch.dict(os.environ, {er.EXTRACT_API_KEY_ENV: "test-key"}):
+            with mock.patch.object(er.urllib.request, "urlopen") as m:
+                m.return_value.__enter__.return_value.read.return_value = body.encode("utf-8")
+                rc, out, _usage = er.call_model_direct("PROMPT")
+        self.assertEqual(rc, 1)
+        self.assertIn("截断", out)
+
     def test_validate_url_transcription_rescue(self):
         # 模型回显长 URL 的转录变形 → 采纳存档 url, 不判失败(2026-11-05 实测:
         # P0-1 无附件通报 THA/807/Add.1 的官方文档直链两次重试都死在
@@ -2636,27 +2720,33 @@ class PipelineP4Tests(unittest.TestCase):
         import extract_records as er
         archive = ("https://docs.wto.org/imrd/directdoc.asp?"
                    "DDFDocuments/T/G/SPS/NTHA807A1.docx")
+        common = {"country_cn": "泰国", "country_en": "Thailand",
+                  "event_date": "2026-11-20"}
         # ① 截断形态(前段一致, 尾巴没了) → 采纳存档 url
         rec1 = {"title_cn": "x", "source": {
             "url": "https://docs.wto.org/imrd/directdoc.asp?DDFDocuments/T/G/SPS",
             "quote": "x"}}
+        rec1.update(common)
         self.assertIsNone(er.validate(rec1, archive))
         self.assertEqual(rec1["source"]["url"], archive)
         # ② 漏杠 + 大小写漂移(归一化后同串) → 采纳存档 url
         rec2 = {"title_cn": "x", "source": {
             "url": "https://DOCs.wto.org/imrd/directdoc.asp?DDFDocuments/T/G/SPSNTHA807A1.docx",
             "quote": "x"}}
+        rec2.update(common)
         self.assertIsNone(er.validate(rec2, archive))
         self.assertEqual(rec2["source"]["url"], archive)
         # ③ 幻觉改写(文号被改形: NTHA807A1 → N/THA/807/Add1) → 仍拒收
         bad = {"title_cn": "x", "source": {
             "url": "https://docs.wto.org/imrd/directdoc.asp?DDFDocuments/T/G/SPS/N/THA/807/Add1.docx",
             "quote": "x"}}
+        bad.update(common)
         self.assertIn("url 与存档不符", er.validate(bad, archive))
         # ④ 异主机 → 仍拒收
         evil = {"title_cn": "x", "source": {
             "url": "https://evil.example/imrd/directdoc.asp?DDFDocuments/T/G/SPS/NTHA807A1.docx",
             "quote": "x"}}
+        evil.update(common)
         self.assertIn("url 与存档不符", er.validate(evil, archive))
 
     def test_extract_records_429_fast_fail(self):
@@ -4762,7 +4852,14 @@ class FoodScopeTests(unittest.TestCase):
         bad = tempfile.mkdtemp(prefix="yi-not-a-db-")
         try:
             argv = [sys.executable, script, "--db-path", bad]
-            p = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+            # 必须显式指定 encoding="utf-8"(2026-11-20 巡检修): text=True 时
+            # 子进程按 locale 首选编码解码, 而本机 Python 的 stdout 是 UTF-8
+            # (PYTHONUTF8/新式默认), locale 首选却是 cp936(GBK) —— 中文报错
+            # 解成乱码, 断言"打开数据库失败"必然失败(实测 rc=2 与报错内容都正确,
+            # 只是解码坏了)。生产 Linux 两边都是 UTF-8, 所以这是**开发机专属**的
+            # 假失败: 此前一直挂在"Windows 路径历史遗留项"名下。
+            p = subprocess.run(argv, capture_output=True, text=True,
+                               encoding="utf-8", errors="replace", timeout=120)
             out = (p.stdout or "") + (p.stderr or "")
             self.assertEqual(p.returncode, 2, out)
             self.assertIn("打开数据库失败", out)
@@ -5355,6 +5452,175 @@ class ExtractionChannelTests(unittest.TestCase):
         i_carry = text.index("--stage carry")
         i_norm = text.index("normalize.py", i_carry)
         self.assertLess(i_carry, i_norm, "补抽必须在 normalize 之前")
+
+
+class Audit20261120RegressionTests(unittest.TestCase):
+    """2026-11-20 巡检闭环的回归防线(每条对应 known-issues 本次巡检小节的一条)。"""
+
+    # ---- M29 取数闸门/完成标记被跨子系统存档污染 ----
+
+    def test_run_scan_gate_uses_own_archive_count(self):
+        """闸门必须用「国别取数本轮自己的存档数」, 不能用目录总数(ePing/EUR-Lex 在同目录)。"""
+        with open(os.path.join(REPO, "scripts", "run_scan.sh"), encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn("FETCH_ARCHIVES_N", text, "闸门未使用国别取数本轮存档数")
+        gate = text[text.index("FETCH_FAILED:-0"):]
+        self.assertIn("FETCH_ARCHIVES_N", gate.split("fi")[0],
+                      "失败闸门仍用被污染的计数")
+        # 计数必须来自取数前后的差值(不是目录总数)
+        self.assertIn("FETCH_ARCH_BEFORE", text)
+        self.assertIn("FETCH_ARCH_AFTER", text)
+
+    def test_run_scan_reads_fetch_rc_from_marker(self):
+        """`.fetch-done` 里的 fetch_rc 必须被读: 上一轮失败不能按「已完成」跳过。"""
+        with open(os.path.join(REPO, "scripts", "run_scan.sh"), encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn("fetch_rc=", text, "标记未写 fetch_rc")
+        self.assertIn("sed -n 's/^fetch_rc=//p'", text, "标记里的 fetch_rc 未被读取")
+
+    # ---- M33 抽取段全挂 vs 安静日 ----
+
+    def test_extract_main_nonzero_when_all_fail(self):
+        """成功 0 且有失败 → 退出码非 0(不能与安静日无法区分)。"""
+        import extract_records as er
+        argv = ["extract_records.py", "--date", "2026-11-20"]
+        with mock.patch.object(sys, "argv", argv), \
+                mock.patch.object(er, "extract", return_value=(0, 3)):
+            self.assertNotEqual(er.main(), 0)
+        with mock.patch.object(sys, "argv", argv), \
+                mock.patch.object(er, "extract", return_value=(2, 1)):
+            self.assertEqual(er.main(), 0)
+
+    def test_run_scan_aborts_when_extract_totally_fails(self):
+        """抽取段 rc=1 → 中止本轮, 不推「今日无新增」(H20 在抽取段等价形态)。"""
+        with open(os.path.join(REPO, "scripts", "run_scan.sh"), encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn("抽取段全挂", text)
+        i = text.index("extract_records.py")
+        j = text.index("抽取段全挂", i)
+        self.assertIn("exit 1", text[j:j + 400])
+
+    # ---- M34/M35/M36/M37 入库端合并语义 ----
+
+    def test_upsert_does_not_downgrade_verified(self):
+        """重抽/补抽不得把 verified 打成 single_source(记录会从待研判队列消失)。"""
+        import normalize
+        from normalize import open_db, upsert, fill_defaults
+        con = open_db()
+        try:
+            old = fill_defaults(dict(_source_event(policy_key="k1")))
+            old["verification_status"] = "verified"
+            old["impact_level"] = "中影响"
+            old["impact_score"] = 3.4
+            old["impact_focus"] = "持续观察"
+            old["dimension_scores"] = {"trade": 4, "biosecurity": 3,
+                                       "response": 3, "alignment": 2}
+            upsert(con, old, merge=True)
+            new = fill_defaults(dict(_source_event(policy_key="k1")))
+            new["verification_status"] = "single_source"
+            new["impact_type"] = "中性"          # 抽取端给的半块研判
+            new["china_relevance"] = "直接涉及中国"
+            saved = upsert(con, new, merge=True)
+            self.assertEqual(saved["verification_status"], "verified",
+                             "verified 被重抽降级了")
+            # 研判四维整块保留, 不与抽取端的半块混搭
+            self.assertEqual(saved["impact_level"], "中影响")
+            self.assertEqual(saved["impact_score"], 3.4)
+            self.assertEqual(saved["dimension_scores"], old["dimension_scores"])
+            self.assertNotEqual(saved.get("impact_type"), "中性",
+                                "半块研判覆盖了整块")
+        finally:
+            con.execute("DELETE FROM events WHERE event_id = ?", (old["event_id"],))
+            con.commit()
+            con.close()
+
+    def test_merge_duplicate_normalizes_taiwan_names(self):
+        """归并不得留下 Chinese Taipei(违反 2026-11-04 表述统一)。"""
+        import normalize
+        old = {"event_id": "x", "country_cn": "中华台北", "country_en": "Chinese Taipei",
+               "first_seen": "2026-01-01T00:00:00"}
+        new = {"event_id": "y", "country_cn": "中国台湾省", "country_en": "Taiwan, China",
+               "first_seen": "2026-01-02T00:00:00"}
+        merged = normalize.merge_duplicate(old, new)
+        self.assertEqual(merged["country_en"], "Taiwan, China")
+        self.assertEqual(merged["country_cn"], "中国台湾省")
+
+    def test_dedup_runs_before_stale_window(self):
+        """窗口外的同一政策必须能进语义合并(不能先被旧闻闸门拒收)。
+
+        场景: 政策当时是新鲜的、已入库; 之后模型重抽时措辞漂移(→ event_id 变)且
+        publish_date 已滑出 7 天窗口 —— 旧闻闸门若排在查重之前, 这条更新会被拒收,
+        台账永久冻结在首次抽取的贫瘠版本。
+        """
+        import normalize
+        tmp = tempfile.mkdtemp(prefix="audit-stale-")
+        db = os.path.join(tmp, "t.db")
+        try:
+            old_date = "2026-09-01"
+            ev = _source_event(policy_key="措辞A",
+                               source={"tier": 1, "name": "n",
+                                       "url": "https://www.aphis.usda.gov/p-stale",
+                                       "publish_date": old_date, "quote": "q"},
+                               event_date=old_date, effective_date=old_date)
+            ev2 = dict(ev)
+            ev2["policy_key"] = "措辞B"        # 措辞变 → event_id 变
+            # 第一步: 放宽窗口把它入库(模拟"当时新鲜时已入库")
+            p1 = os.path.join(tmp, "in1.json")
+            with open(p1, "w", encoding="utf-8") as f:
+                json.dump([ev], f, ensure_ascii=False)
+            argv1 = ["normalize.py", "--input", p1, "--db-path", db,
+                     "--max-age-days", "0", "--out", os.path.join(tmp, "out")]
+            with mock.patch.object(sys, "argv", argv1), redirect_stdout(io.StringIO()):
+                normalize.main()
+            # 第二步: 正常 7 天窗口再入一次(措辞不同) → 必须走语义合并
+            p2 = os.path.join(tmp, "in2.json")
+            with open(p2, "w", encoding="utf-8") as f:
+                json.dump([ev2], f, ensure_ascii=False)
+            argv2 = ["normalize.py", "--input", p2, "--db-path", db,
+                     "--max-age-days", "7", "--out", os.path.join(tmp, "out")]
+            buf = io.StringIO()
+            with mock.patch.object(sys, "argv", argv2), redirect_stdout(buf):
+                normalize.main()
+            out = buf.getvalue()
+            self.assertIn("去重", out, "窗口外的同一政策没进语义合并:\n%s" % out)
+            self.assertNotIn("[旧闻拒收]", out,
+                             "旧闻闸门仍排在语义查重之前:\n%s" % out)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_unmark_restores_previous_verification_status(self):
+        """--unmark 必须还原标记前的核验状态(否则人工核验结论被静默降级)。"""
+        import flag_food_scope as ffs
+        import normalize
+        from normalize import open_db, upsert, fill_defaults
+        tmp = tempfile.mkdtemp(prefix="audit-unmark-")
+        db = os.path.join(tmp, "t.db")
+        try:
+            con = open_db(db)
+            ev = fill_defaults(dict(_source_event(policy_key="unmark-case")))
+            ev["verification_status"] = "verified"
+            upsert(con, ev, merge=True)
+            con.close()
+            e2 = fill_defaults(dict(_source_event(policy_key="unmark-case")))
+            e2["verification_status"] = "false_positive"
+            e2["verification_notes"] = "%s | prev_status=verified" % ffs._mark_note("测试")
+            con = open_db(db)
+            upsert(con, e2, merge=True)
+            con.close()
+            buf = io.StringIO()
+            with mock.patch.object(ffs, "open_db", lambda p=None: normalize.open_db(db)), \
+                    mock.patch.object(ffs, "DATA_DIR", tmp), \
+                    redirect_stdout(buf):
+                rc = ffs._unmark(ev["event_id"], db)
+            self.assertEqual(rc, 0, buf.getvalue())
+            con = normalize.open_db(db)
+            row = con.execute("SELECT payload FROM events WHERE event_id = ?",
+                               (ev["event_id"],)).fetchone()
+            con.close()
+            self.assertEqual(json.loads(row[0])["verification_status"], "verified",
+                             "unmark 没有还原原核验状态")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 if __name__ == "__main__":

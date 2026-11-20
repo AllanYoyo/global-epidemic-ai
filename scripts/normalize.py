@@ -377,6 +377,26 @@ def check_source_domain(e):
     url = src.get("url")
     host = _source_host(url)
     tier = src.get("tier")
+    # ---- scheme 白名单(2026-11-20 巡检闭环, known-issues H6-② 的源头) ----
+    # 原来只查**主机后缀**、不查 scheme: `javascript://official.gov.cn/x` 的主机
+    # 解析出来仍然是官方域 → 通过校验入库 → 面板把它渲染成 <a href="javascript:...">,
+    # 管理员点一下就在自己浏览器里执行脚本(stored XSS)。同类还有 data: /
+    # vbscript: / file: 。可溯源的"原文地址"只可能是 http/https, 这里 fail-closed。
+    # 用 urlsplit 真解析(而不是正则看前缀): `https:javascript:alert(1)//wto.org`
+    # 这类畸形地址前缀像 https, 但解析出来没有主机 —— 同样拒收。
+    try:
+        parts = urllib.parse.urlsplit(str(url or ""))
+        scheme = (parts.scheme or "").lower()
+        netloc = parts.netloc or ""
+    except ValueError:
+        scheme, netloc = "", ""
+    if scheme not in ("http", "https") or not netloc:
+        errs.append(
+            "source.url 必须是 http/https 的绝对 URL(当前 scheme=%r, 主机=%r): "
+            "只查主机后缀不查 scheme, 会让 javascript://官方域名/... 之类的地址入库, "
+            "面板渲染成可点链接即执行脚本" % (scheme or "(无)", netloc or "(无)"))
+        e["source"] = src
+        return errs, e
     # 主机取不到(缺 scheme / 相对路径 / 畸形 URL)时, 下面两处判定都会被 host 真值短路:
     # 第三方黑名单查不到、官方域校验也查不到 —— 结果是 `tbtsps.cn/x.html` 这种
     # **无 scheme** 的拉黑源能以 tier=1 + verified 直接入库(2026-10-22 审计实测复现)。
@@ -690,6 +710,15 @@ def merge_duplicate(old, new):
     merged["event_id"] = old.get("event_id")
     merged["first_seen"] = old.get("first_seen") or new.get("first_seen")
     merged["updated_at"] = now()
+    # ---- 涉台国名统一(2026-11-20 巡检闭环) ----
+    # 归并按"信息量更大者胜"取字符串: "Chinese Taipei"(14) 比 "Taiwan, China"(13)
+    # 长 → 规范化之前入库的存量行归并后**保留 WTO 成员名**, 而 country_cn 又被
+    # 规范化 → 同一行"中规范化", 台账/日报/推送里混排「中国台湾省」与
+    # Chinese Taipei(违反 2026-11-04 用户拍板的表述统一)。归一化幂等, 放最后做。
+    try:
+        normalize_country_names(merged)
+    except Exception:  # 归一化失败不该阻断归并(幂等函数, 理论上不会抛)
+        pass
     return merged
 
 
@@ -1019,6 +1048,32 @@ def upsert(con, e, merge=True):
         for key, default in DEFAULT_SENTINELS.items():
             if patch.get(key) == default and old.get(key) not in (None, "", default):
                 del patch[key]
+        # ---- 核验状态不降级(2026-11-20 巡检闭环) ----
+        # 重抽/补抽会把 verified 打成 single_source(抽取端默认), 该记录随即从
+        # risk.py --list-pending(查**列** verification_status='verified')与人工核验
+        # 队列里静默消失。降级一律拒绝; 升级(→verified)与显式误报标记
+        # (→false_positive, flag_food_scope/flag_non_policy 的人工动作)照旧生效。
+        if (old.get("verification_status") == "verified"
+                and patch.get("verification_status") in (None, "", "unverified",
+                                                         "single_source")):
+            patch.pop("verification_status", None)
+        # ---- 研判四维整块取用, 不混搭(2026-11-20 巡检闭环) ----
+        # 抽取端只给 impact_type/china_relevance/impact_rationale(半块), 而旧记录
+        # 是完整四维(score/level/focus/dimension_scores 齐) → 混搭会得到
+        # "score=3.4 / level=中影响 / dimension_scores 却是新的"这种自相矛盾的行,
+        # risk.py 对同一行会判"score 与四维不一致"而拒写。半块不许覆盖整块;
+        # 整块(risk.py 写回)照旧生效。
+        def _block_full(d):
+            return all(d.get(k) not in (None, "", [], {}) for k in
+                       ("dimension_scores", "impact_score", "impact_level",
+                        "impact_focus"))
+        old_block = {k: old.get(k) for k in JUDGE_FIELDS}
+        new_block = {k: e.get(k) for k in JUDGE_FIELDS}
+        if (any(v not in (None, "", [], {}) for v in old_block.values())
+                and any(v not in (None, "", [], {}) for v in new_block.values())
+                and _block_full(old_block) and not _block_full(new_block)):
+            for k in JUDGE_FIELDS:
+                patch.pop(k, None)
         e = dict(old, **patch)
         e["event_id"] = old.get("event_id") or e.get("event_id")
         e["first_seen"] = old.get("first_seen") or e.get("first_seen")
@@ -1125,7 +1180,10 @@ def main():
         return 0
     if not args.input:
         print("[错误] 需要 --input <文件> (或用 --count-first-seen <日期> 做只读查询)")
-        return 2
+        # 参数错误是**真失败**(1), 不是"部分成功"(2): 2 的合同含义是"有拒收但
+        # 流程完整跑完, 调度继续出报"。返回 2 会让 run_scan.sh 继续往下跑, 把
+        # 空输入报成当日"零新增"(2026-11-20 巡检闭环)。
+        return 1
     try:
         records = _load_input(args.input)
     except (OSError, ValueError) as exc:
@@ -1167,8 +1225,18 @@ def main():
     # 旧闻拦截只针对新增 event_id: 已入库记录的核验/研判回写走合并更新, 不受窗口限制
     stale, written, deduped = [], 0, 0
     for i, e in events:
+        # ---- 先查语义重复, 再判旧闻(2026-11-20 巡检闭环) ----
+        # 原顺序是"旧闻拒收 → 查重", 而旧闻判定用的是**新算出的** event_id:
+        # 同一政策重新抽取(措辞漂移 → id 变)时, 窗口外的记录在进入语义查重
+        # **之前**就被拒收 → M19 的语义查重与"更丰富者胜"对所有超过 7 天的
+        # 政策完全失效(台账冻结在首次抽取的贫瘠版本), 与合同"只拦新增
+        # event_id, 合并更新不受影响"冲突。先查重: 命中即视为合并更新,
+        # 不受旧闻窗口限制。
+        dup = None
+        if con and not args.replace:
+            dup = find_duplicate(con, e)
         reason = stale_reason(e, cutoff)
-        if reason and not (con and _event_exists(con, e["event_id"])):
+        if reason and not (con and (_event_exists(con, e["event_id"]) or dup)):
             stale.append((i, reason))
             print("[旧闻拒收] 第%d条: %s  %s @ %s" % (
                 i, reason, e.get("title_cn") or e.get("title_en") or e.get("summary_cn") or "（无标题）",
@@ -1179,18 +1247,16 @@ def main():
             # 同一政策被抽两次(措辞漂移导致 event_id 不同)时, 不新开一条, 而是
             # 复用已有记录的 event_id 合并更新 —— 台账里保持"一条政策一条记录"。
             # 查重键 = source.url + 生效日 + policy_domain + action_type(见 dedup_key)。
-            if not args.replace:
-                dup = find_duplicate(con, e)
-                if dup:
-                    dup_id, dup_payload = dup
-                    merged = merge_duplicate(dup_payload, e)
-                    e = upsert(con, merged, merge=True)
-                    deduped += 1
-                    print("[去重] 第%d条 与已有 %s 同一政策(同 url/生效日/领域/动作), 合并更新不新开记录"
-                          % (i, dup_id))
-                    write_event_file(e, out_dir)
-                    written += 1
-                    continue
+            if dup:
+                dup_id, dup_payload = dup
+                merged = merge_duplicate(dup_payload, e)
+                e = upsert(con, merged, merge=True)
+                deduped += 1
+                print("[去重] 第%d条 与已有 %s 同一政策(同 url/生效日/领域/动作), 合并更新不新开记录"
+                      % (i, dup_id))
+                write_event_file(e, out_dir)
+                written += 1
+                continue
             e = upsert(con, e, merge=not args.replace)
         write_event_file(e, out_dir)
         written += 1

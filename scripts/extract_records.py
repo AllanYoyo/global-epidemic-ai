@@ -438,7 +438,10 @@ def screen_food_scope(rec):
     漂移(这正是本仓库反复吃过的亏), 一处改了另一处没跟上就会漏放。
     """
     is_food, why, _hit = scope_guard.classify_record(rec)
-    return (True, why) if is_food else (False, "")
+    # 2026-11-20 巡检闭环: 原来在"不是定罪"时把 why 直接扔掉 ——
+    # scope_guard 的「仅商品字段命中强信号 → 降权放行, 留待人工核验」这条合同
+    # 在抽取面就一点痕迹都没有(既不拒收也不留痕)。原因原样透传, 由调用方写降权行。
+    return (is_food, why)
 
 
 def screen_non_policy(rec):
@@ -460,6 +463,9 @@ def screen_non_policy(rec):
     # 食品类通报往往有很强的"变更动词 + 政策对象"结构(修订/发布/标准/准入),
     # 会顺利穿过第⑤道; 这类必须由专门的食安闸门拦住。
     reject, why = screen_food_scope(rec)
+    # 降权放行(M22 修法引入的分支)的原因要留着往下传: 合同要求"降权放行 → 留待
+    # 人工核验", 原因丢了就只剩"静默放行"。非定罪时 why 即降权说明。
+    downgrade = "" if reject else (why or "")
     if reject:
         return True, why
 
@@ -469,7 +475,7 @@ def screen_non_policy(rec):
              str(rec.get("summary_cn") or ""), str(src.get("quote") or "")]
     text = " ".join(p for p in parts if p)
     if not text.strip():
-        return False, ""
+        return False, downgrade
 
     for sig in NEGATION_SIGNALS:
         if sig in text:
@@ -489,10 +495,10 @@ def screen_non_policy(rec):
     # ④ 全文兜底: 命中"非政策信号"且**全文没有**"规范动作"才判非政策
     non_hit = [s for s in NON_POLICY_SIGNALS if s in text]
     if not non_hit:
-        return False, ""
+        return False, downgrade
     if _has_normative_action(text):
         # 有规范动作 → 可能是"会议通过/宣布了某措施", 放行
-        return False, ""
+        return False, downgrade
     return True, "非政策信号(%s)且无规范动作" % "、".join(non_hit[:3])
 
 
@@ -573,6 +579,16 @@ def call_model_direct(prompt, max_tokens=None):
     text = "".join(b.get("text") or "" for b in (d.get("content") or [])
                    if isinstance(b, dict) and b.get("type") == "text")
     usage = d.get("usage") or {}
+    # ---- 截断必须判失败(2026-11-20 巡检闭环, 抽取线高危) ----
+    # 原来只看"有没有文本": 一份**截断在 source_quote 之后**的输出(标题/url/quote
+    # 三硬项齐全, 国家/日期/领域/动作全缺)会被判成功 → 写进 extracted-policy.jsonl
+    # → URL 标记为已处理 → 入库端拒收 → 补抽永不重试 → **该政策永久消失且全程无痕**
+    # (known-issues 记的生产形态"kv=12"就是部分输出)。截断一律判失败, 走
+    # max_tokens×2 的加预算重问(与现有重试同一路径)。
+    stop_reason = str(d.get("stop_reason") or "")
+    if stop_reason == "max_tokens":
+        return 1, ("输出被 max_tokens=%d 截断(stop_reason=max_tokens)"
+                   % int(max_tokens or EXTRACT_MAX_TOKENS)), usage
     if not text.strip():
         # 空输出几乎总是"输出被 max_tokens 截断"(M3.1-Flash 实测 2/6 如此)
         return 1, "空输出(可能被 max_tokens=%d 截断)" % EXTRACT_MAX_TOKENS, usage
@@ -580,7 +596,7 @@ def call_model_direct(prompt, max_tokens=None):
 
 
 def _cli_command(prompt):
-    """拼 CLI 兜底通道的命令行: 钉死模型 + 默认 --safe-mode。"""
+    """拼 CLI 兜底通道的命令行: 钉死模型 + 强制 --safe-mode 且**去掉 --yolo**。"""
     tpl = os.environ.get("HERMES_RUN_CMD") or 'hermes --yolo -z "{PROMPT}"'
     if "{PROMPT}" not in tpl:
         return None, "HERMES_RUN_CMD 缺 {PROMPT} 占位符"
@@ -592,6 +608,12 @@ def _cli_command(prompt):
     if EXTRACT_CLI_SAFE and "--safe-mode" not in tpl:
         parts = tpl.split(None, 1)
         tpl = parts[0] + " --safe-mode" + ((" " + parts[1]) if len(parts) > 1 else "")
+    # --yolo 与 --safe-mode 同时在场时哪个优先, 仓库里没有断言(实测产出是
+    # `hermes --safe-mode -m ... --yolo -z ...`)。若 CLI 以 --yolo 为准, 兜底路径
+    # 会重新拿到工具集 —— 正是 M26 事故的原始形状(22% 的调用跑成工具循环)。
+    # 抽取是数据面, 不该有工具: 显式去掉 --yolo, 不赌旗标优先级。
+    if "--yolo" in tpl:
+        tpl = re.sub(r"(?<![\w-])--yolo\s*", "", tpl)
     return tpl.replace("{PROMPT}", prompt.replace('"', "」")), None
 
 
@@ -615,11 +637,17 @@ _USAGE_LOCK = threading.Lock()
 
 
 def _record_usage(usage):
-    """把本次调用的 usage 累加进模块级计数(直连通道才有)。"""
-    if not usage:
-        return
+    """把本次调用的 usage 累加进模块级计数(直连通道才有)。
+
+    2026-11-20 巡检闭环: usage 为 None(HTTP 失败/网络异常/非 JSON)时**调用次数
+    照样计**。原来直接 return, 于是"端点报错/套餐打满"这类最该被看见的失败调用
+    在账上完全不存在 —— token_budget.py 的预算闸门对抽取段失明(而抽取占当日用量
+    95%)。次数完整、token 按可得值计, 是记账的最低要求。
+    """
     with _USAGE_LOCK:
         _USAGE["calls"] += 1
+        if not usage:
+            return
         _USAGE["input_tokens"] += int(usage.get("input_tokens") or 0)
         _USAGE["output_tokens"] += int(usage.get("output_tokens") or 0)
 
@@ -657,11 +685,16 @@ def parse_kv_output(text):
     rec = {}
     for line in text.splitlines():
         line = line.strip()
-        if not line or "=" not in line or line.startswith("#"):
+        if not line or line.startswith("#"):
             continue
-        k, v = line.split("=", 1)
-        k = k.strip().lower()
-        v = v.strip()
+        # 2026-11-20 巡检闭环: 模型偶尔用中文冒号(title_cn：某公告)。原来因
+        # 不含 "=" 被**整行跳过** —— 字段静默消失, 不报错、不重试、不留痕。
+        # 按第一个 "=" / "：" / ":" 切分, key 不合法才丢。
+        parts = re.split(r"[=：:]", line, 1)
+        if len(parts) < 2:
+            continue
+        k, v = parts[0].strip(), parts[1].strip()
+        k = k.lower()
         if not re.match(r"^[a-z_]+$", k):
             continue
         if v == "":
@@ -705,8 +738,76 @@ def _url_rescuable(model_url, archive_url):
     return bool(nm) and bool(na) and (na.startswith(nm) or nm.startswith(na))
 
 
+# ---- 枚举归一(2026-11-20 巡检闭环, 抽取线高危) ----
+# 抽取端原来**零枚举校验**, 入库端(normalize.validate)却严格: 模型把 animal 写成
+# Animal、把"收紧"写成"收紧(加严)" → 整条在入库端被拒收; 而抽取端已把它写进
+# extracted-policy.jsonl(URL 标记为已处理)→ 补抽不会重试 → **整条政策永久丢失**。
+# 归一不了就判"输出不合规格", 走加预算重问, 不把脏值送进台账。
+_ENUM_ALLOWED = {
+    "policy_domain": ("animal", "plant", "both", "trade", "measures"),
+    "action_type": ("收紧", "放松", "调整", "恢复"),
+    "impact_type": ("约束", "机会", "中性"),
+    "impact_level": ("高影响", "中影响", "低影响"),
+    "china_relevance": ("直接涉及中国", "间接影响", "暂无明显关联"),
+}
+# 模型偶尔给出英文枚举(枚举值是中文, 入库端只认中文)
+_ENUM_EN = {
+    "policy_domain": {"animals": "animal", "plants": "plant", "both": "both",
+                      "trade": "trade", "measures": "measures"},
+    "action_type": {"tighten": "收紧", "tightening": "收紧", "restrict": "收紧",
+                    "restriction": "收紧", "relax": "放松", "loosen": "放松",
+                    "adjust": "调整", "adjustment": "调整", "restore": "恢复",
+                    "resume": "恢复", "suspend": "收紧"},
+    "impact_type": {"constraint": "约束", "opportunity": "机会", "neutral": "中性"},
+    "impact_level": {"high": "高影响", "medium": "中影响", "low": "低影响"},
+    "china_relevance": {"direct": "直接涉及中国", "indirect": "间接影响",
+                        "none": "暂无明显关联"},
+}
+
+
+def _normalize_enum_value(field, raw):
+    """把模型给的枚举值归一到合同取值; 归不了返回 None(交由调用方判不合规格)。"""
+    if raw is None:
+        return None
+    v = str(raw).strip()
+    if not v:
+        return None
+    allowed = _ENUM_ALLOWED[field]
+    if v in allowed:
+        return v
+    low = v.lower()
+    if low in allowed:
+        return low
+    # "收紧(加严)" / "收紧（加严）" / "收紧-加严" / "收紧: 加严" → 取主值
+    m = re.match(r"^[^\s(（\[【\-—:：]+", v)
+    if m:
+        cand = m.group(0).strip()
+        if cand in allowed:
+            return cand
+        if cand.lower() in allowed:
+            return cand.lower()
+    if low in _ENUM_EN.get(field, {}):
+        return _ENUM_EN[field][low]
+    return None
+
+
+def _normalize_enums(rec):
+    """归一记录里的枚举字段。返回错误串(不可归一时)或 None。"""
+    for field in ("policy_domain", "action_type", "impact_type", "impact_level",
+                  "china_relevance"):
+        raw = rec.get(field)
+        if raw is None or str(raw).strip() == "":
+            continue
+        fixed = _normalize_enum_value(field, raw)
+        if fixed is None:
+            return "%s 取值不合法: %r(合同取值: %s)" % (
+                field, str(raw)[:40], "/".join(_ENUM_ALLOWED[field]))
+        rec[field] = fixed
+    return None
+
+
 def validate(rec, url):
-    """最小校验: 标题/URL/quote 三硬项 + quote 长度。返回错误或 None。"""
+    """抽取端最小校验: 标题/URL/quote 三硬项 + quote 长度 + 枚举归一 + 必备字段。"""
     src = rec.get("source") or {}
     title = rec.get("title_cn") or rec.get("title_en")
     if not title:
@@ -729,6 +830,20 @@ def validate(rec, url):
         src["quote"] = quote[:120]  # 截断而非拒收(保守可入库)
     if not quote:
         src["quote"] = (rec.get("title_cn") or "")[:100] or "(标题代quote)"
+    # ---- 枚举归一(2026-11-20 巡检闭环) ----
+    # 抽取端零枚举校验 + 入库端严格 = 大小写/括注差异让整条政策被静默丢弃。
+    err = _normalize_enums(rec)
+    if err:
+        return err
+    # ---- 必备字段齐备(截断的半条记录) ----
+    # 入库端硬要求 country_cn / country_en / 日期; 抽取端不查, 这些缺失的记录会
+    # 一路走到入库端才被拒 —— 而那时 URL 已被标记"已处理", 补抽不会重试它。
+    missing = [k for k in ("country_cn", "country_en") if not str(rec.get(k) or "").strip()]
+    if not (str(rec.get("event_date") or "").strip()
+            or str(rec.get("effective_date") or "").strip()):
+        missing.append("event_date")
+    if missing:
+        return "输出不完整(缺 %s)" % ",".join(missing)
     rec.setdefault("record_type", "policy")
     return None
 
@@ -886,6 +1001,11 @@ def extract(date_str, log=print):
                     log("[extract_records] 拒收(非政策内容): %s (%s)"
                         % ((rec.get("title_cn") or url)[:60], why))
                     continue
+                if why:
+                    # 降权放行留痕(2026-11-20 巡检闭环): 合同要求"降权放行 → 留待
+                    # 人工核验", 原来原因被扔掉, 抽取面一点痕迹都没有。写的是
+                    # 「降权」不是「失败」—— failed_attempts 只匹配失败行, 不误计次。
+                    _log_line(raw_dir, "| 抽取 | 降权 | %s %s |" % (why[:60], url[:60]))
                 try:
                     with open(out_path, "a", encoding="utf-8") as f:
                         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -1145,6 +1265,8 @@ def run_carry(date_str, log=print):
                     _log_line(raw_dir, "| 补抽 | 拒收 | 非政策内容 %s %s |"
                               % (why[:40], url[:60]))
                     continue
+                if why:
+                    _log_line(raw_dir, "| 补抽 | 降权 | %s %s |" % (why[:60], url[:60]))
                 try:
                     with open(out_path, "a", encoding="utf-8") as f:
                         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -1263,6 +1385,16 @@ def main():
         return 0
     n_ok, n_fail = extract(args.date)
     print("[extract_records] 完成: 成功 %d / 失败 %d" % (n_ok, n_fail))
+    # ---- 抽取段全挂判失败(2026-11-20 巡检闭环, 抽取线高危) ----
+    # 原来无论成败都 return 0 → run_scan.sh 的 RC 恒为 0 → H20 等价闸门(只覆盖
+    # 取数段)完全看不到抽取段: 端点 500 / key 过期 / 套餐打满时**每一份**都失败,
+    # 流程照常 normalize→report→push, 推出去的是"今日无新增 0 条" —— H20 的
+    # 事故形态在抽取段原样复现, 而失败行只在 search-log.md 里没人看。
+    # 判据: 有失败且一条没成功(=全挂)。部分失败不算(单份失败只废那一份)。
+    if n_fail > 0 and n_ok == 0:
+        print("[extract_records][严重] 抽取段全挂(成功 0 / 失败 %d) —— 不是安静日, "
+              "不得推送「今日无新增」" % n_fail)
+        return 1
     return 0
 
 

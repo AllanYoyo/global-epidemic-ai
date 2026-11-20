@@ -36,6 +36,7 @@
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 
@@ -49,7 +50,7 @@ def _mark_note(why):
 
 
 def _unmark(event_id, db_path=None):
-    """撤回误标: 判定错了时用(恢复 unverified, 清掉备注)。"""
+    """撤回误标: 判定错了时用(恢复**标记前**的核验状态, 清掉备注)。"""
     con = open_db(db_path)
     if con is None:
         print("[错误] 打开数据库失败: %s" % (db_path or "(默认路径)"))
@@ -61,15 +62,23 @@ def _unmark(event_id, db_path=None):
             print("[错误] 找不到 event_id: %s" % event_id)
             return 2
         rec = json.loads(row[0])
-        rec["verification_status"] = "unverified"
+        # 2026-11-20 巡检闭环: 恢复标记前的状态(标记时记在 verification_notes 的
+        # prev_status= 里)。原来一律恢复 unverified —— 人工核验过的 verified
+        # 结论被静默降级且不可逆。没有 prev 记录的老记录才回落 unverified。
+        prev = ""
+        note = str(rec.get("verification_notes") or "")
+        m = re.search(r"prev_status=([a-z_]+)", note)
+        if m and m.group(1) in ("verified", "single_source", "unverified", "merged"):
+            prev = m.group(1)
+        rec["verification_status"] = prev or "unverified"
         rec.pop("verification_notes", None)
         saved = upsert(con, rec, merge=False)
         fs = str(saved.get("first_seen") or biz_today())[:10]
         write_event_file(saved, os.path.join(DATA_DIR, "events", fs))
     finally:
         con.close()
-    print("[已撤回] %s 恢复 unverified | %s"
-          % (event_id, (saved.get("title_cn") or "")[:60]))
+    print("[已撤回] %s 恢复 %s | %s"
+          % (event_id, prev or "unverified", (saved.get("title_cn") or "")[:60]))
     return 0
 
 
@@ -159,8 +168,13 @@ def main():
     try:
         for e, why in hits:
             e2 = dict(e)
+            prev = e2.get("verification_status")
             e2["verification_status"] = "false_positive"
-            e2["verification_notes"] = _mark_note(why)
+            # 记住标记前的核验状态(2026-11-20 巡检闭环): 原来 --unmark 一律恢复
+            # unverified —— 一条**人工核验为 verified** 的记录被判错后撤回, 核验
+            # 结论被静默降级且不可逆, 记录同时从 risk.py --list-pending(查列
+            # verified)与人工核验队列里永久消失。
+            e2["verification_notes"] = "%s | prev_status=%s" % (_mark_note(why), prev)
             saved = upsert(con, e2, merge=True)
             fs = str(saved.get("first_seen") or biz_today())[:10]
             write_event_file(saved, os.path.join(DATA_DIR, "events", fs))

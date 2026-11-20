@@ -131,16 +131,22 @@ def _load_ws_creds():
 def soap_query(expert_query, page, creds):
     """SOAP 1.2 doQuery(SOAPAction + WS-Security UsernameToken11 明文密码)。
     请求体元素必须全部带 elx: 前缀(elementFormDefault=qualified, 实测空
-    namespace 报 unexpected element)。返回响应文本(失败/空返回空串)。"""
+    namespace 报 unexpected element)。返回响应文本(失败/空返回空串)。
+
+    凭据不进命令行(2026-11-20 巡检闭环, 高危): 原实现把整段 SOAP 信封(含
+    <wsse:Password>)当 `--data-binary` 的**参数值**交给 curl → 口令出现在
+    argv 里 → 同机任意用户 `ps auxww` / /proc/<pid>/cmdline 都能读到 EUR-Lex
+    账号口令。改用 `--data-binary @-` 从 stdin 送请求体, argv 里只剩路径。
+    """
     user, pwd = creds
     body = ENV_TPL % (user, pwd, expert_query, page, PAGE_SIZE)
     cmd = ["curl", "-sk", "--max-time", str(TIMEOUT + 20), "-A", UA,
            "-H", "Content-Type: application/soap+xml; charset=utf-8",
            "-H", "SOAPAction: \"%s\"" % SOAP_ACTION,
-           "-X", "POST", "--data-binary", body, SOAP_ENDPOINT]
+           "-X", "POST", "--data-binary", "@-", SOAP_ENDPOINT]
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True,
-                           errors="replace", timeout=TIMEOUT + 30)
+        p = subprocess.run(cmd, input=body.encode("utf-8"), capture_output=True,
+                           text=True, errors="replace", timeout=TIMEOUT + 30)
         return p.stdout or ""
     except (OSError, subprocess.SubprocessError):
         return ""

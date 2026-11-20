@@ -86,6 +86,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import smtplib
 import subprocess
 import time
@@ -129,11 +130,29 @@ def _cut(text, nbytes):
     return raw[:nbytes - len(mb)].decode("utf-8", errors="ignore") + marker
 
 
+# ---- 推送文本清洗(2026-11-20 巡检闭环, known-issues H6-③) ----
+# 台账里的标题/摘要都来自**外部网页**(LLM 抽取), 不是我们自己写的。它们一旦
+# 带着换行进推送正文, 就能在正文里**伪造出新的一行**: hermes send 按行解析
+# `MEDIA:<path>`, 标题里藏一行 "MEDIA:/opt/global-epidemic-ai/.env" 就能把本机
+# 任意文件发进用户的微信会话(凭据外发)。修法: 台账文本进正文前压掉换行与
+# 控制字符 —— 标题/摘要只能是单行文本, 结构由我们自己拼。
+_CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]+")
+
+
+def _safe_text(s):
+    """台账文本进推送正文前的清洗: 换行/制表/控制字符压成空格, 收敛成单行。"""
+    if s is None:
+        return ""
+    s = _CTRL_RE.sub(" ", str(s))
+    return " ".join(s.split())
+
+
 def _title(e):
     # 显示层兜底链: title_cn → title_en → summary_cn → "（无标题）"
     # 校验只要求三选一, 显示层必须把三种都试一遍, 否则会出现"入库合法但
     # 推送时显示无标题"的鬼影记录(report.py / report_docx.py 同样的兜底链)。
-    return e.get("title_cn") or e.get("title_en") or e.get("summary_cn") or "（无标题）"
+    # 取值一律过 _safe_text: 外部标题里的换行会在推送正文里伪造新行(见上)。
+    return _safe_text(e.get("title_cn") or e.get("title_en") or e.get("summary_cn") or "（无标题）")
 
 
 def _summary(e):
@@ -143,7 +162,7 @@ def _summary(e):
     summary_en。都没有就留空 —— 不拿标题冒充简介, 也不编造(可溯源硬要求)。
     """
     for key in ("summary_cn", "summary_en"):
-        s = str(e.get(key) or "").strip()
+        s = _safe_text(e.get(key))
         if s:
             return s
     return ""
@@ -261,7 +280,12 @@ def send_mail(subject, text, docx_path):
     msg["Subject"] = Header(subject, "utf-8")
     msg["From"] = user
     msg["To"] = ",".join(to)
-    msg.attach(MIMEText(text.replace("\n", "<br>"), "html", "utf-8"))
+    # 2026-11-20 巡检闭环: 邮件正文是 **HTML part** —— 台账标题/摘要里的
+    # <img onerror=...> / <a href=evil> 会被邮件客户端当标记执行/渲染(H6 注入
+    # 三连的第四个入口, 此前未登记; 面板与 Excel 两路都已加固, 邮件这路没跟上)。
+    # 先转义再把换行换成 <br>。
+    import html as _html
+    msg.attach(MIMEText(_html.escape(text).replace("\n", "<br>"), "html", "utf-8"))
     if docx_path:
         if os.path.isfile(docx_path):
             part = MIMEApplication(open(docx_path, "rb").read())
@@ -284,6 +308,41 @@ def send_mail(subject, text, docx_path):
     return {"ok": True}
 
 
+def _media_path_allowed(path):
+    """附件只允许来自数据目录下的 reports/ —— 不给"外发任意文件"留后门。
+
+    hermes send 的 `MEDIA:<path>` 会被解析成附件并真的发出去; 正文里的路径一旦
+    可控, 就等于把本机任意文件(凭据/密钥快照)发进聊天。附件路径本身是内部
+    生成的(data/reports/<日期>-policy-report.docx), 这里做一次归属校验兜底。
+    """
+    try:
+        rp = os.path.realpath(path)
+        base = os.path.realpath(os.path.join(DATA_DIR, "reports"))
+    except (OSError, ValueError):
+        return False
+    return rp == base or rp.startswith(base + os.sep)
+
+
+def _hermes_body(text, docx_path=None):
+    """构造 hermes send 的正文 —— 附件行**只能**由本函数追加。
+
+    防御纵深(2026-11-20 巡检闭环, H6-③): 正文里任何 "MEDIA:" 开头的行都剔掉 ——
+    台账文本已在 _safe_text 里压成单行, 这里是第二道; 附件路径还要过归属校验。
+    """
+    body = "\n".join(l for l in str(text or "").splitlines()
+                     if not l.strip().upper().startswith("MEDIA:"))
+    if docx_path:
+        if os.path.isfile(docx_path) and _media_path_allowed(docx_path):
+            body = "%s\nMEDIA:%s" % (body, docx_path)
+        elif os.path.isfile(docx_path):
+            print("[WARN] 附件路径不在允许目录内, 本次只发正文: %s" % docx_path)
+        else:
+            # 不再静默跳过(2026-10-20): 原来这里 `if docx_path and isfile(...)`
+            # 条件不满足就当作"没附件", 用户收到纯文本却以为带 Word, 事后无从查证。
+            print("[WARN] Word 附件缺失, 本次只发正文: %s" % docx_path)
+    return body
+
+
 def send_hermes(text, platform, docx_path=None):
     """借 `hermes send` 把消息投递到 Hermes 已配置的平台(个人微信 / 飞书)。
 
@@ -296,14 +355,8 @@ def send_hermes(text, platform, docx_path=None):
 
     平台名用 hermes 的原生名(weixin / feishu), 裸平台名 = 发到 home channel。
     """
-    body = text
-    if docx_path:
-        if os.path.isfile(docx_path):
-            body = "%s\nMEDIA:%s" % (text, docx_path)
-        else:
-            # 不再静默跳过(2026-10-20): 原来这里 `if docx_path and isfile(...)`
-            # 条件不满足就当作"没附件", 用户收到纯文本却以为带 Word, 事后无从查证。
-            print("[WARN] Word 附件缺失, 本次只发正文: %s" % docx_path)
+    # 防御纵深(2026-11-20 巡检闭环, H6-③): 正文构造与附件白名单见 _hermes_body。
+    body = _hermes_body(text, docx_path)
     cmd = [HERMES_COMMAND, "send", "--to", platform, "--file", "-"]
     try:
         proc = subprocess.run(cmd, input=body.encode("utf-8"),
@@ -320,6 +373,23 @@ def send_hermes(text, platform, docx_path=None):
 
 def _pending_path(date):
     return os.path.join(PENDING_DIR, "%s.flag" % date)
+
+
+def _partial_path(date):
+    """部分失败时的"已发成功渠道"台账(重跑只补失败的渠道)。"""
+    return os.path.join(PUSH_FLAG_DIR, "%s.partial" % date)
+
+
+def _read_partial_channels(date):
+    """读上一次部分失败时已发成功的渠道集合(读不到就当没有)。"""
+    path = _partial_path(date)
+    if not os.path.isfile(path):
+        return set()
+    try:
+        with open(path, encoding="utf-8") as f:
+            return {ln.strip() for ln in f if ln.strip()}
+    except OSError:
+        return set()
 
 
 def _label_to_key(label):
@@ -637,6 +707,17 @@ def main():
             print("[WARN] %s 日报处于待审状态(%s); 本次未推送。\n"
                   "  审核通过请加 --review-approved; 重审请加 --force(会重发审阅渠道)"
                   % (args.date, pending_note))
+            # 2026-11-20 巡检闭环: 广播路径被待审标记挡住时**返回非 0** —— 原来
+            # 一律 return 0, "一条没发"与"推成了"在退出码上不可区分, run_scan.sh
+            # 的 PR_RC 判成功 → 当日广播静默丢失(M24 记的"钉钉漏发一天"形态)。
+            # 渠道会话路径仍返回 0: "待审中等确认"是那条路的**正常状态**。
+            # 注意: **不**自动清理这个标记 —— "先在原渠道完成再扩散"是红线,
+            # 标记的时效怎么定由人决定(见 known-issues 本次巡检登记)。
+            if args.broadcast:
+                print("[失败] 本轮全量推送被待审标记挡住(未推送)—— 退出码非 0, "
+                      "以免\"没推成\"被当成\"推成了\"。")
+                return 3
+            print("[提示] 本轮未推送(存在待审标记)—— 这是渠道会话的正常状态, 退出码 0。")
             return 0
 
     try:
@@ -652,7 +733,11 @@ def main():
     # 人工按需生成(report.py --excel/--docx 或面板一键生成), 推送**不再自动补**。
     # 文件在就带附件, 不在正文如实标注"无 Word 附件"——2026-10-20 的教训是
     # "用户以为有附件却没有"; 现在不承诺附件, 但同样不静默。
-    docx_ok = os.path.isfile(docx) and os.path.getsize(docx) > 0
+    # 2026-11-20 巡检闭环: 附件能否真带上由 _media_path_allowed 决定(目录白名单),
+    # docx_ok 必须用**同一个判据** —— 否则正文宣称"见 Word 报告"而实际没带附件,
+    # 与 10-20 那次"用户以为有附件却没有"是同一形态。
+    docx_ok = (os.path.isfile(docx) and os.path.getsize(docx) > 0
+               and _media_path_allowed(docx))
     if not docx_ok:
         print("[提示] Word 日报未生成(按需生成: python scripts/report.py --date %s --docx), 本次推送不带附件" % args.date)
     text = brief_text(args.date, data, docx_ok=docx_ok)
@@ -719,6 +804,25 @@ def main():
             print("         scripts/run_scan.sh <am|pm|policy> --broadcast")
             return 2
 
+    # 部分失败重跑: 上一轮已成功的渠道不再重发(2026-11-20 巡检闭环)
+    if not args.force and not args.dry_run and not args.message:
+        done = _read_partial_channels(args.date)
+        if done:
+            already = [t[0] for t in target if t[0] in done]
+            if already:
+                target = [t for t in target if t[0] not in done]
+                print("[INFO] 上一轮已成功推送 %s, 本轮只补失败的渠道"
+                      % "、".join(already))
+                if not target:
+                    print("[OK] 目标渠道在上一轮均已推送成功, 写终态标记")
+                    os.makedirs(PUSH_FLAG_DIR, exist_ok=True)
+                    with open(flag_path, "w", encoding="utf-8") as f:
+                        f.write("%s 已推送(全部渠道在上一轮成功)\n" % biz_now())
+                    _clear_pending(args.date)
+                    if lock_scope == "review":
+                        clear_scope(args.date)
+                    return 0
+
     if not target:
         if args.dry_run:
             # 2026-10-19 修正: 原来这里一律打"评审核闸门开启但剩余渠道无配置可发",
@@ -768,14 +872,31 @@ def main():
         return 0
 
     ok = 0
+    sent = []
     for name, fn in target:
         try:
             fn()
             print("[OK] %s 推送成功" % name)
             ok += 1
+            sent.append(name)
         except Exception as exc:
             print("[失败] %s: %s" % (name, exc))
     print("\n推送完成(%s): %d/%d 个渠道成功。" % (stage_label, ok, len(target)))
+    # ---- 部分失败记账(2026-11-20 巡检闭环) ----
+    # 原来部分失败(2/3 成功)仍返回 0 且不写 .pushed → 重跑把**已成功的渠道**再推
+    # 一遍(用户重复收报), 而批次记成功。现在: 已成功的渠道记进 .partial, 重跑
+    # 只补失败的; 部分失败返回非 0(批次红)。
+    partial = _partial_path(args.date)
+    if sent and ok < len(target):
+        os.makedirs(PUSH_FLAG_DIR, exist_ok=True)
+        with open(partial, "w", encoding="utf-8") as f:
+            f.write("\n".join(sent) + "\n")
+        print("[提示] 部分渠道失败, 已成功的渠道记入 %s(重跑只补失败的)" % partial)
+    elif ok == len(target) and target and os.path.isfile(partial):
+        try:
+            os.remove(partial)
+        except OSError:
+            pass
 
     # 标记终态: 阶段 1 写 .review-pending, 阶段 2 写 .pushed 并清理待办
     if not args.message and ok == len(target) and target:
@@ -785,7 +906,14 @@ def main():
             # 同时把范围锁落成 review —— 这样本轮之后任何"忘了指定渠道"的调用
             # (尤其是 --broadcast)都会被锁挡下, 而不是退化成全量推送。
             # 2026-10-20 钉钉误推事故的直接教训: 闸门不能只靠"记得带参数"。
-            if lock_scope != "review":
+            if lock_scope == "broadcast":
+                # 2026-11-20 巡检闭环: 调度方声明的 broadcast 锁**不能被 review 锁
+                # 覆盖** —— 覆盖之后当日全量推送被自己的 review 锁永久挡下(调度
+                # 路径再跑 --broadcast 会被拒, 当天钉钉/邮箱再也收不到日报, 现场
+                # 还看不出是"锁被覆盖"造成的)。保留广播锁, 只提示。
+                print("[WARN] 本轮存在调度方声明的全量(broadcast)范围锁, 不被审阅锁覆盖"
+                      "(--broadcast --force 在有待审标记时会把范围降级, 已阻止)。")
+            elif lock_scope != "review":
                 write_scope(args.date, "review", channel=_label_to_key(review_label),
                             source="push_report.py:stage1",
                             note="阶段 1 审阅渠道")
@@ -804,7 +932,9 @@ def main():
             # 而这一轮的"扩散"已经由用户批准过了)
             if lock_scope == "review":
                 clear_scope(args.date)
-    return 0 if ok else 1
+    # 部分失败 → 非 0(2026-11-20 巡检闭环): 原来 ok=2/3 也返回 0, 批次记成功,
+    # 靠 .pushed 缺失才暴露 —— "推成了"与"推了一半"在退出码上不可区分。
+    return 0 if (target and ok == len(target)) else 1
 
 
 if __name__ == "__main__":

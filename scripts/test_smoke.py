@@ -1387,6 +1387,9 @@ class PushHermesChannelTests(unittest.TestCase):
                               side_effect=self._fake_available),
             mock.patch.object(self.pr.report, "collect",
                               return_value={"new": []}),
+            # 附件白名单按 DATA_DIR/reports 判定(2026-11-20 巡检闭环), 测试里
+            # 把 DATA_DIR 指到临时目录, 否则会真读到仓库/生产的数据目录。
+            mock.patch.object(self.pr, "DATA_DIR", self.tmp),
         ]
         for p in self._patches:
             p.start()
@@ -1499,9 +1502,12 @@ class PushHermesChannelTests(unittest.TestCase):
         self.assertEqual(self.hermes_calls, [], out)
 
     def test_send_hermes_uses_stdin_and_attaches_docx(self):
-        # send_hermes: 走 stdin(--file -), docx 存在时正文追加 MEDIA:<path>
+        # send_hermes: 走 stdin(--file -), docx 在允许目录(data/reports)下时
+        # 正文追加 MEDIA:<path>; 白名单外的路径**不带附件**(2026-11-20 巡检闭环)。
         import tempfile as _tf
-        docx = os.path.join(self.tmp, "r.docx")
+        reports = os.path.join(self.tmp, "reports")
+        os.makedirs(reports, exist_ok=True)
+        docx = os.path.join(reports, "r.docx")
         with open(docx, "wb") as f:
             f.write(b"x")
         rec = {}
@@ -1523,6 +1529,15 @@ class PushHermesChannelTests(unittest.TestCase):
         body = rec["input"].decode("utf-8")
         self.assertIn("日报正文", body)
         self.assertIn("MEDIA:%s" % docx, body)
+
+        # 白名单外的 docx 不得被当附件带出去(正文里的 MEDIA: 行会被剔掉)
+        outside = os.path.join(self.tmp, "outside.docx")
+        with open(outside, "wb") as f:
+            f.write(b"x")
+        with mock.patch.object(self.pr.subprocess, "run", fake_run):
+            self._real_send_hermes("日报正文", "weixin", outside)
+        body2 = rec["input"].decode("utf-8")
+        self.assertNotIn("MEDIA:", body2)
 
     def test_send_hermes_raises_on_failure(self):
         def fake_run(cmd, **kw):
@@ -5454,6 +5469,110 @@ class ExtractionChannelTests(unittest.TestCase):
         self.assertLess(i_carry, i_norm, "补抽必须在 normalize 之前")
 
 
+class InjectionSurfaceGuardTests(unittest.TestCase):
+    """H6 注入面三连(2026-11-20 巡检闭环): 台账文本来自外部网页, 不是我们自己写的。
+
+    ① Excel/CSV 公式注入: 标题/摘要以 = + - @ 开头时, 打开台账即执行;
+    ② 面板 stored XSS: marked 默认放行内联 HTML, 日报里的标题能带 <img onerror=...>;
+    ③ MEDIA 附件注入: 标题里的换行能在推送正文里伪造 `MEDIA:<path>` 行,
+       把本机任意文件发进用户的微信会话。
+    """
+
+    @staticmethod
+    def _event(**over):
+        ev = {"event_id": "e123456789012", "title_cn": "正常标题", "title_en": "normal title",
+              "country_cn": "美国", "country_en": "USA", "action_type": "收紧",
+              "policy_domain": "animal", "event_date": "2026-11-20",
+              "verification_status": "unverified",
+              "source": {"name": "APHIS", "url": "https://www.aphis.usda.gov/rule/1", "tier": 1},
+              "first_seen": "2026-11-20T07:30:00"}
+        ev.update(over)
+        return ev
+
+    # ---- ① 公式注入 ----
+
+    def test_xlsx_dangerous_cell_stays_string(self):
+        """openpyxl 默认把 "=..." 判成公式(data_type='f'), 打开台账即执行。"""
+        import report
+        try:
+            from openpyxl import load_workbook
+        except ImportError:
+            self.skipTest("openpyxl 未安装(报告降级 CSV, 该路径不存在)")
+        ev = self._event(title_cn="=cmd|'/c calc'!A0", title_en="@SUM(1+1)*cmd",
+                         summary_cn="+1+1")
+        with tempfile.TemporaryDirectory() as d:
+            path = report.export_table(os.path.join(d, "t"), [ev])
+            self.assertTrue(path.endswith(".xlsx"), path)
+            ws = load_workbook(path).active
+            headers = [c.value for c in ws[1]]
+            for col_name, expect in (("政策标题", "=cmd|'/c calc'!A0"), ("英文标题", "@SUM(1+1)*cmd")):
+                ci = headers.index(col_name) + 1
+                cell = ws.cell(row=2, column=ci)
+                self.assertEqual(cell.data_type, "s",
+                                 "%s 仍被当成公式(data_type=%r)" % (col_name, cell.data_type))
+                self.assertEqual(cell.value, expect, "值必须原样保留, 不许改写")
+
+    def test_csv_dangerous_cell_gets_apostrophe(self):
+        """CSV 没有"字符串类型"可用, 按业界惯例加前导单引号(Excel 打开即显示为文本)。"""
+        import report
+        ev = self._event(title_cn="=cmd|'/c calc'!A0")
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.dict(sys.modules, {"openpyxl": None}):
+                path = report.export_table(os.path.join(d, "t"), [ev])
+            self.assertTrue(path.endswith(".csv"), path)
+            with open(path, encoding="utf-8-sig") as f:
+                content = f.read()
+        self.assertIn("'=cmd|'/c calc'!A0", content)
+
+    # ---- ③ MEDIA 注入 ----
+
+    def test_entry_block_cannot_forge_media_line(self):
+        """标题/摘要里的换行必须在进正文前被压掉 —— 否则能伪造新的一行。"""
+        import push_report
+        ev = self._event(title_cn="正常标题\nMEDIA:/etc/passwd",
+                         summary_cn="摘要\nMEDIA:/root/.ssh/id_rsa",
+                         country_cn="美国", action_type="收紧", impact_type="约束",
+                         impact_level="高影响")
+        block = push_report._entry_block(ev)
+        for line in block.splitlines():
+            self.assertFalse(line.strip().upper().startswith("MEDIA:"),
+                             "推送块里出现了伪造的 MEDIA 行: %r" % line)
+
+    def test_hermes_body_drops_media_lines(self):
+        """hermes send 按行解析 MEDIA:<path> —— 正文里的 MEDIA 行一律剔掉。"""
+        import push_report
+        body = push_report._hermes_body("日报正文\nMEDIA:/etc/passwd\n继续")
+        self.assertNotIn("/etc/passwd", body)
+        for line in body.splitlines():
+            self.assertFalse(line.strip().upper().startswith("MEDIA:"))
+
+    def test_hermes_attachment_path_restricted(self):
+        """附件只允许来自数据目录的 reports/ —— 不给外发任意文件留后门。"""
+        import push_report
+        with tempfile.TemporaryDirectory() as d:
+            outside = os.path.join(d, "secret.env")
+            with open(outside, "w", encoding="utf-8") as f:
+                f.write("SECRET=1\n")
+            body = push_report._hermes_body("正文", outside)
+            self.assertNotIn("MEDIA:", body, "不在允许目录内的附件竟被附上了")
+            self.assertFalse(push_report._media_path_allowed(outside))
+            allowed = os.path.join(push_report.DATA_DIR, "reports")
+            self.assertFalse(push_report._media_path_allowed(os.path.join(allowed, "..", "x")))
+
+    # ---- ② 面板 XSS ----
+
+    def test_panel_markdown_renderer_hardened(self):
+        """面板必须覆盖 marked 的 html/link 渲染器, 且 source_url 过 scheme 白名单。"""
+        with open(os.path.join(REPO, "webapp", "app.py"), encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("marked.use", src, "面板未覆盖 marked 渲染器(内联 HTML 仍会执行)")
+        flat = src.replace(" ", "")
+        self.assertIn("html:h=>esc(", flat, "marked 的 html 渲染器未转义")
+        self.assertIn("link:(href,title,text)", flat, "marked 的 link 渲染器未加固")
+        self.assertIn("safeUrl(e.source_url)", flat, "source_url 未过 scheme 白名单")
+        self.assertIn("constsafeUrl", flat, "面板缺少 scheme 白名单助手")
+
+
 class Audit20261120RegressionTests(unittest.TestCase):
     """2026-11-20 巡检闭环的回归防线(每条对应 known-issues 本次巡检小节的一条)。"""
 
@@ -5619,6 +5738,44 @@ class Audit20261120RegressionTests(unittest.TestCase):
             con.close()
             self.assertEqual(json.loads(row[0])["verification_status"], "verified",
                              "unmark 没有还原原核验状态")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    # ---- M38/M39/M40/M41 推送状态机 ----
+
+    def test_scope_future_declared_at_is_stale(self):
+        """声明时间在未来 → 判过期(否则一条 2099 年的锁永不过期)。"""
+        import push_scope as ps
+        scope = {"scope": "broadcast", "declared_at": "2099-01-01T00:00:00"}
+        self.assertTrue(ps.scope_is_stale(scope))
+
+    def test_broadcast_lock_not_overwritten_by_review_scope(self):
+        """调度方的 broadcast 锁不得被 review 锁覆盖(覆盖后当日全量推送被永久挡下)。"""
+        import push_report as pr
+        import push_scope as ps
+        tmp = tempfile.mkdtemp(prefix="audit-scope-")
+        try:
+            with mock.patch.object(ps, "SCOPE_DIR", os.path.join(tmp, ".push-scope")), \
+                    mock.patch.object(pr, "PUSH_FLAG_DIR", os.path.join(tmp, ".pushed")), \
+                    mock.patch.object(pr, "PENDING_DIR", os.path.join(tmp, ".review-pending")):
+                ps.write_scope("2026-11-20", "broadcast", source="unit")
+                pr.write_scope = ps.write_scope
+                # 阶段 1 写锁路径: 广播锁在场时不得覆盖
+                lock = ps.read_scope("2026-11-20")
+                self.assertEqual(lock.get("scope"), "broadcast")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_partial_failure_writes_partial_ledger(self):
+        """部分渠道失败 → 退出码非 0, 且把已成功的渠道记进 .partial(重跑不重复推)。"""
+        import push_report as pr
+        tmp = tempfile.mkdtemp(prefix="audit-partial-")
+        try:
+            partial = pr._partial_path("2026-11-20")
+            os.makedirs(os.path.dirname(partial), exist_ok=True)
+            with open(partial, "w", encoding="utf-8") as f:
+                f.write("企业微信\n")
+            self.assertEqual(pr._read_partial_channels("2026-11-20"), {"企业微信"})
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 

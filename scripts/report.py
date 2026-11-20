@@ -271,6 +271,28 @@ def make_sources(events):
     return "\n".join(items) + "\n" if items else "_（本期无来源记录）_\n"
 
 
+# ---- 公式注入防护(2026-11-20 巡检闭环, known-issues H6-①) ----
+# 台账里的标题/摘要/来源名都来自**外部网页**(LLM 抽取), 不是我们自己写的:
+# 值以 = + - @ 开头时, openpyxl 会把它当公式存进 xlsx, CSV 被 Excel 打开时同样
+# 当公式 —— 打开台账即触发(=cmd|' / DDE 外链), 属真实攻击面。
+# 修法: xlsx 侧把危险前缀的单元格强制成字符串类型(data_type='s'), 值保持原样
+# (打开台账看不出异样); CSV 没有"字符串类型"可用, 按业界惯例加前导单引号。
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _is_formula_risky(value):
+    """字符串是否会被表格软件当公式执行(前导空白会被忽略, 故先 lstrip 再判)。"""
+    if not isinstance(value, str):
+        return False
+    return value.lstrip().startswith(_FORMULA_PREFIXES)
+
+
+def _csv_safe_cell(value):
+    if _is_formula_risky(value):
+        return "'" + value
+    return value
+
+
 def export_table(base_path, events):
     def val(value): return "未注明" if value in (None, "", [], {}) else value
     headers = ["记录ID", "政策标题", "英文标题", "动作类型", "政策领域", "发布国家/地区", "发布机构",
@@ -299,6 +321,12 @@ def export_table(base_path, events):
         ws.sheet_properties.pageSetUpPr.fitToPage = True; ws.page_setup.orientation = "landscape"; ws.page_setup.fitToWidth = 1; ws.page_setup.fitToHeight = 0
         ws.print_title_rows = "1:1"; ws.append(headers)
         for row in rows: ws.append(row)
+        # 公式注入防护: 危险前缀的单元格强制成字符串类型, 值保持原样
+        # (openpyxl 默认把 "=..." 判成公式 data_type='f', 打开台账即执行)
+        for r, row in enumerate(rows, start=2):
+            for c, v in enumerate(row, start=1):
+                if _is_formula_risky(v):
+                    ws.cell(row=r, column=c).data_type = "s"
         style_header_row(ws, 1, 1, len(headers))
         for idx in range(len(rows)): style_data_row(ws, idx + 2, 1, len(headers), idx)
         auto_fit_columns(ws, min_width=10, max_width=34); auto_fit_row_heights(ws, 1, 2)
@@ -307,7 +335,9 @@ def export_table(base_path, events):
         path = base_path + ".xlsx"; wb.save(path); return path
     except ImportError:
         path = base_path + ".csv"
-        with open(path, "w", newline="", encoding="utf-8-sig") as f: csv.writer(f).writerows([headers] + rows)
+        with open(path, "w", newline="", encoding="utf-8-sig") as f:
+            csv.writer(f).writerows(
+                [headers] + [[_csv_safe_cell(c) for c in row] for row in rows])
         return path
 
 

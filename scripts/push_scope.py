@@ -242,13 +242,20 @@ def scope_age_minutes(scope):
 def scope_is_stale(scope, max_minutes=None):
     """锁是否已过期(声明太久之前, 多半是"那轮没跑完"留下的残锁)。
 
-    解析不出声明时间时**不判过期** —— 旧格式锁(没有 declared_at)继续按原逻辑走,
-    不因为加了这个校验就把历史锁全作废。
+    2026-11-20 巡检闭环: 声明时间**在未来**(时钟回拨/手改)→ 判过期。原来 age 为
+    负数不满足 "age > limit", 于是 declared_at=2099 年的锁**永不过期**, 持续放行
+    全量推送 —— 正是 10-20/10-22 残锁事故的复发路径。
+
+    声明时间解析不出时**仍不判过期**(旧格式锁继续按原逻辑走, 不因为加校验就把
+    历史锁全作废 —— 这是既有明确决定与回归用例; "缺 declared_at 的锁永不过期"
+    这条尾巴已作为低危项入册, 见 known-issues 本次巡检)。
     """
     limit = SCOPE_MAX_AGE_MINUTES if max_minutes is None else max_minutes
     age = scope_age_minutes(scope)
     if age is None:
         return False
+    if age < 0:
+        return True
     return age > limit
 
 

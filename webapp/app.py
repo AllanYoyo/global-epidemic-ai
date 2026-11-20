@@ -364,6 +364,26 @@ const RISK_COLOR={high:'#ff4d4f',medium:'#faad14',low:'#52c41a',null:'#8c8c8c'};
 const $=s=>document.querySelector(s);
 const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const chip=(cls,text)=>'<span class="tag '+cls+'">'+esc(text)+'</span>';
+// ---- 渲染安全(2026-11-20 巡检闭环, known-issues H6-②) ----
+// 日报 Markdown 里的标题/摘要/来源名都来自**外部网页**(LLM 抽取), 不是我们自己写的:
+//   ① marked 默认放行内联 HTML, 直接 innerHTML 就是 stored XSS
+//      (标题里一个 <img src=x onerror=...> 打开日报就执行);
+//   ② markdown 链接不查 scheme, [x](javascript:alert(1)) 会渲染成可点的脚本链接。
+// 修法: 覆盖 marked 的 html/link/image 渲染器 —— 原始 HTML 一律转义, 链接只放行
+// http/https/mailto 与站内相对路径; 台账里的 source.url 同样过一遍 safeUrl。
+const safeUrl=u=>{const s=String(u==null?'':u).trim();const low=s.toLowerCase();
+  if(low.startsWith('http://')||low.startsWith('https://')||low.startsWith('mailto:'))return s;
+  if(s.startsWith('/')||s.startsWith('#'))return s;
+  return '';};
+if(window.marked){
+  marked.use({renderer:{
+    html:h=>esc(String(h==null?'':h)),
+    image:(href,title,text)=>esc(String(text==null?'':text)),
+    link:(href,title,text)=>{const u=safeUrl(href);if(!u)return text;
+      return '<a href="'+esc(u)+'" target="_blank" rel="noopener noreferrer">'+
+             (title?' title="'+esc(title)+'"':'')+text+'</a>';}
+  }});
+}
 let EVENTS=[],MAP=null,MARKERS=null,MAP_READY=false;
 
 async function jget(u){const r=await fetch(u);return r.json();}
@@ -405,7 +425,7 @@ function popupHtml(e){
    (e.impact_rationale?'<br><span style="color:#b9c6dd">依据: '+esc(e.impact_rationale)+'</span>':'')+
    (e.dimension_scores&&Object.keys(e.dimension_scores).length?'<br><span style="color:#8493ab">四维: '+esc(Object.entries(e.dimension_scores).map(([k,v])=>k+' '+v).join(' / '))+(e.impact_score!=null?' → '+esc(e.impact_score)+'分':'')+'</span>':'')+
    (e.recommended_action?'<br><span style="color:#8493ab">建议动作: '+esc(e.recommended_action)+'</span>':'')+
-   (e.source_url?'<br>来源: <a href="'+esc(e.source_url)+'" target="_blank">'+esc(e.source_name||'链接')+'</a>':'')+
+   (e.source_url&&safeUrl(e.source_url)?'<br>来源: <a href="'+esc(safeUrl(e.source_url))+'" target="_blank" rel="noopener noreferrer">'+esc(e.source_name||'链接')+'</a>':'')+
    '</div>';
 }
 
@@ -450,6 +470,7 @@ function renderTable(){
     const name=e.title_cn||e.title_en||e.summary_cn||'（无标题）';
     const products=(e.products||[]).join('、')||e.disease_name_cn||'-';
     const effective=e.date_invalid?'日期异常':(e.effective_date||e.event_date||'-');
+    const srcHref=safeUrl(e.source_url);
     return '<tr>'+
     '<td><b>'+esc(name)+'</b></td>'+
     '<td>'+esc(e.action_type||'-')+'</td>'+
@@ -460,7 +481,7 @@ function renderTable(){
     '<td>'+esc(e.policy_status||'已生效')+'</td>'+
     '<td>'+chip('none',e.verification_status)+'</td>'+
     '<td>'+chip(e.impact_code||'none',(e.impact_type||'未研判')+'·'+(e.impact_level||'未研判'))+'</td>'+
-    '<td>'+(e.source_url?'<a href="'+esc(e.source_url)+'" target="_blank">'+esc(e.source_name||'链接')+'</a>':'-')+
+    '<td>'+(srcHref?'<a href="'+esc(srcHref)+'" target="_blank" rel="noopener noreferrer">'+esc(e.source_name||'链接')+'</a>':'-')+
     (e.cross_count?' <span style="color:#8493ab">+'+e.cross_count+'</span>':'')+'</td>';
   }).join('');
 }

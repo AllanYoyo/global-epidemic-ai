@@ -21,3 +21,8 @@
 
 # 07:30 政策扫(各国动植物检疫/进出口管控政策变化), 产出政策日报
 30 7 * * * /opt/global-epidemic-ai/repo/scripts/run_scan.sh policy --broadcast >> /opt/global-epidemic-ai/logs/cron.log 2>&1
+
+# 03:17 周日 · 数据清理: 删 30 天前的取数存档/事件快照/日报文件/幂等标记
+# (台账 DB 与 fetch.db **不动**; 清理口径见 scripts/prune_data.py 模块头;
+#  预览: python3 /opt/global-epidemic-ai/repo/scripts/prune_data.py)
+17 3 * * 0 /usr/bin/python3 /opt/global-epidemic-ai/repo/scripts/prune_data.py --apply >> /opt/global-epidemic-ai/logs/prune.log 2>&1

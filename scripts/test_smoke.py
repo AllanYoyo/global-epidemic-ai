@@ -5836,5 +5836,140 @@ class Audit20261120RegressionTests(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class PruneDataTests(unittest.TestCase):
+    """数据清理(prune_data.py, 2026-11-21 用户拍板)。
+
+    合同不变量:
+    - dry-run(默认)只预览, 一个文件都不动;
+    - --apply 只删**严格早于截止日**的对象(截止日当天保留), 覆盖四类:
+      raw 日期目录 / events 日期目录 / <日期>-policy-report.* 日报 / 旧幂等标记;
+    - 日期解析不了的条目跳过不动(宁可漏删不错删);
+    - --days 低于下限 10 拒绝执行(保留窗口必须盖过补抽与死源分诊的回看窗口);
+    - --apply 的删除清单先落盘留痕(data/reports/.prune/)再动手。
+    台账 DB 与 fetch.db 不在清理面, 无文件断言(口径见 prune_data.py 模块头)。
+    """
+
+    PRUNE = os.path.join(HERE, "prune_data.py")
+
+    def setUp(self):
+        from normalize import biz_today
+        self.data_dir = tempfile.mkdtemp(prefix="prune-data-")
+        self.today = datetime.date.fromisoformat(biz_today())
+        self._build_fixtures()
+
+    def tearDown(self):
+        shutil.rmtree(self.data_dir, ignore_errors=True)
+
+    def _day(self, delta):
+        return (self.today - datetime.timedelta(days=delta)).isoformat()
+
+    def _touch(self, path, content="x"):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+
+    def _build_fixtures(self):
+        d = self.data_dir
+        # 旧 raw(40 天前): 完整形态(正文 + meta + search-log + .fetch-done)
+        old_raw = os.path.join(d, "raw", self._day(40))
+        self._touch(os.path.join(old_raw, "body.html"))
+        self._touch(os.path.join(old_raw, "doc.meta.json"))
+        self._touch(os.path.join(old_raw, "search-log.md"))
+        self._touch(os.path.join(old_raw, ".fetch-done"))
+        # 窗口内的 raw(3 天前)与截止日边界上的 raw(恰 30 天, 必须保留)
+        self._touch(os.path.join(d, "raw", self._day(3), "body.html"))
+        self.boundary_raw = os.path.join(d, "raw", self._day(30))
+        self._touch(os.path.join(self.boundary_raw, "body.html"))
+        # 日期解析不了的目录: 跳过不动
+        self._touch(os.path.join(d, "raw", "not-a-date", "body.html"))
+        # events: 旧(40 天)与窗口内(2 天)
+        self.old_events = os.path.join(d, "events", self._day(40))
+        self._touch(os.path.join(self.old_events, "abc123.json"))
+        self._touch(os.path.join(d, "events", self._day(2), "def456.json"))
+        # 日报三件套(40 天前) + 降级 CSV(35 天前) + 窗口内的 md(3 天前)
+        rep = os.path.join(d, "reports")
+        self.old_reports = []
+        for delta, ext in ((40, ".md"), (40, ".docx"), (40, ".xlsx"), (35, ".csv")):
+            f = os.path.join(rep, "%s-policy-report%s" % (self._day(delta), ext))
+            self._touch(f)
+            self.old_reports.append(f)
+        self.new_report = os.path.join(rep, "%s-policy-report.md" % self._day(3))
+        self._touch(self.new_report)
+        # 幂等/闸门标记: 旧的清、当天的留
+        self.old_markers = []
+        for parent, suffix in ((".pushed", ".flag"), (".pushed", ".partial"),
+                               (".review-pending", ".flag"), (".push-scope", ".lock")):
+            f = os.path.join(rep, parent, self._day(40) + suffix)
+            self._touch(f)
+            self.old_markers.append(f)
+        self.today_flag = os.path.join(rep, ".pushed", self._day(0) + ".flag")
+        self._touch(self.today_flag)
+        # "台账数据库"与 fetch.db 桩: 必须原样保留
+        self.db_stub = os.path.join(d, "database", "epidemic.db")
+        self.fetch_db_stub = os.path.join(d, "database", "fetch.db")
+        self._touch(self.db_stub)
+        self._touch(self.fetch_db_stub)
+
+    def _old_raw(self):
+        return os.path.join(self.data_dir, "raw", self._day(40))
+
+    def _run(self, *args):
+        env = dict(os.environ)
+        env["EPIDEMIC_DATA_DIR"] = self.data_dir
+        p = subprocess.run([sys.executable, self.PRUNE] + list(args),
+                           capture_output=True, encoding="utf-8", errors="replace",
+                           env=env)
+        return p.returncode, (p.stdout or "") + (p.stderr or "")
+
+    def test_dry_run_deletes_nothing(self):
+        rc, out = self._run("--date", self._day(0), "--days", "30")
+        self.assertEqual(rc, 0)
+        self.assertIn("dry-run", out)
+        self.assertTrue(os.path.isdir(self._old_raw()))
+        for f in self.old_reports + self.old_markers:
+            self.assertTrue(os.path.isfile(f), "dry-run 不得删除: %s" % f)
+        self.assertTrue(os.path.isfile(self.db_stub))
+        self.assertTrue(os.path.isfile(self.fetch_db_stub))
+
+    def test_apply_deletes_stale_keeps_recent_unknown_and_boundary(self):
+        rc, out = self._run("--date", self._day(0), "--days", "30", "--apply")
+        self.assertEqual(rc, 0, out)
+        # 清掉的: 旧 raw 整目录 / 旧 events / 旧日报 / 旧标记
+        self.assertFalse(os.path.exists(self._old_raw()))
+        self.assertFalse(os.path.exists(self.old_events))
+        for f in self.old_reports + self.old_markers:
+            self.assertFalse(os.path.exists(f), "应当被清理: %s" % f)
+        # 留下的: 窗口内 / 截止日边界(严格早于才删) / 未知名目录 / 当天标记 / DB 桩
+        self.assertTrue(os.path.isdir(os.path.join(self.data_dir, "raw", self._day(3))))
+        self.assertTrue(os.path.isdir(self.boundary_raw),
+                        "截止日当天的目录必须保留(删的是「严格早于」)")
+        self.assertTrue(os.path.isdir(os.path.join(self.data_dir, "raw", "not-a-date")))
+        self.assertTrue(os.path.isfile(self.new_report))
+        self.assertTrue(os.path.isfile(self.today_flag))
+        self.assertTrue(os.path.isfile(self.db_stub))
+        self.assertTrue(os.path.isfile(self.fetch_db_stub))
+        # 留痕: 删除清单先落盘, 含被删路径与「已删」结果
+        prune_dir = os.path.join(self.data_dir, "reports", ".prune")
+        logs = [f for f in os.listdir(prune_dir) if f.endswith(".log")]
+        self.assertEqual(len(logs), 1)
+        with open(os.path.join(prune_dir, logs[0]), encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn(self._old_raw(), content)
+        self.assertIn("已删", content)
+
+    def test_days_below_floor_refused(self):
+        rc, out = self._run("--date", self._day(0), "--days", "5", "--apply")
+        self.assertEqual(rc, 1)
+        self.assertIn("下限", out)
+        self.assertTrue(os.path.isdir(self._old_raw()), "拒绝执行时不得删除任何东西")
+        for f in self.old_reports + self.old_markers:
+            self.assertTrue(os.path.exists(f))
+
+    def test_no_targets_is_ok(self):
+        rc, out = self._run("--date", self._day(0), "--days", "400")
+        self.assertEqual(rc, 0)
+        self.assertIn("没有可清理对象", out)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

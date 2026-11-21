@@ -253,6 +253,8 @@ python scripts/merge_duplicates.py --db <库路径> --dry-run   # 存量同政�
 python scripts/merge_duplicates.py --db <库路径> --apply     # 执行归并(--apply 前自动备份)
 python scripts/flag_food_scope.py                          # 存量食品类(非检疫口径)预览(默认不写库)
 python scripts/flag_food_scope.py --apply                  # 标记为 false_positive(--unmark <id> 可撤回)
+python scripts/prune_data.py                               # 数据清理预览(默认 dry-run, 不删任何东西)
+python scripts/prune_data.py --apply                       # 执行清理(30 天前的取数存档/事件快照/日报/旧标记; 台账 DB 与 fetch.db 不动)
 python scripts/risk.py --event-id <id> --dim trade=4 --dim biosecurity=3,...   # 影响写回
 python scripts/report.py --date YYYY-MM-DD                # Markdown 日报（跑批只产这个）
 python scripts/report.py --date YYYY-MM-DD --excel --docx   # 按需生成 Excel/Word（--policy 已废弃为 no-op）
@@ -276,6 +278,8 @@ scripts/run_scan.sh policy --agent                          # 回退旧 Agent �
 python scripts/token_budget.py --date YYYY-MM-DD            # 当日 Hermes token 用量/预算检查（只读 state.db）
 bash scripts/deploy_update.sh policy                        # 生产更新（git pull + 依赖 + 自检）
 ```
+
+**数据清理口径（2026-11-21 用户拍板，`scripts/prune_data.py`）**：cron 每周日 03:17 自动 `--apply`（见 config/crontab.example）。清理"严格早于截止日（基准日期 − N 天，默认 30，下限 10）"的对象：`data/raw/<日期>/` 整目录（磁盘大头）、`data/events/<日期>/` 写透快照、`data/reports/<日期>-policy-report.*` 日报三件套、`.pushed/.review-pending/.push-scope` 旧标记。**台账 DB（events 表）暂不清**——删了丢面板历史与老政策的语义查重演化（WTO 通报天天重发靠库里旧记录做"更丰富者胜"合并更新），磁盘收益≈0；`database/fetch.db`（urlwatch 条件请求状态）**绝不能动**，动了 47 源全量重抓一轮；`data/geocache.json` 与 `logs/` 也不碰。`--days` 下限 10 是硬保护：保留窗口必须盖过补抽（3 天）与死源分诊（7 天）的回看窗口。默认 dry-run；`--apply` 先把删除清单写进 `data/reports/.prune/<时间戳>.log` 再动手（不留痕不执行）；日期解析不了的条目一律跳过。判定只看目录/文件名里的日期（东八区 `biz_today()` 口径），删"严格早于"，截止日当天保留。
 
 ## 模块边界与运行方式
 

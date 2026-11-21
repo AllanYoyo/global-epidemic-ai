@@ -15,9 +15,13 @@
 Agent 全流程(搜索→抽取→核验→研判)仍由 Hermes 执行,可用 RADAR_GENERATE_CMD 接管。
 
 安全: 面板只读; 生产环境建议经 Tailscale 或反向代理访问, 不要裸暴露公网。
-事件坐标: 优先用事件自带经纬度, 缺失时按国名查询 OpenStreetMap Nominatim 并缓存
+事件坐标: 优先用事件自带经纬度, 缺失时按国名取坐标 —— 内置离线质心表
+(webapp/geo_centroids.json, 2026-11-21 起) > 磁盘缓存 > Nominatim 在线兜底
 (RADAR_GEO=0 关闭; 同国多点做确定性偏移避免重叠)。
 """
+import gzip
+import hashlib
+import io
 import json
 import os
 import subprocess
@@ -43,6 +47,20 @@ RISK_COLOR = {"high": "#ff4d4f", "medium": "#faad14", "low": "#52c41a", None: "#
 _geo_lock = threading.Lock()
 _geo_cache = None
 _geo_last_call = 0.0
+# ---- 在线兜底的失败处置(2026-11-21 地图空打点修复) ----
+# 旧实现把查不到的结果(含网络失败的 None)**永久写进 geocache.json** —— 一次网络故障
+# 就把该国从地图上永久抹掉, 网络恢复也不自愈(生产实证: 内置表上线前, 中国侧网络
+# 够不着 nominatim.openstreetmap.org, 新国家的点整批消失)。现在:
+#   · 失败一律**不落盘**; 加载时丢弃历史 None 条目(存量坏缓存自愈);
+#   · 网络级失败(超时/拒答)触发全局闸门 —— 闸门期内不再逐国烧 8s 超时,
+#     /api/events 不会被打点查询卡死几十秒;
+#   · 有应答但确实查不到的名字走进程内负缓存(不落盘, TTL 后自动重试)。
+_GEO_NEG_TTL = 3600.0    # 单名查询失败后的进程内重试间隔
+_GEO_DOWN_TTL = 600.0    # 网络级不可达闸门的有效期
+_geo_neg = {}            # name -> 失败时刻(进程内, 不落盘)
+_geo_down_until = 0.0    # 网络闸门: 到该时刻之前所有在线查询直接放弃
+_BUILTIN_GEO_PATH = os.path.join(HERE, "geo_centroids.json")
+_builtin_geo = None
 
 
 def _load_geo_cache():
@@ -50,43 +68,110 @@ def _load_geo_cache():
     if _geo_cache is None:
         try:
             with open(GEO_CACHE, encoding="utf-8") as f:
-                _geo_cache = json.load(f)
+                raw = json.load(f)
         except (OSError, ValueError):
-            _geo_cache = {}
+            raw = {}
+        # 历史遗留的 None 条目直接丢弃: 旧版把它们当结果存了下来, 命中即
+        # "该国永远没有坐标"。丢弃后本轮起自动重查或落到内置质心表。
+        _geo_cache = {k: v for k, v in raw.items() if v is not None}
     return _geo_cache
 
 
 def _save_geo_cache():
     os.makedirs(os.path.dirname(GEO_CACHE), exist_ok=True)
     with open(GEO_CACHE, "w", encoding="utf-8") as f:
-        json.dump(_geo_cache, f, ensure_ascii=False)
+        json.dump({k: v for k, v in _geo_cache.items() if v is not None},
+                  f, ensure_ascii=False)
+
+
+def _builtin_centroid(country_en):
+    """内置离线质心表(2026-11-21 新增): 键为小写国名, 含 WTO/ISO 长格式别名。
+
+    为什么不直接全走 Nominatim: 地理编码发生在 /api/events 请求线程里, 而
+    nominatim.openstreetmap.org 从中国侧网络经常整体不可达(实测 12s 超时)。
+    内置表覆盖 ePing 全部 189 个通报成员名(100% 命中)与常见写法, 离线确定出点;
+    表里没有的名字才走在线查询。坐标只用于打点, 展示名仍是台账里的
+    country_cn(涉台表述为「中国台湾省」, 不受本表影响)。
+    """
+    global _builtin_geo
+    if _builtin_geo is None:
+        try:
+            with open(_BUILTIN_GEO_PATH, encoding="utf-8") as f:
+                _builtin_geo = json.load(f)
+        except (OSError, ValueError):
+            _builtin_geo = {}
+    key = str(country_en or "").strip().lower()
+    if not key:
+        return None
+    if key in _builtin_geo:
+        return tuple(_builtin_geo[key])
+    # "Taiwan, China" / "Bolivia, Plurinational State of" 这类长格式: 逗号前主干
+    # 再试一次。歧义名(如 "Korea, ...")在别名表里显式分派, 不会落到主干误配。
+    head = key.split(",")[0].strip()
+    if head and head != key and head in _builtin_geo:
+        return tuple(_builtin_geo[head])
+    return None
+
+
+def _nominatim_query(q):
+    """单次 Nominatim 查询。返回 (pos, net_fail); net_fail=True 表示网络级失败
+    (超时/拒答), 调用方据此关闸门 —— 与"有应答但查不到"(net_fail=False)分开处置。"""
+    global _geo_last_call
+    if time.time() - _geo_last_call < 1.1:
+        time.sleep(1.1 - (time.time() - _geo_last_call))
+    _geo_last_call = time.time()
+    qs = urllib.parse.urlencode({"q": q, "format": "jsonv2", "limit": 1})
+    req = urllib.request.Request(
+        "https://nominatim.openstreetmap.org/search?%s" % qs,
+        headers={"User-Agent": "GlobalEpidemicRadar/0.1 (country centroid lookup)"})
+    try:
+        with urllib.request.urlopen(req, timeout=8) as r:
+            data = json.loads(r.read().decode("utf-8"))
+    except Exception:
+        return None, True
+    pos = (float(data[0]["lat"]), float(data[0]["lon"])) if data else None
+    return pos, False
 
 
 def country_centroid(country_en):
-    """国名 -> (lat, lon); Nominatim 限速 1 req/s, 结果缓存。"""
-    global _geo_last_call
+    """国名 -> (lat, lon)。查找顺序: 磁盘缓存(只存成功结果) -> 内置质心表(离线,
+    不联网不落盘) -> Nominatim 在线(表外名字的兜底, 限速 1 req/s)。
+
+    失败的查询一律不落盘(2026-11-21 修复): 旧版把 None 也写进缓存, 一次网络
+    故障 = 该国从地图上永久消失。
+    """
+    global _geo_down_until
     if not GEO_ENABLED or not country_en:
         return None
     with _geo_lock:
         cache = _load_geo_cache()
         if country_en in cache:
             return cache[country_en]
-        try:
-            if time.time() - _geo_last_call < 1.1:
-                time.sleep(1.1 - (time.time() - _geo_last_call))
-            _geo_last_call = time.time()
-            qs = urllib.parse.urlencode({"q": country_en, "format": "jsonv2", "limit": 1})
-            req = urllib.request.Request(
-                "https://nominatim.openstreetmap.org/search?%s" % qs,
-                headers={"User-Agent": "GlobalEpidemicRadar/0.1 (country centroid lookup)"})
-            with urllib.request.urlopen(req, timeout=8) as r:
-                data = json.loads(r.read().decode("utf-8"))
-            pos = (float(data[0]["lat"]), float(data[0]["lon"])) if data else None
-        except Exception:
-            pos = None
-        cache[country_en] = pos
-        _save_geo_cache()
-        return pos
+        pos = _builtin_centroid(country_en)
+        if pos:
+            return pos
+        neg = _geo_neg.get(country_en)
+        if neg and time.time() - neg < _GEO_NEG_TTL:
+            return None
+        if time.time() < _geo_down_until:
+            return None
+        pos, net_fail = _nominatim_query(country_en)
+        if pos is None and not net_fail:
+            # 有应答但查不到: 换逗号前主干再问一次("Taiwan, China" -> "Taiwan")
+            head = str(country_en).split(",")[0].strip()
+            if head and head != country_en:
+                pos, net_fail = _nominatim_query(head)
+        if pos:
+            cache[country_en] = pos
+            _save_geo_cache()
+            _geo_neg.pop(country_en, None)
+            _geo_down_until = 0.0
+            return pos
+        if net_fail:
+            _geo_down_until = time.time() + _GEO_DOWN_TTL
+        else:
+            _geo_neg[country_en] = time.time()
+        return None
 
 
 def _jitter(event_id):
@@ -142,6 +227,51 @@ def slim_event(e):
 app = Flask(__name__, static_folder=os.path.join(HERE, "static"), static_url_path="/static")
 
 
+def _conditional_json(resp):
+    """ETag/304 条件响应(2026-11-21 生产事故修复)。
+
+    生产实证: 台账涨到 454 条后 /api/events 裸响应 1.2MB+, 在劣化传输路径
+    (Tailscale 中继)下 90 秒只能传出 700KB —— 浏览器 fetch 永远等不完,
+    refresh() 不完成, 统计/台账/地图整块不渲染("地图无法显示")。
+    gzip 解决首拉, ETag 解决之后的每一次: 数据没变(绝大多数日子里页面打开
+    都撞上没变的数据)→ If-None-Match 命中 → 304 空响应, 零传输。
+    ETag 取**未压缩**响应体的 sha1 —— 它标识资源本身, 与传输编码无关。
+    """
+    body = resp.get_data()
+    etag = '"%s"' % hashlib.sha1(body).hexdigest()
+    resp.headers["ETag"] = etag
+    resp.headers["Cache-Control"] = "no-cache"   # 每次都问(304), 但命中就不传 body
+    if (request.headers.get("If-None-Match") or "").strip() == etag:
+        resp.status_code = 304
+        resp.set_data(b"")
+        resp.headers.pop("Content-Length", None)
+    return resp
+
+
+@app.after_request
+def _gzip_json_response(resp):
+    """JSON 大响应 gzip(2026-11-21 生产事故修复): 1.21MB -> 0.20MB(-84%)。
+
+    只压 200 的 application/json(304 空响应/文件下载不受影响); >=1KB 才压
+    (小响应压缩收益抵不上开销)。stdlib gzip, 不加新依赖。
+    """
+    try:
+        if resp.status_code == 200 and not resp.direct_passthrough \
+                and (resp.mimetype or "") == "application/json" \
+                and "gzip" in (request.headers.get("Accept-Encoding") or "").lower():
+            data = resp.get_data()
+            if len(data) >= 1024:
+                buf = io.BytesIO()
+                with gzip.GzipFile(mode="wb", compresslevel=6, fileobj=buf) as gz:
+                    gz.write(data)
+                resp.set_data(buf.getvalue())
+                resp.headers["Content-Encoding"] = "gzip"
+                resp.headers["Vary"] = "Accept-Encoding"
+    except Exception:
+        pass  # 压缩失败按未压缩原样交付, 不因锦上添花弄坏主流程
+    return resp
+
+
 @app.get("/")
 def index():
     return Response(INDEX_HTML, mimetype="text/html")
@@ -168,7 +298,7 @@ def api_summary():
     constraints = sum(1 for e in all_e if e.get("impact_type") == "约束")
     opportunities = sum(1 for e in all_e if e.get("impact_type") == "机会")
     neutral = sum(1 for e in all_e if e.get("impact_type") == "中性")
-    return jsonify({
+    return _conditional_json(jsonify({
         "record_type": "policy", "total": len(all_e), "today_new": len(covered),
         "focus_now": focus_now, "high": high,
         "unverified": sum(1 for e in all_e if e.get("verification_status") == "unverified"),
@@ -176,7 +306,7 @@ def api_summary():
         "relax": sum(1 for e in all_e if e.get("action_type") in ("放松", "恢复")),
         "constraints": constraints, "opportunities": opportunities, "neutral": neutral,
         "countries": len(countries),
-    })
+    }))
 
 
 @app.get("/api/events")
@@ -188,7 +318,7 @@ def api_events():
     out = [slim_event(e) for e in all_events
            if e.get("verification_status") != "merged"
            and e.get("record_type") == "policy"]
-    return jsonify(out)
+    return _conditional_json(jsonify(out))
 
 
 @app.get("/api/reports")
@@ -386,7 +516,14 @@ if(window.marked){
 }
 let EVENTS=[],MAP=null,MARKERS=null,MAP_READY=false;
 
-async function jget(u){const r=await fetch(u);return r.json();}
+async function jget(u,timeoutMs){
+  // 超时兜底(2026-11-21 生产事故修复): 劣化路径下 fetch 可能几十秒不出头,
+  // 不设超时 = 界面永远空着且无提示。超时按失败走 refresh 的分块降级。
+  const c=window.AbortController?new AbortController():null;
+  const t=c?setTimeout(()=>c.abort(),timeoutMs||45000):null;
+  try{const r=await fetch(u,{signal:c?c.signal:undefined});
+    if(!r.ok)throw new Error('HTTP '+r.status);return await r.json();}
+  finally{if(t)clearTimeout(t);}}
 
 function renderStats(s){
   $('#stats').innerHTML=
@@ -512,9 +649,17 @@ function toast(msg,ok){
 }
 
 async function refresh(){
-  const [s,ev]=await Promise.all([jget('/api/summary'),jget('/api/events')]);
-  renderStats(s);EVENTS=ev;renderTable();
+  // 两个接口各自隔离(2026-11-21 修复): 原实现是裸 Promise.all —— 任一接口
+  // 500/超时, 整个 refresh 中断, 统计/台账/**地图**一个都不渲染, 页面看起来
+  // 就是"地图无法显示"且无任何提示。现在分块兜底: 哪个成功渲染哪个,
+  // 全挂才提示, 已渲染的部分不动。
+  let s=null,ev=null,failed=false;
+  try{s=await jget('/api/summary');}catch(e){failed=true;console.warn('summary error',e);}
+  try{ev=await jget('/api/events');}catch(e){failed=true;console.warn('events error',e);}
+  if(s)renderStats(s);
+  if(ev){EVENTS=ev;renderTable();}
   try{renderMap(evtsFiltered());}catch(err){console.warn('map error',err);}
+  if(failed)toast('部分面板数据加载失败(接口异常), 显示的可能是上次结果',false);
 }
 function evtsFiltered(){return EVENTS;}
 
@@ -556,7 +701,7 @@ document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{
 $('#fQ').oninput=renderTable;
 
 refresh();
-setInterval(async()=>{const s=await jget('/api/summary');renderStats(s);},300000);
+setInterval(async()=>{try{const s=await jget('/api/summary');renderStats(s);}catch(e){/* 下个周期再试 */}},300000);
 </script>
 </body>
 </html>"""

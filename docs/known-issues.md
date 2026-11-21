@@ -570,6 +570,61 @@
 
 ## 已修复 (历史)
 
+### 2026-11-21 · 生产端面板地图整块无法显示: 大响应 × 劣化传输路径 × 前端零兜底
+
+> 现象: 生产面板统计/台账/地图全部空白(页头与静态图例正常)。用户报障
+> "地图无法显示"。本地复现两轮: 第一轮误判为地理编码问题(见下一条 M49),
+> 死盯生产才拿到真因。
+
+#### H7 · /api/events 裸奔 1.2MB: 无压缩无条件请求, 劣化路径下传输永不完成 (高, 已修)
+- 位置: `webapp/app.py`(`api_events`/`api_summary`/前端 `refresh()`)
+- 生产实证(SSH 现场实测, 2026-11-21):
+  - VPS 本机 curl `/api/events`(1.21MB): **0.09s** —— 服务器完全健康;
+  - 本机(中国侧)经 Tailscale 隧道 curl: `/api/summary` 185 字节竟 **13.8s**;
+    `/api/events` **90s 只传出 700KB** —— 大响应在隧道上永远传不完;
+  - 浏览器实测生产页面: HTML/静态资源/JS 解析全部正常(`leafletLoaded=true`),
+    但 `refresh()` 里裸 `Promise.all([jget('/api/summary'), jget('/api/events')])`
+    **永远 pending** → `renderStats/renderTable/renderMap` 一个都不执行 →
+    `mapReady=false`, 地图区域连 Leaflet 都未初始化(截图与用户所见一致)。
+- 为什么"最近"才爆: 台账涨到 454 条后响应体过 1.2MB 且只增不减, 劣化路径
+  (Tailscale DERP 中继/NAT)过了临界点; 数据量增长是确定趋势。
+- 修法(服务端双闸 + 前端兜底):
+  ① **gzip**: after_request 对 200 的 application/json(≥1KB)压缩 —— 实测
+     1.21MB → 0.20MB(-84%); stdlib 实现, 不加依赖;
+  ② **ETag/304**: `/api/events` 与 `/api/summary` 带 sha1 ETag + `Cache-Control:
+     no-cache` —— 数据没变的日子(绝大多数)二次打开是 304 空响应, **零传输**;
+  ③ 前端 `jget` 加 **AbortController 超时**(默认 45s), `refresh()` 两个接口
+     **分块隔离** —— 单接口挂掉只降级那一块(统计/台账/地图各自尽力渲染)并
+     toast 提示, 不再互相拖死整页; 5 分钟轮询同样加 try/catch。
+- 回归防线: `PanelApiCompressionTests`(gzip 交付/明文回退/304 命中/ETag 轮换/
+  前端分块与超时断言)5 例。
+
+#### M49 · 地理编码把失败的查询永久写进缓存 —— 一次网络故障 = 一国从地图上永久消失 (中, 已修)
+- 位置: `webapp/app.py`(`country_centroid`)
+- 现象(本地实测, 中国侧网络): `nominatim.openstreetmap.org` 整体不可达
+  (curl 12s 超时, 百度 200 正常), 旧实现把查不到的 None **无条件写进
+  geocache.json 并永久命中** → 5 个测试国家全部查不到 → `/api/events` 首响
+  **41.2 秒**(8s 超时 + 1.1s 限速间隔 × 5 国)、打点为零且网络恢复也不自愈。
+  生产 geocache 里同样躺着 8 条 None(模型编造的"多国字符串/IPPC"类名字)。
+  11-04 涉台规范化后台湾记录换新缓存键 "Taiwan, China", 又是一次必然失败的
+  在线查询 —— 本地部署形态下台湾的点也会消失。
+- 修法(四件套):
+  ① **内置离线质心表** `webapp/geo_centroids.json`(313 条, Natural Earth 派生
+     + 4 条手工补点: Taiwan/Hong Kong/Macao/European Union): 覆盖 ePing 全部
+     **189 个通报成员名 100% 命中** + WTO/ISO 长格式别名, 查找顺序
+     磁盘缓存(只存成功) → 内置表 → Nominatim 兜底; 内置表命中**不联网不落盘**,
+     地理编码从此不依赖任何网络;
+  ② **失败不落盘**: 查询失败一律不写缓存; 加载时丢弃历史 None 条目(存量自愈);
+  ③ **网络闸门**: 网络级失败(超时/拒答)关闸 10 分钟, 闸门期内其余国家零 HTTP
+     调用 —— /api/events 不会再被逐国烧 8s 超时卡死几十秒;
+  ④ **进程内负缓存**: 确实查不到的名字(如 "Demo Land")1 小时内不重试,
+     TTL 过后自动重问。
+- 回归防线: `GeoCenterTests` 6 例(内置表命中零联网零落盘/失败不持久化/
+  网络闸门/成功落库/None 自愈/RADAR_GEO=0)。
+- 附带交付: `scripts/diagnose_map.py`(只读现场诊断: RADAR_GEO 状态/geocache
+  毒缓存体检/按国坐标覆盖/内置表命中/接口自测/可选 Nominatim 实探),
+  与 `diagnose_push.py` 同先例。
+
 ### 2026-11-20 巡检 · 升级后全仓复审: 13 高危 + 6 中危 + 4 低危当场闭环(23 条)
 
 > 触发: 用户"又升了级, 代码可以重新分析啦"。方法: 四线并行代码审计(取数编排 /

@@ -332,7 +332,7 @@ bash scripts/deploy_update.sh policy                        # 生产更新（git
 - 面向用户的文案（docstring、CLI 输出、校验报错、日报、文档）**一律中文**；代码注释也用中文，风格贴近现有 `%` 格式化、stdlib 优先（urllib 而非 requests）。
 - 开发在 Windows（注意 CJK 字体：templates/base.py 按 platform 选 Microsoft YaHei / Noto Sans CJK SC），生产是 Linux VPS。
 - webapp 面板只读 + 一键生成日报；events API 需显式 `record_type=policy` 才返回数据。勿裸暴露公网。
-- 地理编码走 OSM Nominatim，缓存于 `data/geocache.json`，`RADAR_GEO=0` 关闭；同国多点做确定性偏移。
+- 地理编码（2026-11-21 重做）：**内置离线质心表 `webapp/geo_centroids.json`（313 条，覆盖 ePing 全部 189 成员名）优先 → 磁盘缓存 `data/geocache.json`（只存成功结果，失败不落盘、加载时丢弃历史 None）→ Nominatim 在线兜底**（网络级失败关闸 10 分钟，防 /api/events 被逐国烧超时卡死）；坐标只用于打点，展示名仍是 country_cn（涉台表述不受影响）。`RADAR_GEO=0` 关闭；同国多点做确定性偏移。诊断用 `python scripts/diagnose_map.py`（只读）。**面板 API 带 gzip + ETag/304**（1.2MB → 0.2MB；数据没变 304 零传输）——别去掉，劣化传输路径下裸大响应会让前端 fetch 永远等不完、整页数据区死掉（known-issues H7）。
 - cron 部署要求时区 Asia/Shanghai，且需在 crontab 手工补 PATH（见 config/crontab.example）。
 - 提交信息用 conventional commits（feat/fix/docs/chore(scope)），详见 git log 风格。
 - 敏感区改动前先读：`docs/event-schema.md`、`prompts/policy-impact.md`（研判口径）、`config/sources.yaml`（源分级 tier、track 轨道、schedule 档位与国别周轮转分片）。

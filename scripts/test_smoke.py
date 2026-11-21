@@ -5971,5 +5971,168 @@ class PruneDataTests(unittest.TestCase):
         self.assertIn("没有可清理对象", out)
 
 
+class PanelApiCompressionTests(unittest.TestCase):
+    """面板 API gzip + ETag/304(2026-11-21 生产事故修复)。
+
+    生产实证: 台账 454 条时 /api/events 裸响应 1.2MB+, 劣化传输路径下 90s 只传出
+    700KB —— 浏览器 fetch 永远等不完, refresh() 不完成, 地图整块不渲染。
+    合同不变量:
+    - 200 的 application/json 且 >=1KB: Accept-Encoding 带 gzip 时必须压缩交付;
+    - 不带 Accept-Encoding: gzip(如 diagnose_map 的 test_client)照旧拿明文;
+    - ETag 只随**数据**变: 同数据二次请求带 If-None-Match 必须命中 304 空响应;
+    - 前端 refresh() 两接口分块隔离 + fetch 带超时(单接口挂不再拖死整页)。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, REPO)
+        import webapp.app as radar_mod
+        cls.radar = radar_mod
+        # 桩库放几条记录, 让 /api/events 的响应体 >1KB(gzip 门槛)
+        from normalize import fill_defaults, open_db, upsert
+        con = open_db(os.environ["EPIDEMIC_DB"])
+        for i in range(5):
+            rec = _source_event(title_cn="压缩测试政策%d" % i,
+                                title_en="gzip test policy %d" % i,
+                                summary_cn="这是为了把响应体撑过 1KB 压缩门槛的摘要文本" * 4)
+            upsert(con, fill_defaults(rec))
+        con.close()
+
+    def _client(self):
+        return self.radar.app.test_client()
+
+    def test_gzip_applied_to_large_json(self):
+        import gzip as _gzip
+        with self._client() as tc:
+            rv = tc.get("/api/events", headers={"Accept-Encoding": "gzip"})
+            self.assertEqual(rv.status_code, 200)
+            self.assertEqual(rv.headers.get("Content-Encoding"), "gzip")
+            raw = _gzip.decompress(rv.data)
+            recs = json.loads(raw.decode("utf-8"))
+            self.assertGreater(len(recs), 0)
+            self.assertLess(len(rv.data), len(raw), "压缩后必须更小")
+
+    def test_no_gzip_without_accept_encoding(self):
+        with self._client() as tc:
+            rv = tc.get("/api/events")
+            self.assertEqual(rv.status_code, 200)
+            self.assertIsNone(rv.headers.get("Content-Encoding"),
+                              "客户端不收 gzip 时必须交付明文")
+
+    def test_etag_304_on_revalidation(self):
+        with self._client() as tc:
+            rv1 = tc.get("/api/events")
+            etag = rv1.headers.get("ETag")
+            self.assertTrue(etag, "/api/events 必须带 ETag")
+            rv2 = tc.get("/api/events", headers={"If-None-Match": etag})
+            self.assertEqual(rv2.status_code, 304)
+            self.assertEqual(rv2.data, b"")
+            rv3 = tc.get("/api/events", headers={"If-None-Match": '"stale-etag"'})
+            self.assertEqual(rv3.status_code, 200, "ETag 不匹配必须回完整响应")
+
+    def test_summary_has_etag_too(self):
+        with self._client() as tc:
+            rv1 = tc.get("/api/summary")
+            etag = rv1.headers.get("ETag")
+            self.assertTrue(etag)
+            rv2 = tc.get("/api/summary", headers={"If-None-Match": etag})
+            self.assertEqual(rv2.status_code, 304)
+
+    def test_panel_refresh_isolated_and_timeout(self):
+        html = self.radar.INDEX_HTML
+        self.assertIn("AbortController", html, "fetch 必须带超时兜底")
+        # 分块隔离: 单接口失败不得拖死另一块(统计/台账/地图)
+        self.assertIn("try{s=await jget('/api/summary');}", html)
+        self.assertIn("try{ev=await jget('/api/events');}", html)
+        self.assertIn("if(s)renderStats(s);", html)
+        self.assertIn("if(ev){EVENTS=ev;renderTable();}", html)
+
+
+class GeoCenterTests(unittest.TestCase):
+    """地理编码内置质心表 + 失败不落盘(2026-11-21 地图空打点修复)。
+
+    合同不变量:
+    - 内置表命中: 不联网(零次 Nominatim 调用)、不落盘, 直接出坐标;
+    - 查询失败(None)一律**不写** geocache.json —— 旧版把 None 永久缓存,
+      一次网络故障 = 该国从地图上永久消失(生产+本地双实证);
+    - 加载时丢弃历史 None 条目(存量毒缓存自愈);
+    - 网络级失败触发全局闸门: 闸门期内其余国家零 HTTP 调用(不再逐国烧 8s 超时,
+      /api/events 不再被地理编码卡死几十秒);
+    - "Taiwan, China" 类长格式: 全名查不到自动换逗号前主干再问一次。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, REPO)
+        import webapp.app as radar_mod
+        cls.radar = radar_mod
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.mkdtemp(prefix="geo-cache-")
+        self.radar.GEO_CACHE = os.path.join(self.tmp, "geocache.json")
+        self.radar._geo_cache = None
+        self.radar._geo_neg.clear()
+        self.radar._geo_down_until = 0.0
+        self.radar._geo_last_call = 0.0
+        os.environ.pop("RADAR_GEO", None)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_builtin_hit_no_network_no_disk(self):
+        with mock.patch.object(self.radar, "_nominatim_query",
+                               side_effect=AssertionError("内置表命中不得联网")) as q:
+            pos = self.radar.country_centroid("Uruguay")
+            self.assertEqual(q.call_count, 0)
+        self.assertIsNotNone(pos)
+        self.assertFalse(os.path.isfile(self.radar.GEO_CACHE),
+                         "内置表命中不落盘(磁盘缓存只记 Nominatim 结果)")
+
+    def test_failed_query_not_persisted(self):
+        with mock.patch.object(self.radar, "_nominatim_query",
+                               return_value=(None, False)) as q:
+            pos = self.radar.country_centroid("Demo Land, Republic of")
+            self.assertIsNone(pos)
+            self.assertEqual(q.call_count, 2, "全名查不到应换逗号前主干再问一次")
+        self.assertFalse(os.path.isfile(self.radar.GEO_CACHE),
+                         "失败的查询不得写缓存(旧版把 None 永久落盘)")
+        self.assertIn("Demo Land, Republic of", self.radar._geo_neg,
+                      "查不到的名字进进程内负缓存, TTL 后自动重试")
+
+    def test_network_failure_closes_gate(self):
+        with mock.patch.object(self.radar, "_nominatim_query",
+                               return_value=(None, True)) as q:
+            self.assertIsNone(self.radar.country_centroid("Nowhere Land"))
+            self.assertEqual(q.call_count, 1)
+            # 闸门期内: 其余国家零调用, /api/events 不会再被逐国烧超时卡死
+            self.assertIsNone(self.radar.country_centroid("Another Land"))
+            self.assertEqual(q.call_count, 1)
+        self.assertFalse(os.path.isfile(self.radar.GEO_CACHE))
+        self.assertGreater(self.radar._geo_down_until, 0.0)
+
+    def test_success_persisted(self):
+        with mock.patch.object(self.radar, "_nominatim_query",
+                               return_value=((1.0, 2.0), False)) as q:
+            self.assertEqual(self.radar.country_centroid("Nowhere Land"), (1.0, 2.0))
+            self.assertEqual(q.call_count, 1)
+        with open(self.radar.GEO_CACHE, encoding="utf-8") as f:
+            cached = json.load(f)
+        self.assertEqual(cached.get("Nowhere Land"), [1.0, 2.0])
+        self.assertEqual(self.radar._geo_down_until, 0.0, "成功应解除网络闸门")
+
+    def test_none_entries_dropped_on_load(self):
+        with open(self.radar.GEO_CACHE, "w", encoding="utf-8") as f:
+            json.dump({"Good Land": [3.0, 4.0], "Poison Land": None}, f)
+        cache = self.radar._load_geo_cache()
+        self.assertEqual(cache.get("Good Land"), [3.0, 4.0])
+        self.assertNotIn("Poison Land", cache, "历史 None 条目加载时必须丢弃(自愈)")
+
+    def test_geo_disabled_returns_none(self):
+        # GEO_ENABLED 是模块导入时固化的常量, 运行时直接 patch 属性(改环境变量无效)
+        with mock.patch.object(self.radar, "GEO_ENABLED", False):
+            self.assertIsNone(self.radar.country_centroid("Uruguay"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

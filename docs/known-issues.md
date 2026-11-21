@@ -598,6 +598,18 @@
      toast 提示, 不再互相拖死整页; 5 分钟轮询同样加 try/catch。
 - 回归防线: `PanelApiCompressionTests`(gzip 交付/明文回退/304 命中/ETag 轮换/
   前端分块与超时断言)5 例。
+- **第二层叠加故障(部署 gzip 修复后当场暴露)**: 统计/台账恢复了, 地图**仍然**
+  空白 —— 页面内实探抓到 `TypeError: (e.products||[]).join is not a function`:
+  存量记录(fill_defaults 的数组归一 2026-10-28 才加)在 DB payload 里
+  products/target_countries 是分隔符字符串(生产实测 **21 条 products + 9 条
+  target_countries**, 全是 10-18 入库), renderTable 对它 .join 当场 TypeError,
+  而 renderTable 在 try 外一死就带走 renderMap → 地图还是不渲染。修法:
+  ④ `slim_event` 运行时归一(`_as_list`, 拆分口径与 fill_defaults 一致,
+     **不改写存量行**——可溯源字段不重写);
+  ⑤ renderTable 的 join 改 `Array.isArray` 防御; **渲染块也各自进 try**
+     (renderTable/renderMap 互不拖累)。
+  教训: "分块隔离"要隔离到**渲染**这一层, 不只 fetch; `||[]` 只防 null/undefined,
+  不防类型错。回归增补 1 例(slim_event 归一) + 断言 2 条(渲染块 try / join 防御)。
 
 #### M49 · 地理编码把失败的查询永久写进缓存 —— 一次网络故障 = 一国从地图上永久消失 (中, 已修)
 - 位置: `webapp/app.py`(`country_centroid`)

@@ -6045,7 +6045,33 @@ class PanelApiCompressionTests(unittest.TestCase):
         self.assertIn("try{s=await jget('/api/summary');}", html)
         self.assertIn("try{ev=await jget('/api/events');}", html)
         self.assertIn("if(s)renderStats(s);", html)
-        self.assertIn("if(ev){EVENTS=ev;renderTable();}", html)
+        # 渲染块同样各自隔离(2026-11-21 第二层: renderTable 对存量字符串 products
+        # .join 当场 TypeError, 在 try 外一死就带走 renderMap → 地图整块空白)
+        self.assertIn("try{renderTable();}", html)
+        self.assertIn("try{renderMap(evtsFiltered());}", html)
+        self.assertIn("Array.isArray(e.products)", html, "join 必须防御非数组 products")
+
+    def test_slim_event_normalizes_legacy_string_fields(self):
+        """存量记录(fill_defaults 2026-10-28 归一之前入库)的 products/target_countries
+        在 DB payload 里是分隔符字符串 —— /api/events 必须归一成数组再交付,
+        否则前端 join 崩掉整页(生产实测 21+9 条, known-issues H7 第二层)。"""
+        base = _source_event()
+        base["products"] = "口蹄疫易感动物、肉类,牛加工动物蛋白;副产品"
+        base["target_countries"] = "日本,韩国"
+        slim = self.radar.slim_event(base)
+        self.assertEqual(slim["products"],
+                         ["口蹄疫易感动物", "肉类", "牛加工动物蛋白", "副产品"])
+        self.assertEqual(slim["target_countries"], ["日本", "韩国"])
+        # 数组原样通过
+        base2 = _source_event(products=["活牛"], target_countries=["蒙古"])
+        slim2 = self.radar.slim_event(base2)
+        self.assertEqual(slim2["products"], ["活牛"])
+        self.assertEqual(slim2["target_countries"], ["蒙古"])
+        # 空值 → []
+        base3 = _source_event(products=None, target_countries="")
+        slim3 = self.radar.slim_event(base3)
+        self.assertEqual(slim3["products"], [])
+        self.assertEqual(slim3["target_countries"], [])
 
 
 class GeoCenterTests(unittest.TestCase):

@@ -24,6 +24,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -180,6 +181,25 @@ def _jitter(event_id):
     return ((h % 100) / 50.0 - 1.0) * 0.8, (((h >> 7) % 100) / 50.0 - 1.0) * 0.8
 
 
+def _as_list(v):
+    """运行时归一 products/target_countries 到数组(2026-11-21 生产事故修复)。
+
+    存量记录(fill_defaults 的数组归一 2026-10-28 才加, 之前入库的在 DB payload
+    里就是逗号/顿号分隔字符串; 生产实测 21 条 products + 9 条 target_countries,
+    全是 10-18 入库) —— 前端 renderTable 对字符串 .join 当场 TypeError, 而
+    renderTable 一死 refresh 就死, renderMap 永远执行不到 → **地图整块空白**。
+    展示层在这里归一, 不改写存量行(可溯源字段不重写); 拆分口径与
+    normalize.fill_defaults 一致(逗号/分号/顿号)。
+    """
+    if isinstance(v, list):
+        return v
+    if isinstance(v, str) and v.strip():
+        return [p.strip() for p in re.split(r"[,，;；、]", v) if p.strip()]
+    if v in (None, "", []):
+        return []
+    return [str(v)]
+
+
 def slim_event(e):
     impact_level = e.get("impact_level")
     level_code = {"高影响": "high", "中影响": "medium", "低影响": "low"}.get(impact_level)
@@ -198,8 +218,8 @@ def slim_event(e):
         "title_cn": e.get("title_cn"), "title_en": e.get("title_en"),
         "action_type": e.get("action_type"), "policy_domain": e.get("policy_domain"),
         "policy_status": e.get("policy_status"), "issuer_cn": e.get("issuer_cn"),
-        "issuer_en": e.get("issuer_en"), "target_countries": e.get("target_countries"),
-        "products": e.get("products"), "effective_date": e.get("effective_date"),
+        "issuer_en": e.get("issuer_en"), "target_countries": _as_list(e.get("target_countries")),
+        "products": _as_list(e.get("products")), "effective_date": e.get("effective_date"),
         "effective_until": e.get("effective_until"), "legal_basis": e.get("legal_basis"),
         "scope": e.get("scope"),
         "disease_name_cn": e.get("disease_name_cn"),
@@ -605,7 +625,8 @@ function renderTable(){
   $('#rowCount').textContent=rows.length+' 条';
   $('#tbody').innerHTML=rows.map(e=>{
     const name=e.title_cn||e.title_en||e.summary_cn||'（无标题）';
-    const products=(e.products||[]).join('、')||e.disease_name_cn||'-';
+    const products=Array.isArray(e.products)?e.products.join('、'):
+                   (e.products?String(e.products):'')||e.disease_name_cn||'-';
     const effective=e.date_invalid?'日期异常':(e.effective_date||e.event_date||'-');
     const srcHref=safeUrl(e.source_url);
     return '<tr>'+
@@ -657,7 +678,8 @@ async function refresh(){
   try{s=await jget('/api/summary');}catch(e){failed=true;console.warn('summary error',e);}
   try{ev=await jget('/api/events');}catch(e){failed=true;console.warn('events error',e);}
   if(s)renderStats(s);
-  if(ev){EVENTS=ev;renderTable();}
+  if(ev){EVENTS=ev;
+    try{renderTable();}catch(e){console.warn('table error',e);}}
   try{renderMap(evtsFiltered());}catch(err){console.warn('map error',err);}
   if(failed)toast('部分面板数据加载失败(接口异常), 显示的可能是上次结果',false);
 }

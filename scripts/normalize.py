@@ -131,6 +131,11 @@ OFFICIAL_DOMAIN_SUFFIXES = (
     # 南美(注: 阿根廷/墨西哥官方门户主域是 gob.ar / gob.mx, 不是 gov.ar / gov.mx)
     "senasa.gov.ar", "sag.gob.cl", "gov.br", "mgap.gub.uy",
     "gob.ar", "gob.mx",
+    # 乌拉圭政府门户 gub.uy(Gestión de Gobierno Unificado, 2026-11-21 补):
+    # 部级新闻页在 www.gub.uy/ministerio-ganaderia-agricultura-pesca/..., 与
+    # mgap.gub.uy 同源。此前不在白名单 —— 生产库那 3 条(2026-11-04/07/10 入库)
+    # 只是因为 source.tier 恰为字符串才绕过了官方域校验(M48), 属侥幸入库。
+    "gub.uy",
     # 欧亚 / 邻国 / 新增对华出口大户(2026-10 扩 sources.yaml 后补齐)
     "gov.ru", "gov.pl", "gov.ua", "gov.rs", "gov.mm", "gov.az",
     "gov.co", "gov.za", "gov.kp",
@@ -192,6 +197,33 @@ def _source_host(url):
     except IndexError:
         return ""
     return host.split("@")[-1].split(":")[0].strip().lower()
+
+
+def _normalize_tier(value):
+    """source.tier 归一为 int(1/3) —— 类型不一致等于没有闸门。
+
+    2026-11-21 生产实证(known-issues M48): 抽取端 prompt 写的是 `source_tier=<1|3>`,
+    kv 解析出来必是**字符串** "1"/"3"; 而 check_source_domain 判定用严格 `tier == 1`
+    —— 字符串 "1" 让「tier=1 必须由官方域支撑」这道闸**整条失效**: 不在黑名单里的
+    第三方主机带着 tier=1 静默入库。实测生产库 454 条里 tier 为 str 216 / int 230,
+    当天新增的 15 条**全是 str** —— 官方域校验对它们全部失效(那 3 条乌拉圭记录只是
+    因为 tier 是字符串才没被官方域校验拒收, 属侥幸入库)。
+    另: 命中第三方黑名单时 tier 的降级(1→3)也因类型不一致没执行 —— 但那条本来就会
+    整条拒收(该分支的报错不依赖 tier), 不影响结论。
+
+    合法取值: 1(官方域原文) / 3(第三方线索)。其余值(2、空、无法识别)原样保留 ——
+    它们不主张 tier=1, 不触发官方域校验, 也不影响「第三方不得判 verified」这条
+    独立判定(那条不依赖 tier)。
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        s = value.strip()
+        if s in ("1", "3"):
+            return int(s)
+    return value
 
 
 def _is_official_domain(host):
@@ -376,7 +408,11 @@ def check_source_domain(e):
     src = e.get("source") or {}
     url = src.get("url")
     host = _source_host(url)
-    tier = src.get("tier")
+    tier = _normalize_tier(src.get("tier"))
+    if tier != src.get("tier"):
+        # 归一后写回 source: 闸门用归一后的值判定, 台账里也存统一的 int
+        # (M48: tier 是字符串时, 「tier=1 必须官方域支撑」这道闸对**所有**新记录失效)
+        src["tier"] = tier
     # ---- scheme 白名单(2026-11-20 巡检闭环, known-issues H6-② 的源头) ----
     # 原来只查**主机后缀**、不查 scheme: `javascript://official.gov.cn/x` 的主机
     # 解析出来仍然是官方域 → 通过校验入库 → 面板把它渲染成 <a href="javascript:...">,

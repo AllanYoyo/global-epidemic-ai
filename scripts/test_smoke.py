@@ -205,6 +205,62 @@ class SourceDomainTests(unittest.TestCase):
             verification_status="unverified")
         self.assertEqual(self.n.validate(dict(e)), [])
 
+    def test_tier_string_normalized_to_int(self):
+        """2026-11-21 生产实证(M48): 抽取端 kv 出来的 tier 是**字符串** "1"/"3",
+        而闸门用严格 `tier == 1` 比较 —— 字符串会同时绕过「第三方强制降 tier 3 +
+        整条拒收」与「tier=1 必须官方域支撑」两道闸(实测生产库当天新增 15 条 tier
+        全是 str, 官方域校验对它们全部失效)。归一后两道闸对字符串同样生效,
+        且落库统一为 int。"""
+        # ① 非官方域 + tier="1" → 必须拒收(修复前静默放行)
+        e = _source_event(
+            source={"tier": "1", "name": "n",
+                    "url": "https://some-news-site.example/x", "quote": "q"},
+            verification_status="unverified")
+        errs = self.n.validate(dict(e))
+        self.assertTrue(any("不在官方域名库内" in m for m in errs),
+                        "tier 字符串绕过了官方域校验: %s" % errs)
+        # ② 第三方黑名单 + tier="1" → 同样拒收, 且 tier 降为 3
+        e2 = _source_event(
+            source={"tier": "1", "name": "n",
+                    "url": "https://freyrsolutions.com/notice/1", "quote": "q"},
+            verification_status="unverified")
+        errs2 = self.n.validate(dict(e2))
+        self.assertTrue(any("第三方" in m for m in errs2), errs2)
+        self.assertEqual(e2["source"]["tier"], 3)
+        # ③ 官方域 + tier="1" → 放行, 且落库为 int 1
+        e3 = _source_event(
+            source={"tier": "1", "name": "n",
+                    "url": "https://www.aphis.usda.gov/rule/1", "quote": "q"},
+            verification_status="unverified")
+        self.assertEqual(self.n.validate(dict(e3)), [])
+        self.assertEqual(e3["source"]["tier"], 1)
+        self.assertIsInstance(e3["source"]["tier"], int)
+        # ④ tier="3" 归一为 3(不许被改成 1 —— 那等于凭空取得官方域背书)
+        e4 = _source_event(
+            source={"tier": "3", "name": "n",
+                    "url": "https://www.aphis.usda.gov/rule/1", "quote": "q"},
+            verification_status="unverified")
+        self.assertEqual(self.n.validate(dict(e4)), [])
+        self.assertEqual(e4["source"]["tier"], 3)
+        # ⑤ 无法识别的 tier 原样保留(不主张 tier=1 → 不触发官方域校验)
+        e5 = _source_event(
+            source={"tier": "unknown", "name": "n",
+                    "url": "https://some-news-site.example/x", "quote": "q"},
+            verification_status="unverified")
+        self.n.validate(dict(e5))
+        self.assertEqual(e5["source"]["tier"], "unknown")
+
+    def test_uruguay_official_portal_accepted(self):
+        """乌拉圭政府门户 gub.uy(2026-11-21 补官方域): 部级新闻页
+        www.gub.uy/ministerio-ganaderia-agricultura-pesca/... 是官方原文, 此前不在
+        白名单 —— 生产库那 3 条只是因 tier 为字符串才侥幸入库(M48)。"""
+        for host in ("https://www.gub.uy/ministerio-ganaderia-agricultura-pesca/x",
+                     "https://mgap.gub.uy/d/ac/noticia"):
+            e = _source_event(
+                source={"tier": 1, "name": "n", "url": host, "quote": "q"},
+                verification_status="unverified")
+            self.assertEqual(self.n.validate(dict(e)), [], host)
+
     def test_official_flag_only_accepts_true_values(self):
         """2026-10-22 审计: 逃生口原先是真值判断, official:"0"/"false"/"no"
         这类字符串全是真值, 等于随手写一个就能打开 official:1 逃生口。"""

@@ -284,7 +284,7 @@ bash scripts/deploy_update.sh policy                        # 生产更新（git
 ## 模块边界与运行方式
 
 - scripts 内**同级导入**：risk.py `from normalize import ...`；report.py 和 webapp/app.py 靠 `sys.path.insert` 引入 scripts/ 与 templates/（Excel 样式工具在 `templates/base.py`）。因此一律从**仓库根目录**以 `python scripts/xxx.py` 运行；`run_scan.sh` 特意 `cd "$REPO"` 即为此（勿删）。
-- 数据落地：`data/raw|events|reports/` 与 `database/`、`logs/` 均不入库（gitignore）。生产 VPS 用 `EPIDEMIC_DATA_DIR` / `EPIDEMIC_DB` 指到 repo 之外（/opt/global-epidemic-ai）。
+- 数据落地：`data/raw|events|reports/` 与 `database/`、`logs/` 均不入库（gitignore）。**生产数据根就在 repo 内**（2026-11-22 用户拍板承认现状：`EPIDEMIC_DATA_DIR` / `EPIDEMIC_DB` 在 `.env` 与 systemd 均未配置，实际即 `repo/data` 与 `repo/database`；`/opt/global-epidemic-ai/data` 下是**旧数据，勿用勿清**）。两个环境变量仍支持覆盖（未来若迁移数据根，配了即生效），prune/诊断/面板读同一套解析逻辑，行为自洽。**备份注意**：按 `/opt/global-epidemic-ai/data` 做的备份备的是旧目录——要备就备 `repo/data` 与 `repo/database`（面板 radar.service 的 WorkingDirectory 是 repo，读的就是这两个）。
 - 环境变量：run_scan.sh 自动加载 `~/.hermes/.env`；推送渠道 `WECHAT_WEBHOOK` / `DINGTALK_WEBHOOK`(+`DINGTALK_SECRET` 加签) / `SMTP_*`；Hermes 投递型渠道由 `hermes send` 自行读 `~/.hermes/.env` 的 `WEIXIN_*` / `FEISHU_*`，可用 `HERMES_PUSH_CHANNELS=weixin,feishu` 把它们纳入定时全量、`HERMES_CLI` 指定 hermes 命令路径；面板 `DASHBOARD_HOST/PORT`、`RADAR_GEO`、`RADAR_POLICY_GENERATE_CMD`、`RADAR_PUBLIC_URL`；Hermes 无头调用模板 `HERMES_RUN_CMD`（`{PROMPT}` 占位符，未配置时退化为待执行提醒推送）。
 - **评审核闸门(2026-10-19 引入, 当晚加固)**：用户在某渠道（微信/钉钉/邮箱）提出测试类请求时，强调"反馈必须先在原渠道完成再扩散到其它渠道"。`scripts/push_report.py` 用 `--review-channel <渠道>`（等价 `REVIEW_CHANNEL` 环境变量）启用两段式：
   - **阶段 1**：`push_report.py --date X --review-channel weixin`（用户与 Hermes 说话的个人微信会话）→ 只发审阅渠道，写 `data/reports/.review-pending/<日期>.flag`（首行 `review_channel=<显示名>` 供阶段 2 读回），不写 `.pushed/`；其它渠道不推送。

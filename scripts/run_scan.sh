@@ -923,7 +923,20 @@ $HEALTH_BLOCK"
       ''|*[!0-9]*) NEW_N=0 ;;
     esac
     if [ "$NEW_N" -eq 0 ]; then
-      MISSING="$MISSING 当日入库 0 条(本轮存档 ${RAW_N} 条却一条没进库)"
+      # 台账过滤放行口(2026-11-25, known-issues M49): ePing 骨干回看 7 天窗口,
+      # 同一通报逐日重存档; 抽取段对内容已在台账的存档全部跳过后, 库里没有
+      # first_seen=当天 —— 这是**合法的安静日**, 不是"取到了东西却没入库"。
+      # 抽取段把跳过数写进 extract-skip.json, 全部存档都被跳过才放行;
+      # 文件缺失或数字解析失败按 0 处理(走保守方向判失败, 不静默放行)。
+      SKIP_N="$("$PY" -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get("ledger_skip", 0))' "$DATA_DIR/raw/$SCAN_DATE/extract-skip.json" 2>/dev/null)"
+      case "$SKIP_N" in
+        ''|*[!0-9]*) SKIP_N=0 ;;
+      esac
+      if [ "$SKIP_N" -ge "${RAW_N}" ]; then
+        echo "[$(date '+%F %T')] 当日存档 ${RAW_N} 条全部为已入库通报的重存档(台账过滤跳过 ${SKIP_N} 条) —— 判安静日, 允许「今日无新增」"
+      else
+        MISSING="$MISSING 当日入库 0 条(本轮存档 ${RAW_N} 条却一条没进库)"
+      fi
     else
       echo "[$(date '+%F %T')] 当日入库计数: $NEW_N 条"
     fi

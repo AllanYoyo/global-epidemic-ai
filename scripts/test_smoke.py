@@ -4352,6 +4352,33 @@ class ParseEpingTests(unittest.TestCase):
         # 无关标题不误报
         self.assertFalse(self.p._is_action({"kw": [], "title": "Notification of the annual report"}))
 
+    # ---- 英文检疫通报体(M51, 2026-11-25 生产实证 6 份真检疫被丢) ----
+    def test_english_quarantine_titles_are_matched(self):
+        # 新西兰 IHS 系列: 标题是"标准名", 不含任何动作动词(11-23 实丢 G/SPS/N/NZL/797)
+        self.assertTrue(self.p._is_action(
+            {"kw": "Plant health",
+             "title": "Import health standard: Plants for Planting (155.02.06)"}))
+        self.assertTrue(self.p._is_action(
+            {"kw": "Plant health",
+             "title": "Citrus Plants for Planting, MPI.IHS.CITRUS.PFP - Prunus "
+                      "Plants for Planting, MPI.IHS.PRUNUS.PFP"}))
+        self.assertTrue(self.p._is_action(
+            {"kw": "Animal diseases / Plant diseases",
+             "title": "Import Health Standard: Vehicles, Machinery and Parts 2026"}))
+        # 韩国: 禁用寄主(11-23 实丢 G/SPS/N/KOR/248/Add.29)
+        self.assertTrue(self.p._is_action(
+            {"kw": "Nematode / Pests / Plant health",
+             "title": "Add of prohibited host related with Radopholus similis"}))
+        # 智利: 西语"Modifica resolución"修订决议(11-23 实丢 G/SPS/N/CHL/902)
+        self.assertTrue(self.p._is_action(
+            {"kw": "Pests / Plant health",
+             "title": "Modifica resolución No. 7.648 de 2024 que reconoce centro "
+                      "de producción para la exportación de plantas clonales"}))
+        # 食品类标题保持被丢("Flavoured Milk" 不在词表, kw 标签不作数)
+        self.assertFalse(self.p._is_action(
+            {"kw": "Food safety / Human health",
+             "title": "Draft MOPH Notification Re: Flavoured Milk"}))
+
     # ---- 日期窗口 ----
     def test_dist_normalizes_iso_and_slash_formats(self):
         self.assertEqual(self.p._dist({"dist": "2026-10-21"}), "2026-10-21")
@@ -5463,6 +5490,67 @@ class ExtractionChannelTests(unittest.TestCase):
                             er._doc_key("https://members.wto.org/crnattachments/"
                                         "2026/SPS/NIC/26_05902_00_s.pdf"))
 
+    def test_doc_key_keeps_query_string_identity(self):
+        """M50: 查询串身份链接(docs.wto.org / ePing viewData)不得坍缩成同一个键。
+
+        旧版"非 WTO 一律去查询串"把 53 条 docs.wto.org 直链坍缩成 6 个键
+        (一个键压 38 条) —— 台账键集合被污染, 所有 DDF 直链互相"撞键"。
+        """
+        er = self._er()
+        a = "https://docs.wto.org/imrd/directdoc.asp?DDFDocuments/T/G/SPS/NTHA807A1.docx"
+        b = "https://docs.wto.org/imrd/directdoc.asp?DDFDocuments/T/G/SPS/NARE334C1.docx"
+        c = "https://eping.wto.org/en/Search?viewData=%20G%2FSPS%2FN%2FCOL%2F432%2FAdd.1"
+        d = "https://eping.wto.org/en/Search?viewData=G%2FSPS%2FN%2FBRA%2F2538"
+        self.assertEqual(er._doc_key(a), "DDF:t/g/sps/ntha807a1.docx")
+        self.assertEqual(er._doc_key(b), "DDF:t/g/sps/nare334c1.docx")
+        self.assertNotEqual(er._doc_key(a), er._doc_key(b))
+        self.assertNotEqual(er._doc_key(c), er._doc_key(d))
+        # 同一 viewData 的不同转义写法是同一份文档
+        self.assertEqual(er._doc_key(c),
+                         er._doc_key("https://eping.wto.org/en/Search/Index?"
+                                     "viewData=G/SPS/N/COL/432/Add.1"))
+        # DDF 键与普通 URL 键互不碰撞
+        plain = "https://www.aphis.usda.gov/news/program-update"
+        self.assertNotIn(er._doc_key(plain), ("DDF:t/g/sps/ntha807a1.docx",))
+
+    def test_partition_by_ledger(self):
+        """M49: 台账过滤把已入库文档的重存档分流出去; 台账不可读时全放行。"""
+        er = self._er()
+        wto_old = ("mp1", {"title": "旧通报"}, "https://members.wto.org/crnattachments/"
+                   "2026/SPS/NIC/26_06116_00_s.pdf", "body")
+        wto_new = ("mp2", {"title": "新通报"}, "https://members.wto.org/crnattachments/"
+                   "2026/SPS/NIC/26_06199_00_s.pdf", "body")
+        ddf = ("mp3", {"title": "DDF 通报"},
+               "https://docs.wto.org/imrd/directdoc.asp?DDFDocuments/T/G/SPS/NTHA807A1.docx",
+               "body")
+        known = {"26_06116", "DDF:t/g/sps/ntha807a1.docx"}
+        pending, skipped = er.partition_by_ledger([wto_old, wto_new, ddf], known)
+        self.assertEqual([a[2] for a in pending], [wto_new[2]])
+        self.assertEqual([a[2] for a in skipped], [wto_old[2], ddf[2]])
+        # 台账不可读(None): 全放行, 退回旧行为
+        pending2, skipped2 = er.partition_by_ledger([wto_old, ddf], None)
+        self.assertEqual(len(pending2), 2)
+        self.assertEqual(skipped2, [])
+
+    def test_extract_writes_skip_state_file(self):
+        """M49: 抽取段写 extract-skip.json, run_scan 终检靠它区分安静日与流程中断。"""
+        er = self._er()
+        root = self._carry_root("skipstate")
+        t = os.path.join(root, "raw", "2026-11-18")
+        url = "https://official.example/in-ledger"
+        self._mk_archive(t, "01-a", url)
+        with mock.patch.object(er, "DATA_DIR", root), \
+                mock.patch.object(er, "ledger_doc_keys",
+                                  return_value={er._doc_key(url)}), \
+                mock.patch.object(er, "done_urls", return_value=set()):
+            n_ok, n_fail = er.extract("2026-11-18")
+        self.assertEqual((n_ok, n_fail), (0, 0))
+        with open(os.path.join(t, "extract-skip.json"), encoding="utf-8") as f:
+            st = json.load(f)
+        self.assertEqual(st["ledger_skip"], 1)
+        self.assertEqual(st["extracted"], 0)
+        self.assertEqual(st["failed"], 0)
+
     def test_carry_writes_done_marker_to_source_day(self):
         """补抽成功: 当天 jsonl(入库) + 源日期 jsonl(已处理标记, 明天不再补)。"""
         er = self._er()
@@ -5523,6 +5611,87 @@ class ExtractionChannelTests(unittest.TestCase):
         i_carry = text.index("--stage carry")
         i_norm = text.index("normalize.py", i_carry)
         self.assertLess(i_carry, i_norm, "补抽必须在 normalize 之前")
+
+    def test_run_scan_final_check_allows_ledger_skip_quiet_day(self):
+        """M49: 终检的「入库 0 条」判定必须放行"全部存档都是已入库重存档"的安静日。"""
+        with open(os.path.join(REPO, "scripts", "run_scan.sh"), encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn("extract-skip.json", text)
+        self.assertIn("ledger_skip", text)
+
+
+class MergeDupIgnoreActionTests(unittest.TestCase):
+    """M49 存量修复: --ignore-action 分组(仅限 WTO 文档 URL)。"""
+
+    @staticmethod
+    def _rec(eid, url, action, first_seen="2026-11-20T08:00:00", domain="plant",
+             date="2026-11-20"):
+        return {
+            "event_id": eid, "record_type": "policy",
+            "title_cn": "政策 " + eid, "title_en": "Policy " + eid,
+            "country_cn": "尼加拉瓜", "country_en": "Nicaragua",
+            "policy_domain": domain, "action_type": action,
+            "event_date": date, "effective_date": date,
+            "policy_key": "Resolución " + eid,
+            "summary_cn": "摘要 " + eid,
+            "source": {"url": url, "quote": "原文摘录", "tier": 1,
+                       "publish_date": date, "name": "wto-eping"},
+            "first_seen": first_seen, "verification_status": "unverified",
+        }
+
+    def test_ignore_action_groups_action_flips_on_wto_docs(self):
+        """同一 WTO 文档抽两次、动作标签漂移(收紧↔调整) → ignore_action 下同组。"""
+        import merge_duplicates as md
+        url = "https://members.wto.org/crnattachments/2026/SPS/NIC/26_06116_00_s.pdf"
+        a = self._rec("aaa", url, "收紧", "2026-11-21T07:40:00")
+        b = self._rec("bbb", url, "调整", "2026-11-25T07:40:00")
+        # 四要素键: 两组(现行为, 闸门不放松)
+        self.assertEqual(len(md.group_by_key([a, b])), 0)
+        # 三要素键(WTO 文档): 同组
+        groups = md.group_by_key([a, b], ignore_action=True)
+        self.assertEqual(len(groups), 1)
+        subs = list(groups.values())[0]
+        self.assertEqual(len(subs[0]), 2)
+
+    def test_ignore_action_does_not_touch_non_wto_urls(self):
+        """非 WTO URL(滚动页等)保持四要素键 —— 动作漂移不分组。"""
+        import merge_duplicates as md
+        url = "https://www.gov.uk/guidance/imports-exports-topical-issues"
+        a = self._rec("ccc", url, "收紧", "2026-11-21T07:40:00")
+        b = self._rec("ddd", url, "调整", "2026-11-25T07:40:00")
+        self.assertEqual(len(md.group_by_key([a, b], ignore_action=True)), 0)
+
+    def test_ignore_action_keeps_subject_conflict_gate(self):
+        """主体冲突(病害名不相交)在 ignore_action 下**仍然**不并。"""
+        import merge_duplicates as md
+        url = "https://members.wto.org/crnattachments/2026/SPS/GBR/26_05001_00_s.pdf"
+        a = self._rec("eee", url, "收紧")
+        a["disease_name_en"] = "foot-and-mouth disease"
+        b = self._rec("fff", url, "收紧", "2026-11-22T07:40:00")
+        b["disease_name_en"] = "lumpy skin disease"
+        groups = md.group_by_key([a, b], ignore_action=True)
+        self.assertEqual(len(groups), 0, "病害不同 = 不同措施, 必须不并")
+
+    def test_ignore_action_accepts_ddf_and_viewdata_urls(self):
+        """DDF 直链与 ePing viewData 链接也算 WTO 文档 URL。"""
+        import merge_duplicates as md
+        for url in ("https://docs.wto.org/imrd/directdoc.asp?DDFDocuments/T/G/SPS/NTHA807A1.docx",
+                    "https://eping.wto.org/en/Search?viewData=G%2FSPS%2FN%2FBRA%2F2538"):
+            a = self._rec("ggg", url, "收紧")
+            b = self._rec("hhh", url, "调整", "2026-11-23T07:40:00")
+            self.assertEqual(len(md.group_by_key([a, b], ignore_action=True)), 1, url)
+
+    def test_plan_wires_ignore_action(self):
+        """plan() 透传 ignore_action。"""
+        import merge_duplicates as md
+        url = "https://members.wto.org/crnattachments/2026/SPS/NIC/26_06121_00_s.pdf"
+        a = self._rec("iii", url, "收紧", "2026-11-21T07:40:00")
+        b = self._rec("jjj", url, "调整", "2026-11-25T07:40:00")
+        plans = md.plan([a, b], ignore_action=True)
+        self.assertEqual(len(plans), 1)
+        keep, drops = plans[0][1], plans[0][2]
+        self.assertEqual(len(drops), 1)
+        self.assertIn(keep, ("iii", "jjj"))
 
 
 class InjectionSurfaceGuardTests(unittest.TestCase):

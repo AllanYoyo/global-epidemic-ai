@@ -47,6 +47,7 @@ import argparse
 import datetime
 import json
 import os
+import re
 import shutil
 import sys
 
@@ -94,16 +95,22 @@ def split_conflicts(group):
     return out
 
 
-def group_by_key(records):
+def group_by_key(records, ignore_action=False):
     """按语义键分组, 再按主体冲突拆子组。返回 {key: [[record, ...], ...]}。
 
-    组内还会按主体冲突再拆一次 —— 冲突的记录分属不同措施, 不能并成一条。
+    ignore_action=True 时, **仅对 WTO 通报文档 URL**(见 _is_wto_doc_url)把
+    分组键从四要素降到「url + 生效日 + 领域」—— 同一文档两次抽取的动作标签
+    漂移(收紧↔调整)不再妨碍归并(M49 存量修复); 主体冲突闸门照旧生效。
+    其余 URL 一律保持四要素键。组内还会按主体冲突再拆一次 —— 冲突的记录
+    分属不同措施, 不能并成一条。
     """
     buckets = {}
     for e in records:
         key = dedup_key(e)
         if not key:
             continue
+        if ignore_action and _is_wto_doc_url(key[0]):
+            key = key[:3]
         buckets.setdefault(key, []).append(e)
     out = {}
     for key, group in buckets.items():
@@ -111,6 +118,20 @@ def group_by_key(records):
         if subs:
             out[key] = subs
     return out
+
+
+# --ignore-action 只对 WTO 通报文档 URL 放开动作要素(2026-11-25, M49):
+# 附件编号(crnattachments/26_xxxxx) / docs.wto.org 直链(DDFDocuments/…) /
+# ePing viewData(旧 Agent 时代链接)。同一文档被抽两次、动作标签漂移
+# (收紧↔调整)的存量修复就靠它 —— 生产实测 58 组 WTO 单文档多记录,
+# 其中 46 对仅动作不同。非 WTO URL 不放开: 滚动页同日多条措施的主体闸门
+# (病害名)对无病害名的记录救不了, 保持四要素键(宁漏合不错合)。
+_WTO_DOC_URL_RE = re.compile(
+    r"/(26_\d{4,6})(?:[/_?]|$)|DDFDocuments/|[?&]viewData=", re.I)
+
+
+def _is_wto_doc_url(url):
+    return bool(_WTO_DOC_URL_RE.search(str(url or "")))
 
 
 def pick_primary(group):
@@ -139,10 +160,10 @@ class _neg(object):
         return self.s == other.s
 
 
-def plan(records):
+def plan(records, ignore_action=False):
     """算出归并计划: [(key, keep_eid, drop_eids, merged_payload), ...]"""
     plans = []
-    for key, subs in group_by_key(records).items():
+    for key, subs in group_by_key(records, ignore_action=ignore_action).items():
         for sub in subs:
             primary = pick_primary(sub)
             merged = dict(primary)
@@ -199,6 +220,10 @@ def main():
     ap.add_argument("--events-dir", default=os.path.join(REPO, "data", "events"),
                     help="事件 JSON 快照目录(默认 data/events)")
     ap.add_argument("--no-clean-json", action="store_true", help="不清理 data/events 下的 JSON 快照")
+    ap.add_argument("--ignore-action", action="store_true",
+                    help="分组键忽略 action_type —— 仅对 WTO 通报文档 URL 生效"
+                         "(同一文档两次抽取动作标签漂移的存量修复, M49; "
+                         "主体冲突闸门照旧生效, 非 WTO URL 保持四要素键)")
     args = ap.parse_args()
 
     if not os.path.isfile(args.db):
@@ -211,18 +236,20 @@ def main():
     con = open_db(args.db)
     try:
         records = load_records(con)
-        plans = plan(records)
+        plans = plan(records, ignore_action=args.ignore_action)
         total_drops = sum(len(d) for _k, _e, d, _m in plans)
 
-        print("[归并预览] 库内 policy 记录 %d 条; 命中同政策组 %d 组, 可合并 %d 条"
-              % (len(records), len(plans), total_drops))
+        print("[归并预览] 库内 policy 记录 %d 条; 命中同政策组 %d 组, 可合并 %d 条%s"
+              % (len(records), len(plans), total_drops,
+                 "(动作要素已忽略, 仅限 WTO 文档 URL)" if args.ignore_action else ""))
         if not plans:
             print("[OK] 无重复, 无需归并")
             return 0
 
         for key, keep_eid, drops, merged in plans:
             print("\n  URL: %s" % key[0][:96])
-            print("    键: 生效日=%s 领域=%s 动作=%s" % (key[1], key[2], key[3]))
+            print("    键: 生效日=%s 领域=%s 动作=%s"
+                  % (key[1], key[2], key[3] if len(key) > 3 else "(忽略)"))
             print("    保留 %s(核验=%s 影响=%s) ← 合并 %d 条: %s"
                   % (keep_eid, merged.get("verification_status"),
                      merged.get("impact_level") or "未研判", len(drops),

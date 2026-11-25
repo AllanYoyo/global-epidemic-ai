@@ -38,7 +38,7 @@ import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from normalize import biz_today, biz_now, DATA_DIR
@@ -944,10 +944,26 @@ def extract(date_str, log=print):
     raw_dir = os.path.join(DATA_DIR, "raw", date_str)
     out_path = os.path.join(raw_dir, "extracted-policy.jsonl")
     skip = done_urls(date_str)
-    archives = [a for a in load_archives(date_str) if a[2] and a[2] not in skip]
+    all_archives = [a for a in load_archives(date_str) if a[2] and a[2] not in skip]
+    # ---- 台账过滤(2026-11-25, known-issues M49) ----
+    # 7 天回看窗口 × 逐日重存档(生产实测 ePing 候选 82% 是重存档): 内容已在
+    # 台账里的不再重抽 —— 重抽的输出是又一次掷骰子的 action_type, 标签一漂移
+    # 就新开一条 first_seen=当天的"假新增"。读不到台账时全放行(退回旧行为)。
+    ledger_keys = ledger_doc_keys()
+    archives, skipped = partition_by_ledger(all_archives, ledger_keys)
+    n_ledger_skip = len(skipped)
+    if ledger_keys is None:
+        log("[extract_records][WARN] 读不到台账, 本轮不做「已在台账」过滤"
+            "(退回旧行为, 窗口内的重存档会被重抽)")
+    if n_ledger_skip:
+        log("[extract_records] 台账过滤: 跳过 %d 份已入库通报的重存档"
+            "(不重抽, first_seen 不再被刷新成当天)" % n_ledger_skip)
+        for _mp, _meta, s_url, _body in skipped:
+            _log_line(raw_dir, "| 抽取 | 已在台账 | %s |" % s_url)
     if not archives:
-        log("[extract_records] %s: 无待抽取存档(共 %d 份, 已抽 %d)"
-            % (date_str, len(load_archives(date_str)), len(skip)))
+        log("[extract_records] %s: 无待抽取存档(共 %d 份, 已抽 %d, 台账已有 %d)"
+            % (date_str, len(load_archives(date_str)), len(skip), n_ledger_skip))
+        _write_skip_state(raw_dir, n_ledger_skip, 0, 0)
         return 0, 0
     backend = backend_name()
     workers = max(1, EXTRACT_WORKERS)
@@ -1046,6 +1062,7 @@ def extract(date_str, log=print):
     log("[extract_records] 用量: 调用 %d 次 输入 %d / 输出 %d token | 单份 p50=%.1fs p90=%.1fs max=%.1fs"
         % (row["calls"], row["input_tokens"], row["output_tokens"],
            row["p50_sec"], row["p90_sec"], row["max_sec"]))
+    _write_skip_state(raw_dir, n_ledger_skip, n_ok, n_fail)
     return n_ok, n_fail
 
 
@@ -1075,14 +1092,65 @@ def _doc_key(url):
 
     只比完整 URL 会漏判 —— 同一则政策的 SPS 附件与解释文件是两个 URL, 但内容
     是同一件事。台账里只要有其中一个, 这条就不该再补。
+
+    查询串身份链接(2026-11-25 修, known-issues M50): 无 PDF 附件的通报走
+    docs.wto.org 直链(directdoc.asp?DDFDocuments/T/G/SPS/NTHA807A1.docx),
+    身份在**查询串**里; 旧版"非 WTO 一律去查询串"把 53 条这类链接坍缩成
+    6 个键(一个键压 38 条) —— 台账键集合被污染, 补抽的"已在台账"判定会把
+    所有 docs.wto.org 存档误判成同一份文档。DDFDocuments/ 路径段与 ePing
+    viewData 参数(旧 Agent 时代链接)各自编码通报文号, 提出来做键。
     """
     m = re.search(r"/(26_\d{4,6})", url or "")
     if m:
         return m.group(1)
-    # 非 WTO: 去掉查询串与末尾斜杠 —— 容忍 ?/# 与尾斜杠的写法差异, 否则同一条
+    m = re.search(r"DDFDocuments/([^?\s&#]+)", url or "", re.I)
+    if m:
+        return "DDF:" + m.group(1).lower()
+    m = re.search(r"[?&]viewData=([^&\s]+)", url or "")
+    if m:
+        return "EP:" + unquote(m.group(1)).strip().upper()
+    # 其余: 去掉查询串与末尾斜杠 —— 容忍 ?/# 与尾斜杠的写法差异, 否则同一条
     # 政策因为 URL 写法微差会被当成"没进过台账"而重复补抽。
     u = (url or "").strip().split("?")[0].split("#")[0].rstrip("/")
     return u
+
+
+def partition_by_ledger(archives, known_keys):
+    """按台账文档键分流: 返回 (待抽取, 已在台账)。
+
+    为什么需要(2026-11-25, known-issues M49): fetch_eping 回看 7 天窗口, 而存档
+    去重只认当天 candidates.jsonl —— 同一份通报在窗口内**逐日重新存档**, 抽取段
+    也逐日重抽(生产实测 11-11~11-25: ePing 候选 508 份里 418 份是重存档)。
+    每次重抽都是对 action_type 的一次重新掷骰子, 标签一漂移, dedup_key 就不同,
+    入库端新开记录且 first_seen=当天 —— 旧政策被当成"今日新增"推出去, 且台账
+    里同一文档堆出多条记录(实测 95 组 / 多出 109 条)。
+
+    known_keys 传 None 表示读不到台账: 全部放行(退回旧行为), 不因台账故障
+    中断抽取 —— 宁可多烧几次调用, 不丢真政策。
+    """
+    if known_keys is None:
+        return list(archives), []
+    pending, skipped = [], []
+    for a in archives:
+        (skipped if _doc_key(a[2]) in known_keys else pending).append(a)
+    return pending, skipped
+
+
+def _write_skip_state(raw_dir, ledger_skip, extracted, failed):
+    """写抽取段状态文件(给 run_scan.sh 产物终检用, M49)。
+
+    终检的「当日有存档但入库 0 条 = 流程断了」会误伤"当日存档全部是已入库
+    通报的重存档(全被台账过滤跳过)"的合法安静日 —— 终检读这份文件的
+    ledger_skip 放行。写失败不阻断抽取: 终检拿不到文件就走保守方向(判失败),
+    不会静默放行。
+    """
+    try:
+        with open(os.path.join(raw_dir, "extract-skip.json"), "w", encoding="utf-8") as f:
+            json.dump({"ledger_skip": int(ledger_skip), "extracted": int(extracted),
+                       "failed": int(failed), "generated_at": biz_now()},
+                      f, ensure_ascii=False)
+    except OSError as exc:
+        print("[extract_records][WARN] 写 extract-skip.json 失败: %s" % exc)
 
 
 def ledger_doc_keys():

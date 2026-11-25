@@ -81,6 +81,11 @@ EXTRA_HINTS = (
     # 法语
     "alerte", "interdiction", "mesure", "releve", "obligation", "importation",
     "exportation", "revision", "exigence",
+    # 英文检疫通报体(2026-11-25 补, M51): 生产实测 22 份非食品 SPS 被丢, 其中
+    # 真检疫措施 6 份 —— 新西兰 IHS 系列(进口卫生标准)、韩国穿孔线虫禁用寄主、
+    # 智利"Modifica resolución"修订决议。它们的标题是"标准名/裸文号", 不含任何
+    # 既有动作词。词根式, 只在标题上匹配(与上面纪律一致):
+    "modifica", "import health standard", "plants for planting", "prohibited host",
 )
 # 明显不是措施变化的关键词(纯背景/通报性质), 命中则降权。
 NEGATIVE_HINTS = ("comment", "consultation", "notification of", "circular", "news")

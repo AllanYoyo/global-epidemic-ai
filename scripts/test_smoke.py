@@ -5693,6 +5693,23 @@ class MergeDupIgnoreActionTests(unittest.TestCase):
         self.assertEqual(len(drops), 1)
         self.assertIn(keep, ("iii", "jjj"))
 
+    def test_plan_takes_earliest_first_seen(self):
+        """M49: 重抽记录内容更丰富被选为主时, first_seen 仍取组内最早
+        (假新增那天的日期不得留在台账里)。"""
+        import merge_duplicates as md
+        url = "https://members.wto.org/crnattachments/2026/SPS/NIC/26_06116_00_s.pdf"
+        a = self._rec("kkk", url, "收紧", "2026-11-21T07:40:00")
+        a["summary_cn"] = "短摘要"
+        b = self._rec("lll", url, "调整", "2026-11-25T07:40:00")
+        b["summary_cn"] = "长得多的摘要" * 10
+        plans = md.plan([a, b], ignore_action=True)
+        self.assertEqual(len(plans), 1)
+        keep, merged = plans[0][1], plans[0][3]
+        # b 正文更全被选为主
+        self.assertEqual(keep, "lll")
+        self.assertEqual(merged["first_seen"], "2026-11-21T07:40:00",
+                         "first_seen 必须是首次发现时间, 不是重抽时间")
+
 
 class InjectionSurfaceGuardTests(unittest.TestCase):
     """H6 注入面三连(2026-11-20 巡检闭环): 台账文本来自外部网页, 不是我们自己写的。

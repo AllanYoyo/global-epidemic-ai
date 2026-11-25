@@ -172,6 +172,14 @@ def plan(records, ignore_action=False):
                     continue
                 merged = merge_duplicate(merged, e)
             merged["event_id"] = primary["event_id"]
+            # first_seen 取组内最早(2026-11-25, M49): 选主按"已核验>已研判>正文更全"
+            # 排, 较晚的重抽记录可能因内容更丰富被选为主 —— 那会让假新增那天的
+            # first_seen 留在台账里(实测: 同一通报 11-21 首报, 11-25 重抽被当成
+            # 「今日新增」)。first_seen 是**事实字段**(首次发现这条政策的时间),
+            # 与谁当主无关, 一律取最早。
+            firsts = [str(e.get("first_seen") or "") for e in sub if e.get("first_seen")]
+            if firsts:
+                merged["first_seen"] = min(firsts)
             drops = [e["event_id"] for e in sub if e["event_id"] != primary["event_id"]]
             plans.append((key, primary["event_id"], drops, merged))
     return plans

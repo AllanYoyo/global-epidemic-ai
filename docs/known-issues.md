@@ -857,6 +857,72 @@
 - 回归: 新增 2 例(字符串 tier 的两道闸都生效 + 落库为 int; `gub.uy` 官方域放行),
   含反向证明: 把归一退化成恒等后, 「非官方主机 + tier='1'」零错误放行(洞确实存在)。
 
+#### M49 · ePing 7 天窗口 × 逐日重存档 × 重抽掷骰子 —— 旧政策反复伪装成「今日新增」(高, 已修)
+- 位置: `scripts/extract_records.py`(`partition_by_ledger` + `extract()`)、
+  `scripts/run_scan.sh`(终检放行口)、`scripts/merge_duplicates.py`(`--ignore-action`)
+- 发现时间: 2026-11-25(用户问「为什么今天日报全是尼加拉瓜」, Hermes 分析给了 4 因素,
+  复核后确认 4 条都在但**漏了主因**)
+- 现象(生产实测, 只读核查脚本跑在生产库上):
+  - `fetch_eping.py` 默认 `--days 7` 回看窗口, 而 `archive_items()` 的存档去重只认
+    **当天** `candidates.jsonl` —— 同一份通报在窗口内**逐日重新存档**;
+    11-11~11-25 实测: ePing 候选 508 份, 其中重存档 **418 份(82%)**;
+  - 抽取段 `done_urls()` 也只认当天 → 重存档被**逐日重抽**。每次重抽是对
+    `action_type` 的一次重新掷骰子(「一品一决议」型通报无前态可比, 收紧/调整
+    本来就难分), 标签一漂移, `dedup_key` 四要素键就不同 → 入库端**新开记录**
+    且 `first_seen=当天` → 旧政策进日报「今日新增」;
+  - 台账里同一 WTO 文档多记录 **95 组 / 多出 109 条**(58 组是 WTO 单文档,
+    其中 46 对仅动作不同); 11-11 起逐日「假新增」合计 **48/146**。
+  - 2026-11-25 当天: 日报 7 条「新增」里 2 条(`26_06116`/`26_06121`)是 11-21
+    就入过库的旧通报换了动作标签; 全库 top1 尼加拉瓜 80/479 条, 直接现象即此。
+- 修法(三件套):
+  1. **主抽取段加台账过滤**: `extract()` 调 LLM 前按**文档键**分流(`ledger_doc_keys`
+     已有, 补抽段在用) —— 内容已在台账的重存档不再重抽, `first_seen` 不再被刷新;
+     读不到台账时全放行(fail-open, 不因台账故障中断抽取)。跳过逐条落
+     search-log(`| 抽取 | 已在台账 |` 行)。
+  2. **终检放行口**: 全部存档被台账过滤跳过的日子, 库里没有 first_seen=当天,
+     `run_scan.sh` 的「有存档但入库 0 条 = 流程断了」闸会误判成跑批失败。
+     抽取段写 `data/raw/<日期>/extract-skip.json`(ledger_skip/extracted/failed),
+     终检读到 `ledger_skip >= RAW_N` 判合法安静日; 文件缺失按 0 走保守方向。
+  3. **存量清理**: `merge_duplicates.py --ignore-action` —— 分组键对 **WTO 通报
+     文档 URL**(crnattachments/26_xxxxx、DDFDocuments 直链、ePing viewData)
+     忽略动作要素; 非 WTO URL 保持四要素键(滚动页同日多条措施, 主体冲突闸门
+     对无病害名的记录救不了, 宁漏合不错合)。主体冲突闸门照旧生效。
+- 回归: 6 例(doc_key 查询串身份 / 台账分流 / extract-skip.json / ignore-action
+  分组×4)。**验证时差点踩的坑**: 直接复用旧版 `_doc_key` 会把所有 DDF 直链坍缩
+  成一个键(见 M50), 台账过滤会把所有无 PDF 通报误判成同一份 —— 先在生产库上
+  实测键碰撞分布才定的修法。
+
+#### M50 · `_doc_key` 把查询串身份链接坍缩成 6 个键 —— 一个键压 38 条(中, 已修)
+- 位置: `scripts/extract_records.py` `_doc_key()`
+- 发现时间: 2026-11-25(做 M49 时对生产库实测键碰撞分布发现)
+- 现象: 无 PDF 附件的通报走 `docs.wto.org/imrd/directdoc.asp?DDFDocuments/T/G/SPS/
+  NTHA807A1.docx` 直链, **身份在查询串里**; 旧版「非 WTO 一律去查询串」把它们
+  全部剥成 `https://docs.wto.org/imrd/directdoc.asp` —— 生产台账 53 条这类链接
+  坍缩成 **6 个键, 一个键压 38 条**。M49 的台账过滤若直接复用旧键, 所有 DDF
+  存档会被误判成「同一份已在台账的文档」而整片跳过(丢真政策)。ePing 旧 Agent
+  时代链接(`eping.wto.org/...?viewData=G%2FSPS%2F...`)同理。
+- 修法: 文档键识别三段式 —— `26_xxxxx` 附件编号(原样保留)/ `DDFDocuments/` 路径段
+  (取小写)/ `viewData` 参数(URL 解码后取大写); 其余仍去查询串。
+- 回归: `test_doc_key_keeps_query_string_identity`(不同 docx 不同键、同 viewData
+  不同转义同键、与普通 URL 键不碰撞)。
+
+#### M51 · `_is_action` 预筛漏英文检疫通报体 —— IHS 标准名/裸文号标题整片被丢(中, 已修)
+- 位置: `scripts/parse_eping.py` `EXTRA_HINTS`
+- 发现时间: 2026-11-25(生产全历史回扫, 与 Hermes 报的「8 条被误杀」对账: 实为
+  22 份非食品 SPS 被丢, 其中真检疫 6 份, Hermes 漏了 CHL/902)
+- 现象: 生产实测(2026-09-19~11-25 窗口, 按文号去重)非食品被丢 22 份, 真检疫 6 份:
+  新西兰 IHS 系列(`NZL/797` Import health standard: Plants for Planting、
+  `NZL/798` Citrus/Prunus 种苗、`NZL/785/Add.1` Vehicles/Machinery、
+  `NZL/787/Add.1` Adoption Date)、韩国 `KOR/248/Add.29`(Add of prohibited host,
+  穿孔线虫禁用寄主)、智利 `CHL/902`(Modifica resolución, 西语修订决议)。
+  共同点: 标题是**标准名或裸文号**, 无任何既有动作词; 英文侧缺口与多语种无关
+  (西语 `requisitos fitosanitarios` 本就能通过预筛)。
+- 修法: `EXTRA_HINTS` 补 4 个词根(只在标题上匹配, 与既有纪律一致):
+  `modifica` / `import health standard` / `plants for planting` / `prohibited host`。
+  食品类标题(如 "Flavoured Milk")不在词表, 照旧被丢 —— kw 标签不作数的原则不变。
+- 回归: `test_english_quarantine_titles_are_matched`(6 例: 5 真检疫放行 + 1 食品
+  保持丢弃)。
+
 #### 复核剔除的误报(留档, 免得下次再查一遍)
 - 「`fetch-status.json` 陈旧文件在跳过取数的轮次仍参与基础设施判定」—— 不成立:
   `run_scan.sh` 的取数段是 `if [ -n "$FETCH_SKIP" ] … elif [ "$AGENT_MODE" != "1" ]` 结构,
